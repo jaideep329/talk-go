@@ -130,7 +130,7 @@ func (t *TTSPlayer) callLLM(userMessage string) {
 		log.Println("json marshal error:", err)
 		return
 	}
-	channel := make(chan string)
+	channel := make(chan string, 100)
 	go t.runTTS(channel) // start TTS in parallel so it can play chunks as they arrive
 	req, err := http.NewRequest("POST", "https://api.openai.com/v1/chat/completions", bytes.NewReader(jsonBody))
 	if err != nil {

@@ -1,0 +1,6 @@
+.env
+*.log
+*.raw
+*.wav
+awesomeProject
+.idea/

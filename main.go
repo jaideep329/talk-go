@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"math/rand/v2"
 	"net/http"
@@ -86,6 +87,8 @@ func callLLM(userMessage string) {
 		log.Println("json marshal error:", err)
 		return
 	}
+	channel := make(chan string)
+	go runTTS(channel) // start TTS in parallel so it can play chunks as they arrive
 	req, err := http.NewRequest("POST", "https://api.openai.com/v1/chat/completions", bytes.NewReader(jsonBody))
 	if err != nil {
 		log.Println("request error:", err)
@@ -127,43 +130,25 @@ func callLLM(userMessage string) {
 			content := chunk.Choices[0].Delta.Content
 			fmt.Print(content)
 			responseText += content
+			channel <- content
 		}
 	}
-	runTTS(responseText)
+	close(channel) // signal TTS that response is complete
 	fmt.Println()
 }
 
-func runTTS(text string) {
-	println("\nRunning TTS")
-
-	conn, _, err := websocket.DefaultDialer.Dial("wss://api.cartesia.ai/tts/websocket?cartesia_version=2025-04-16&api_key="+os.Getenv("CARTESIA_API_KEY"), nil)
-	if err != nil {
-		log.Println("TTS websocket connect failed:", err)
-		return
-	}
-	defer conn.Close()
+func runSentenceTTS(sentence string, conn *websocket.Conn, playerIn io.WriteCloser, contextId string) {
+	println("\nRunning TTS for sentence:", sentence)
 	payload := map[string]interface{}{
 		"model_id":      "sonic-3",
-		"transcript":    text,
+		"transcript":    sentence,
 		"voice":         map[string]interface{}{"mode": "id", "id": "f786b574-daa5-4673-aa0c-cbe3e8534c02"},
 		"output_format": map[string]interface{}{"container": "raw", "encoding": "pcm_s16le", "sample_rate": 24000},
-		"context_id":    fmt.Sprintf("ctx-%d", rand.IntN(9000000)),
-		"continue":      false,
+		"context_id":    contextId,
+		"continue":      true,
 	}
 	if err := conn.WriteJSON(payload); err != nil {
 		log.Println("failed to send TTS payload:", err)
-		return
-	}
-
-	// Create a buffered writer
-	player := exec.Command("ffplay", "-f", "s16le", "-ar", "24000", "-ch_layout", "mono", "-nodisp", "-autoexit", "-")
-	playerIn, err := player.StdinPipe()
-	if err != nil {
-		log.Println("failed to create player stdin pipe:", err)
-		return
-	}
-	if err := player.Start(); err != nil {
-		log.Println("failed to start player:", err)
 		return
 	}
 	for {
@@ -201,6 +186,43 @@ func runTTS(text string) {
 			break
 		}
 	}
+}
+
+func runTTS(channel chan string) {
+	println("\nRunning TTS")
+
+	conn, _, err := websocket.DefaultDialer.Dial("wss://api.cartesia.ai/tts/websocket?cartesia_version=2025-04-16&api_key="+os.Getenv("CARTESIA_API_KEY"), nil)
+	if err != nil {
+		log.Println("TTS websocket connect failed:", err)
+		return
+	}
+	defer conn.Close()
+
+	// Create a buffered writer
+	player := exec.Command("ffplay", "-f", "s16le", "-ar", "24000", "-ch_layout", "mono", "-nodisp", "-autoexit", "-")
+	playerIn, err := player.StdinPipe()
+	if err != nil {
+		log.Println("failed to create player stdin pipe:", err)
+		return
+	}
+	if err := player.Start(); err != nil {
+		log.Println("failed to start player:", err)
+		return
+	}
+	currentSentence := ""
+	contextId := fmt.Sprintf("ctx-%d", rand.IntN(9000000))
+	for msg := range channel {
+		currentSentence += msg
+		if i := strings.LastIndexAny(currentSentence, ".?!"); i != -1 && i < len(currentSentence)-1 {
+			toSpeak := currentSentence[:i+1]
+			currentSentence = currentSentence[i+1:]
+			runSentenceTTS(toSpeak, conn, playerIn, contextId)
+		}
+	}
+	if currentSentence != "" {
+		runSentenceTTS(currentSentence, conn, playerIn, contextId)
+	}
+
 	err = playerIn.Close()
 	if err != nil {
 		return

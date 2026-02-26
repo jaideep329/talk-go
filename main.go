@@ -27,6 +27,33 @@ type SonioxResponseMessage struct {
 	Finished bool          `json:"finished"`
 }
 
+type TTSPlayer struct {
+	conn     *websocket.Conn
+	playerIn io.WriteCloser
+	player   *exec.Cmd
+}
+
+func initializeAudioPlayer() (*TTSPlayer, error) {
+	conn, _, err := websocket.DefaultDialer.Dial("wss://api.cartesia.ai/tts/websocket?cartesia_version=2025-04-16&api_key="+os.Getenv("CARTESIA_API_KEY"), nil)
+	if err != nil {
+		log.Println("TTS websocket connect failed:", err)
+		return nil, err
+	}
+
+	// Create a buffered writer
+	player := exec.Command("ffplay", "-f", "s16le", "-ar", "24000", "-ch_layout", "mono", "-nodisp", "-autoexit", "-")
+	playerIn, err := player.StdinPipe()
+	if err != nil {
+		log.Println("failed to create player stdin pipe:", err)
+		return nil, err
+	}
+	if err := player.Start(); err != nil {
+		log.Println("failed to start player:", err)
+		return nil, err
+	}
+	return &TTSPlayer{conn: conn, playerIn: playerIn, player: player}, nil
+}
+
 func main() {
 	loadEnv(".env")
 	cmd := exec.Command("ffmpeg",
@@ -49,10 +76,14 @@ func main() {
 	}
 
 	conn := initializeSonioxWebsocket()
+	ttsPlayer, err := initializeAudioPlayer()
+	if err != nil {
+		log.Fatal("failed to initialize TTS player:", err)
+	}
 	defer conn.Close()
 
 	done := make(chan struct{})
-	go readWebsocketLoop(conn, done)
+	go readWebsocketLoop(conn, done, ttsPlayer)
 
 	buf := make([]byte, 3200) // 100ms of audio at 16kHz, 16-bit mono
 	for {
@@ -70,10 +101,22 @@ func main() {
 	conn.WriteMessage(websocket.CloseMessage,
 		websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
 	<-done
+	err = ttsPlayer.playerIn.Close()
+	if err != nil {
+		return
+	}
+	err = ttsPlayer.player.Wait()
+	if err != nil {
+		return
+	}
+	err = ttsPlayer.conn.Close()
+	if err != nil {
+		return
+	}
 	fmt.Println("audio stream ended")
 }
 
-func callLLM(userMessage string) {
+func (t *TTSPlayer) callLLM(userMessage string) {
 	body := map[string]interface{}{
 		"model":  "gpt-4.1",
 		"stream": true,
@@ -88,7 +131,7 @@ func callLLM(userMessage string) {
 		return
 	}
 	channel := make(chan string)
-	go runTTS(channel) // start TTS in parallel so it can play chunks as they arrive
+	go t.runTTS(channel) // start TTS in parallel so it can play chunks as they arrive
 	req, err := http.NewRequest("POST", "https://api.openai.com/v1/chat/completions", bytes.NewReader(jsonBody))
 	if err != nil {
 		log.Println("request error:", err)
@@ -137,7 +180,7 @@ func callLLM(userMessage string) {
 	fmt.Println()
 }
 
-func runSentenceTTS(sentence string, conn *websocket.Conn, playerIn io.WriteCloser, contextId string) {
+func (t *TTSPlayer) runSentenceTTS(sentence string, contextId string) {
 	println("\nRunning TTS for sentence:", sentence)
 	payload := map[string]interface{}{
 		"model_id":      "sonic-3",
@@ -147,12 +190,12 @@ func runSentenceTTS(sentence string, conn *websocket.Conn, playerIn io.WriteClos
 		"context_id":    contextId,
 		"continue":      true,
 	}
-	if err := conn.WriteJSON(payload); err != nil {
+	if err := t.conn.WriteJSON(payload); err != nil {
 		log.Println("failed to send TTS payload:", err)
 		return
 	}
 	for {
-		_, msg, err := conn.ReadMessage()
+		_, msg, err := t.conn.ReadMessage()
 		if err != nil {
 			log.Println("TTS read error:", err)
 			return
@@ -175,7 +218,7 @@ func runSentenceTTS(sentence string, conn *websocket.Conn, playerIn io.WriteClos
 				log.Println("base64 decode error:", err)
 				continue
 			}
-			_, err = playerIn.Write(encodedBytes)
+			_, err = t.playerIn.Write(encodedBytes)
 			if err != nil {
 				log.Println("failed to write to player stdin:", err)
 			}
@@ -188,27 +231,9 @@ func runSentenceTTS(sentence string, conn *websocket.Conn, playerIn io.WriteClos
 	}
 }
 
-func runTTS(channel chan string) {
+func (t *TTSPlayer) runTTS(channel chan string) {
 	println("\nRunning TTS")
 
-	conn, _, err := websocket.DefaultDialer.Dial("wss://api.cartesia.ai/tts/websocket?cartesia_version=2025-04-16&api_key="+os.Getenv("CARTESIA_API_KEY"), nil)
-	if err != nil {
-		log.Println("TTS websocket connect failed:", err)
-		return
-	}
-	defer conn.Close()
-
-	// Create a buffered writer
-	player := exec.Command("ffplay", "-f", "s16le", "-ar", "24000", "-ch_layout", "mono", "-nodisp", "-autoexit", "-")
-	playerIn, err := player.StdinPipe()
-	if err != nil {
-		log.Println("failed to create player stdin pipe:", err)
-		return
-	}
-	if err := player.Start(); err != nil {
-		log.Println("failed to start player:", err)
-		return
-	}
 	currentSentence := ""
 	contextId := fmt.Sprintf("ctx-%d", rand.IntN(9000000))
 	for msg := range channel {
@@ -216,26 +241,15 @@ func runTTS(channel chan string) {
 		if i := strings.LastIndexAny(currentSentence, ".?!"); i != -1 && i < len(currentSentence)-1 {
 			toSpeak := currentSentence[:i+1]
 			currentSentence = currentSentence[i+1:]
-			runSentenceTTS(toSpeak, conn, playerIn, contextId)
+			t.runSentenceTTS(toSpeak, contextId)
 		}
 	}
 	if currentSentence != "" {
-		runSentenceTTS(currentSentence, conn, playerIn, contextId)
+		t.runSentenceTTS(currentSentence, contextId)
 	}
-
-	err = playerIn.Close()
-	if err != nil {
-		return
-	} // signals EOF to ffplay — it plays remaining audio and exits
-	err = player.Wait()
-	if err != nil {
-		return
-	}
-	println("TTS synthesis complete")
-
 }
 
-func readWebsocketLoop(conn *websocket.Conn, done chan struct{}) {
+func readWebsocketLoop(conn *websocket.Conn, done chan struct{}, ttsPlayer *TTSPlayer) {
 	defer close(done)
 	var transcript string
 	for {
@@ -253,7 +267,7 @@ func readWebsocketLoop(conn *websocket.Conn, done chan struct{}) {
 			if token.IsFinal {
 				if token.Text == "<end>" {
 					println("[You]: " + transcript)
-					go callLLM(transcript)
+					go ttsPlayer.callLLM(transcript)
 					transcript = ""
 				} else {
 					transcript += token.Text

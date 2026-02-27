@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
 	"log"
 	"os"
 
@@ -88,9 +87,4 @@ func writeAudioInToSTTWebsocket(done chan struct{}) {
 	sttConn.WriteMessage(websocket.CloseMessage,
 		websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
 	<-done
-	err := ttsConn.Close()
-	if err != nil {
-		return
-	}
-	fmt.Println("audio stream ended")
 }

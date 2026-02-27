@@ -6,7 +6,7 @@ import (
 	"os/exec"
 )
 
-func intiailizeAudioOutputStream() (io.WriteCloser, *exec.Cmd) {
+func initializeAudioOutputStream() (io.WriteCloser, *exec.Cmd) {
 	player := exec.Command("ffmpeg", "-f", "s16le", "-ar", "24000", "-ac", "1", "-i", "pipe:0", "-f", "audiotoolbox", "-")
 	playerIn, err := player.StdinPipe()
 	if err != nil {

@@ -81,7 +81,7 @@ func runSentenceTTS(sentence string, contextId string, playerIn io.WriteCloser) 
 func runTTS(channel chan string) {
 	log.Println("[TTS] runTTS started")
 
-	audioOutputStream, audioOutputProcessRef := intiailizeAudioOutputStream()
+	audioOutputStream, audioOutputProcessRef := initializeAudioOutputStream()
 
 	currentSentence := ""
 	contextId := fmt.Sprintf("ctx-%d", rand.IntN(9000000))

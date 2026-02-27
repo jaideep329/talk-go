@@ -14,6 +14,7 @@ func main() {
 	initializeSonioxWebsocket()
 	initializeTTSWebsocket()
 	defer sttConn.Close()
+	defer ttsConn.Close()
 	done := make(chan struct{})
 	go readSTTWebsocketLoop(done)
 	writeAudioInToSTTWebsocket(done)

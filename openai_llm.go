@@ -11,14 +11,17 @@ import (
 	"strings"
 )
 
+var messages []map[string]string
+
 func callLLM(userMessage string) {
+	if len(messages) == 0 {
+		messages = append(messages, map[string]string{"role": "system", "content": "You are a helpful assistant. Keep responses to 1-2 short sentences maximum. Be brief."})
+	}
+	messages = append(messages, map[string]string{"role": "user", "content": userMessage})
 	body := map[string]interface{}{
-		"model":  "gpt-4.1",
-		"stream": true,
-		"messages": []map[string]string{
-			{"role": "system", "content": "You are a helpful voice assistant. Keep responses to 1-2 short sentences maximum. Be brief."},
-			{"role": "user", "content": userMessage},
-		},
+		"model":    "gpt-4.1",
+		"stream":   true,
+		"messages": messages,
 	}
 	jsonBody, err := json.Marshal(body)
 	if err != nil {
@@ -73,4 +76,5 @@ func callLLM(userMessage string) {
 	}
 	close(channel) // signal TTS that response is complete
 	fmt.Println()
+	messages = append(messages, map[string]string{"role": "assistant", "content": responseText})
 }

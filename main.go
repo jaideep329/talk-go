@@ -1,7 +1,9 @@
 package main
 
 import (
+	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"strings"
 )
@@ -10,15 +12,20 @@ func main() {
 	loadEnv(".env")
 	appLog, _ := os.Create("app.log")
 	log.SetOutput(appLog)
-	initializeAudioCapture()
 	initializeSonioxWebsocket()
 	initializeTTSWebsocket()
 	defer sttConn.Close()
 	defer ttsConn.Close()
-	done := make(chan struct{})
-	go readSTTWebsocketLoop(done)
-	writeAudioInToSTTWebsocket(done)
-
+	joinRoom()
+	go readSTTWebsocketLoop()
+	http.HandleFunc("/getToken", handleGetToken)
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		http.ServeFile(w, r, "livekit-client.html")
+	})
+	fmt.Println("HTTP server listening on :3000")
+	if err := http.ListenAndServe(":3000", nil); err != nil {
+		log.Fatal("HTTP server error:", err)
+	}
 }
 
 func loadEnv(path string) {

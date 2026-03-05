@@ -2,15 +2,18 @@ package main
 
 import (
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"math/rand/v2"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/hraban/opus"
+	"github.com/pion/webrtc/v4/pkg/media"
 )
 
 var ttsConn *websocket.Conn
@@ -31,8 +34,9 @@ func initializeTTSWebsocket() {
 	ttsConn = conn
 }
 
-func runSentenceTTS(sentence string, contextId string, playerIn io.WriteCloser) {
+func runSentenceTTS(sentence string, contextId string, encoder *opus.Encoder) {
 	log.Println("[TTS] sending sentence:", sentence[:min(50, len(sentence))])
+	var pcmBuf []byte
 	payload := map[string]interface{}{
 		"model_id":      "sonic-3",
 		"transcript":    sentence,
@@ -63,11 +67,31 @@ func runSentenceTTS(sentence string, contextId string, playerIn io.WriteCloser) 
 				log.Println("base64 decode error:", err)
 				continue
 			}
-			n, err := playerIn.Write(encodedBytes)
-			if err != nil {
-				log.Println("[TTS] write to player FAILED:", err)
-			} else {
-				log.Printf("[TTS] wrote %d bytes to player", n)
+			pcmBuf = append(pcmBuf, encodedBytes...)
+			for len(pcmBuf) >= 960 {
+				// Convert bytes to int16 samples
+				frame := make([]int16, 480)
+				for i := 0; i < 480; i++ {
+					frame[i] = int16(binary.LittleEndian.Uint16(pcmBuf[i*2:]))
+				}
+				pcmBuf = pcmBuf[960:]
+
+				// Encode to Opus
+				opusData := make([]byte, 1000)
+				n, err := encoder.Encode(frame, opusData)
+				if err != nil {
+					log.Println("opus encode error:", err)
+					continue
+				}
+
+				// Write to LiveKit track
+				err = botTrack.WriteSample(media.Sample{
+					Data:     opusData[:n],
+					Duration: 20 * time.Millisecond,
+				}, nil)
+				if err != nil {
+					log.Println("track write error:", err)
+				}
 			}
 
 		} else if resp.Error != "" {
@@ -80,8 +104,11 @@ func runSentenceTTS(sentence string, contextId string, playerIn io.WriteCloser) 
 
 func runTTS(channel chan string) {
 	log.Println("[TTS] runTTS started")
-
-	audioOutputStream, audioOutputProcessRef := initializeAudioOutputStream()
+	encoder, err := opus.NewEncoder(24000, 1, opus.AppVoIP)
+	if err != nil {
+		log.Println("failed to create opus encoder:", err)
+		return
+	}
 
 	currentSentence := ""
 	contextId := fmt.Sprintf("ctx-%d", rand.IntN(9000000))
@@ -91,14 +118,11 @@ func runTTS(channel chan string) {
 			toSpeak := currentSentence[:i+1]
 			currentSentence = currentSentence[i+1:]
 			if strings.TrimSpace(toSpeak) != "" {
-				runSentenceTTS(toSpeak, contextId, audioOutputStream)
+				runSentenceTTS(toSpeak, contextId, encoder)
 			}
 		}
 	}
 	if strings.TrimSpace(currentSentence) != "" {
-		runSentenceTTS(currentSentence, contextId, audioOutputStream)
+		runSentenceTTS(currentSentence, contextId, encoder)
 	}
-
-	audioOutputStream.Close()
-	audioOutputProcessRef.Wait()
 }

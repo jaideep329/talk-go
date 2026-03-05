@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LiveKit Room</title>
+  <style>
+    body { font-family: sans-serif; max-width: 800px; margin: 2rem auto; padding: 0 1rem; }
+    #status { padding: 0.5rem; margin: 1rem 0; border-radius: 4px; background: #f0f0f0; }
+    #controls { margin: 1rem 0; }
+    button { padding: 0.5rem 1rem; margin-right: 0.5rem; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <h1>LiveKit Room Client</h1>
+
+  <div id="status">Disconnected</div>
+
+  <div id="controls">
+    <button id="btn-connect">Connect</button>
+    <button id="btn-disconnect" disabled>Disconnect</button>
+    <button id="btn-toggle-mic" disabled>Mute Mic</button>
+  </div>
+
+  <div id="remote-audio"></div>
+
+  <script type="module">
+    const ROOM_NAME = "default-room";
+    const IDENTITY = "web-user";
+
+    const {
+      Room,
+      RoomEvent,
+    } = await import("https://cdn.jsdelivr.net/npm/livekit-client@2/dist/livekit-client.esm.mjs");
+
+    const statusEl = document.getElementById("status");
+    const remoteAudioEl = document.getElementById("remote-audio");
+    const btnConnect = document.getElementById("btn-connect");
+    const btnDisconnect = document.getElementById("btn-disconnect");
+    const btnToggleMic = document.getElementById("btn-toggle-mic");
+
+    let room = null;
+
+    function setStatus(msg) {
+      statusEl.textContent = msg;
+    }
+
+    function setConnectedUI(connected) {
+      btnConnect.disabled = connected;
+      btnDisconnect.disabled = !connected;
+      btnToggleMic.disabled = !connected;
+    }
+
+    async function fetchToken() {
+      const res = await fetch("/getToken");
+      if (!res.ok) throw new Error(`Token fetch failed: ${res.statusText}`);
+      return res.json();
+    }
+
+    async function connect() {
+      room = new Room();
+
+      room.on(RoomEvent.Connected, () => {
+        setStatus(`Connected to room: ${room.name}`);
+        setConnectedUI(true);
+      });
+
+      room.on(RoomEvent.Disconnected, () => {
+        setStatus("Disconnected");
+        setConnectedUI(false);
+        remoteAudioEl.innerHTML = "";
+      });
+
+      room.on(RoomEvent.TrackSubscribed, (track, _pub, participant) => {
+        const el = track.attach();
+        el.dataset.participantId = participant.identity;
+        el.dataset.trackSid = track.sid;
+        remoteAudioEl.appendChild(el);
+      });
+
+      room.on(RoomEvent.TrackUnsubscribed, (track) => {
+        for (const el of track.detach()) {
+          el.remove();
+        }
+      });
+
+      room.on(RoomEvent.ParticipantConnected, (p) => {
+        setStatus(`Participant joined: ${p.identity}`);
+      });
+
+      room.on(RoomEvent.ParticipantDisconnected, (p) => {
+        setStatus(`Participant left: ${p.identity}`);
+      });
+
+      setStatus("Fetching token...");
+      try {
+        const { server_url, token } = await fetchToken();
+        setStatus("Connecting...");
+        await room.connect(server_url, token);
+        await room.localParticipant.setMicrophoneEnabled(true);
+      } catch (err) {
+        setStatus(`Error: ${err.message}`);
+        setConnectedUI(false);
+      }
+    }
+
+    function disconnect() {
+      if (room) {
+        room.disconnect();
+        room = null;
+      }
+    }
+
+    btnConnect.addEventListener("click", connect);
+    btnDisconnect.addEventListener("click", disconnect);
+
+    btnToggleMic.addEventListener("click", () => {
+      const enabled = room.localParticipant.isMicrophoneEnabled;
+      room.localParticipant.setMicrophoneEnabled(!enabled);
+      btnToggleMic.textContent = enabled ? "Unmute Mic" : "Mute Mic";
+    });
+  </script>
+</body>
+</html>

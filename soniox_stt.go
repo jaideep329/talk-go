@@ -41,8 +41,7 @@ func initializeSonioxWebsocket() {
 	sttConn = conn
 }
 
-func readSTTWebsocketLoop(done chan struct{}) {
-	defer close(done)
+func readSTTWebsocketLoop() {
 	var transcript string
 	for {
 		_, msg, err := sttConn.ReadMessage()

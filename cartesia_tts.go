@@ -92,18 +92,40 @@ func runSentenceTTS(sentence string, contextId string, encoder *opus.Encoder) {
 				if err != nil {
 					log.Println("track write error:", err)
 				}
+				time.Sleep(20 * time.Millisecond)
 			}
 
 		} else if resp.Error != "" {
-			println("TTS error:", resp.Error)
+			log.Println("TTS error:", resp.Error)
 		} else if resp.Done {
 			break
+		}
+	}
+
+	// Flush remaining PCM
+	if len(pcmBuf) > 0 {
+		for len(pcmBuf) < 960 {
+			pcmBuf = append(pcmBuf, 0, 0)
+		}
+		frame := make([]int16, 480)
+		for i := 0; i < 480; i++ {
+			frame[i] = int16(binary.LittleEndian.Uint16(pcmBuf[i*2:]))
+		}
+		opusData := make([]byte, 1000)
+		n, err := encoder.Encode(frame, opusData)
+		if err == nil {
+			botTrack.WriteSample(media.Sample{
+				Data:     opusData[:n],
+				Duration: 20 * time.Millisecond,
+			}, nil)
 		}
 	}
 }
 
 func runTTS(channel chan string) {
 	log.Println("[TTS] runTTS started")
+	initializeTTSWebsocket()
+	defer ttsConn.Close()
 	encoder, err := opus.NewEncoder(24000, 1, opus.AppVoIP)
 	if err != nil {
 		log.Println("failed to create opus encoder:", err)

@@ -12,12 +12,7 @@ func main() {
 	loadEnv(".env")
 	appLog, _ := os.Create("app.log")
 	log.SetOutput(appLog)
-	initializeSonioxWebsocket()
-	initializeTTSWebsocket()
-	defer sttConn.Close()
-	defer ttsConn.Close()
 	joinRoom()
-	go readSTTWebsocketLoop()
 	http.HandleFunc("/getToken", handleGetToken)
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		http.ServeFile(w, r, "livekit-client.html")

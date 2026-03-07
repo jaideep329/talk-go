@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"log"
 	"os"
+	"sync"
 
 	"github.com/gorilla/websocket"
 	"github.com/hraban/opus"
@@ -13,6 +14,8 @@ import (
 
 var room *lksdk.Room
 var botTrack *lksdk.LocalSampleTrack
+var audioMu sync.Mutex
+var activeTrackID string
 
 func joinRoom() {
 	var err error
@@ -53,6 +56,16 @@ func onTrackSubscribed(track *webrtc.TrackRemote, pub *lksdk.RemoteTrackPublicat
 	if track.Kind() != webrtc.RTPCodecTypeAudio {
 		return
 	}
+
+	audioMu.Lock()
+	// Close old Soniox connection if there was one (stops old goroutines)
+	if sttConn != nil {
+		sttConn.Close()
+	}
+	activeTrackID = track.ID()
+	initializeSonioxWebsocket()
+	go readSTTWebsocketLoop()
+	audioMu.Unlock()
 
 	go readAudioTrack(track)
 }

@@ -126,8 +126,6 @@ func runSentenceTTS(sentence string, contextId string, encoder *opus.Encoder) {
 
 func runTTS(channel chan string) {
 	log.Println("[TTS] runTTS started")
-	initializeTTSWebsocket()
-	defer ttsConn.Close()
 	encoder, err := opus.NewEncoder(24000, 1, opus.AppVoIP)
 	if err != nil {
 		log.Println("failed to create opus encoder:", err)

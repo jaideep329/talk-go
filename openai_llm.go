@@ -15,7 +15,7 @@ var messages []map[string]string
 
 func callLLM(userMessage string) {
 	if len(messages) == 0 {
-		messages = append(messages, map[string]string{"role": "system", "content": "You are a helpful assistant. Keep responses to 1-2 short sentences maximum. Be brief."})
+		messages = append(messages, map[string]string{"role": "system", "content": "You are a helpful assistant. Always respond in exactly 2 sentences. Never respond with just 1 sentence."})
 	}
 	messages = append(messages, map[string]string{"role": "user", "content": userMessage})
 	body := map[string]interface{}{

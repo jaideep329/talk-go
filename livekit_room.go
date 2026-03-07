@@ -57,11 +57,15 @@ func onTrackSubscribed(track *webrtc.TrackRemote, pub *lksdk.RemoteTrackPublicat
 	}
 
 	audioMu.Lock()
-	// Close old Soniox connection if there was one (stops old goroutines)
+	// Close old connections if there were any (stops old goroutines)
 	if sttConn != nil {
 		sttConn.Close()
 	}
+	if ttsConn != nil {
+		ttsConn.Close()
+	}
 	initializeSonioxWebsocket()
+	initializeTTSWebsocket()
 	go readSTTWebsocketLoop()
 	audioMu.Unlock()
 

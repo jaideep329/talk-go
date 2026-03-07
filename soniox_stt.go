@@ -68,22 +68,3 @@ func readSTTWebsocketLoop() {
 		}
 	}
 }
-
-func writeAudioInToSTTWebsocket(done chan struct{}) {
-	buf := make([]byte, 3200) // 100ms of audio at 16kHz, 16-bit mono
-	for {
-		n, err := audioInputStream.Read(buf)
-		if err != nil {
-			log.Println("audio stream ended:", err)
-			break
-		}
-		chunk := buf[:n]
-		if err := sttConn.WriteMessage(websocket.BinaryMessage, chunk); err != nil {
-			log.Println("write error:", err)
-			break
-		}
-	}
-	sttConn.WriteMessage(websocket.CloseMessage,
-		websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
-	<-done
-}

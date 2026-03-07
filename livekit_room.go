@@ -15,7 +15,6 @@ import (
 var room *lksdk.Room
 var botTrack *lksdk.LocalSampleTrack
 var audioMu sync.Mutex
-var activeTrackID string
 
 func joinRoom() {
 	var err error
@@ -62,7 +61,6 @@ func onTrackSubscribed(track *webrtc.TrackRemote, pub *lksdk.RemoteTrackPublicat
 	if sttConn != nil {
 		sttConn.Close()
 	}
-	activeTrackID = track.ID()
 	initializeSonioxWebsocket()
 	go readSTTWebsocketLoop()
 	audioMu.Unlock()

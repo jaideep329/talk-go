@@ -27,12 +27,13 @@ func initializeSonioxWebsocket() {
 	}
 	config := map[string]interface{}{
 		"api_key":                   os.Getenv("SONIOX_API_KEY"),
-		"model":                     "stt-rt-preview",
+		"model":                     "stt-rt-v4",
 		"audio_format":              "s16le",
 		"sample_rate":               16000,
 		"num_channels":              1,
 		"language_hints":            []string{"en"},
 		"enable_endpoint_detection": true,
+		"max_endpoint_delay_ms":     300,
 	}
 	if err := conn.WriteJSON(config); err != nil {
 		log.Fatal("failed to send config:", err)

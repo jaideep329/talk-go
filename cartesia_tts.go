@@ -36,6 +36,8 @@ func initializeTTSWebsocket() {
 
 func runSentenceTTS(sentence string, contextId string, encoder *opus.Encoder) {
 	log.Println("[TTS] sending sentence:", sentence[:min(50, len(sentence))])
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
 	var pcmBuf []byte
 	payload := map[string]interface{}{
 		"model_id":      "sonic-3",
@@ -92,7 +94,7 @@ func runSentenceTTS(sentence string, contextId string, encoder *opus.Encoder) {
 				if err != nil {
 					log.Println("track write error:", err)
 				}
-				time.Sleep(20 * time.Millisecond)
+				<-ticker.C
 			}
 
 		} else if resp.Error != "" {

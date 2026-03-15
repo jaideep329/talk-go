@@ -86,27 +86,32 @@ Two processor patterns exist:
 
 ### What Needs to Happen Next
 
-The pipeline refactor needs these processors implemented (in suggested order):
+#### Remaining processors (in suggested order):
 
-1. **Audio Source Processor** — reads from LiveKit `*webrtc.TrackRemote`, decodes Opus→PCM, pushes `AudioFrame`s. Ignores `in` channel (it's a source). Currently this logic lives in `readAudioTrack()` in `livekit_room.go`.
+1. **Audio Source Processor** — Extract `readAudioTrack()` from `livekit_room.go`. Reads from LiveKit `*webrtc.TrackRemote`, decodes Opus→PCM, emits `AudioFrame`s. Ignores `in` channel (it's a source). Uses async bridge pattern.
 
-2. **STT Processor** — receives `AudioFrame`, sends PCM bytes to Soniox websocket, accumulates transcript, emits `TextFrame` on `<end>`. Currently in `soniox_stt.go`.
+2. **STT Processor** — Extract from `soniox_stt.go`. Receives `AudioFrame`, sends PCM to Soniox websocket, accumulates final tokens, emits `TextFrame` on `<end>`. Uses async bridge pattern.
 
-3. **LLM Processor** — receives `TextFrame` (full transcript), streams OpenAI response, accumulates sentences, emits `TextFrame` per sentence. Currently in `openai_llm.go`.
+3. **LLM Processor** — Extract from `openai_llm.go`. Receives `TextFrame` (full transcript), emits `LLMResponseStartFrame`, streams `TextFrame`s (tokens), then `LLMResponseEndFrame`. Maintains conversation history. Uses async bridge pattern (SSE reader goroutine).
 
-4. **TTS Processor** — DONE (`tts_processor.go`). Receives `TextFrame`s, aggregates into sentences (split on punctuation), sends to Cartesia with single context_id per turn (`continue: true`), receives PCM chunks, encodes to Opus, emits `AudioFrame`s via internal channel (async bridge pattern). Flushes remaining PCM with silence padding on Cartesia `"done"`. Sends `continue: false` on `LLMResponseEndFrame` to close context.
+#### Done:
 
-5. **Playback Sink Processor** — DONE (`playback_sink_processor.go`). Receives `AudioFrame`, writes to LiveKit bot track with pacing.
+4. **TTS Processor** — DONE (`tts_processor.go`). Sentence aggregation, single context_id per turn with `continue: true`, PCM→Opus, async bridge, silence-padded flush on `"done"`, `continue: false` on `LLMResponseEndFrame`.
 
-After all processors are migrated, wire them up in `main.go`:
+5. **Playback Sink Processor** — DONE (`playback_sink_processor.go`). Writes `AudioFrame`s to LiveKit bot track with 20ms pacing.
+
+#### After all processors are migrated:
+
+6. **Wire up pipeline in `main.go`:**
 ```go
 pipeline := NewPipeline([]FrameProcessor{audioSource, sttProcessor, llmProcessor, ttsProcessor, playbackSink})
 pipeline.Run(ctx)
 ```
+Remove old direct function calls between components. Test end-to-end.
 
-Then implement:
-- **Barge-in / interruption**: When user speaks while bot is playing, cancel the pipeline context to stop all processors, flush channels, start a new turn. `InterruptFrame` propagates through the pipeline. Word timestamps track what was actually spoken — only spoken words are added to LLM conversation history.
-- **Word timestamps**: Cartesia word timestamps are interleaved with audio frames in the playback queue. On barge-in, the "actually spoken" buffer determines what goes into LLM history.
+7. **Barge-in / interruption**: Cancel pipeline context when user speaks while bot is playing. `InterruptFrame` propagates through pipeline. Word timestamps track what was actually spoken — only spoken words go into LLM conversation history.
+
+8. **Cleanup**: Delete `audio_in.go` and `audio_out.go` (legacy). Remove old globals. Consider renaming module from `awesomeProject`.
 
 ### Key Technical Details
 

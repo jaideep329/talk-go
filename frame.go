@@ -10,6 +10,8 @@ const (
 	Audio FrameType = iota // iota auto-increments: 0, 1, 2, 3...
 	Text
 	Interrupt
+	LLMResponseStart
+	LLMResponseEnd
 )
 
 type AudioFrame struct {
@@ -28,3 +30,13 @@ type InterruptFrame struct {
 }
 
 func (f InterruptFrame) FrameType() FrameType { return Interrupt }
+
+type LLMResponseStartFrame struct {
+}
+
+func (f LLMResponseStartFrame) FrameType() FrameType { return LLMResponseStart }
+
+type LLMResponseEndFrame struct {
+}
+
+func (f LLMResponseEndFrame) FrameType() FrameType { return LLMResponseEnd }

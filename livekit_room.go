@@ -10,19 +10,16 @@ import (
 	"github.com/pion/webrtc/v4"
 )
 
-var room *lksdk.Room
-
-func joinRoom(audioSource *AudioSourceProcessor) {
-	var err error
-	room, err = lksdk.ConnectToRoom(os.Getenv("LIVEKIT_URL"), lksdk.ConnectInfo{
+func joinRoom(roomName string, audioSource *AudioSourceProcessor) *lksdk.Room {
+	room, err := lksdk.ConnectToRoom(os.Getenv("LIVEKIT_URL"), lksdk.ConnectInfo{
 		APIKey:              os.Getenv("LIVEKIT_API_KEY"),
 		APISecret:           os.Getenv("LIVEKIT_API_SECRET"),
-		RoomName:            "default-room",
+		RoomName:            roomName,
 		ParticipantIdentity: "bot",
 	}, &lksdk.RoomCallback{
 		ParticipantCallback: lksdk.ParticipantCallback{
 			OnTrackSubscribed: func(track *webrtc.TrackRemote, pub *lksdk.RemoteTrackPublication, participant *lksdk.RemoteParticipant) {
-				log.Printf("Track subscribed: %s from %s (kind: %s)", track.ID(), participant.Identity(), track.Kind())
+				log.Printf("[%s] Track subscribed: %s from %s (kind: %s)", roomName, track.ID(), participant.Identity(), track.Kind())
 				if track.Kind() == webrtc.RTPCodecTypeAudio {
 					audioSource.SetTrack(track)
 				}
@@ -30,9 +27,10 @@ func joinRoom(audioSource *AudioSourceProcessor) {
 		},
 	})
 	if err != nil {
-		log.Fatal("failed to join room:", err)
+		log.Fatalf("[%s] failed to join room: %v", roomName, err)
 	}
-	log.Println("Bot joined the room")
+	log.Printf("[%s] Bot joined the room", roomName)
+	return room
 }
 
 func generateToken(roomName, identity string) (string, error) {

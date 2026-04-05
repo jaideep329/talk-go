@@ -9,6 +9,7 @@
     #status { padding: 0.5rem; margin: 1rem 0; border-radius: 4px; background: #f0f0f0; }
     #controls { margin: 1rem 0; }
     button { padding: 0.5rem 1rem; margin-right: 0.5rem; cursor: pointer; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
   </style>
 </head>
 <body>
@@ -25,9 +26,6 @@
   <div id="remote-audio"></div>
 
   <script type="module">
-    const ROOM_NAME = "default-room";
-    const IDENTITY = "web-user";
-
     const {
       Room,
       RoomEvent,
@@ -51,50 +49,49 @@
       btnToggleMic.disabled = !connected;
     }
 
-    async function fetchToken() {
-      const res = await fetch("/connect");
-      if (!res.ok) throw new Error(`Token fetch failed: ${res.statusText}`);
-      return res.json();
-    }
-
     async function connect() {
-      room = new Room();
+      btnConnect.disabled = true;
+      setStatus("Creating session...");
 
-      room.on(RoomEvent.Connected, () => {
-        setStatus(`Connected to room: ${room.name}`);
-        setConnectedUI(true);
-      });
-
-      room.on(RoomEvent.Disconnected, () => {
-        setStatus("Disconnected");
-        setConnectedUI(false);
-        remoteAudioEl.innerHTML = "";
-      });
-
-      room.on(RoomEvent.TrackSubscribed, (track, _pub, participant) => {
-        const el = track.attach();
-        el.dataset.participantId = participant.identity;
-        el.dataset.trackSid = track.sid;
-        remoteAudioEl.appendChild(el);
-      });
-
-      room.on(RoomEvent.TrackUnsubscribed, (track) => {
-        for (const el of track.detach()) {
-          el.remove();
-        }
-      });
-
-      room.on(RoomEvent.ParticipantConnected, (p) => {
-        setStatus(`Participant joined: ${p.identity}`);
-      });
-
-      room.on(RoomEvent.ParticipantDisconnected, (p) => {
-        setStatus(`Participant left: ${p.identity}`);
-      });
-
-      setStatus("Fetching token...");
       try {
-        const { server_url, token } = await fetchToken();
+        const res = await fetch("/connect");
+        if (!res.ok) throw new Error(`Session creation failed: ${res.statusText}`);
+        const { server_url, token } = await res.json();
+
+        room = new Room();
+
+        room.on(RoomEvent.Connected, () => {
+          setStatus(`Connected to room: ${room.name}`);
+          setConnectedUI(true);
+        });
+
+        room.on(RoomEvent.Disconnected, () => {
+          setStatus("Disconnected");
+          setConnectedUI(false);
+          remoteAudioEl.innerHTML = "";
+        });
+
+        room.on(RoomEvent.TrackSubscribed, (track, _pub, participant) => {
+          const el = track.attach();
+          el.dataset.participantId = participant.identity;
+          el.dataset.trackSid = track.sid;
+          remoteAudioEl.appendChild(el);
+        });
+
+        room.on(RoomEvent.TrackUnsubscribed, (track) => {
+          for (const el of track.detach()) {
+            el.remove();
+          }
+        });
+
+        room.on(RoomEvent.ParticipantConnected, (p) => {
+          setStatus(`Participant joined: ${p.identity}`);
+        });
+
+        room.on(RoomEvent.ParticipantDisconnected, (p) => {
+          setStatus(`Participant left: ${p.identity}`);
+        });
+
         setStatus("Connecting...");
         await room.connect(server_url, token);
         await room.localParticipant.setMicrophoneEnabled(true);

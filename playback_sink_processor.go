@@ -10,29 +10,31 @@ import (
 )
 
 type PlaybackSinkProcessor struct {
+	logger          *log.Logger
 	botTrack        *lksdk.LocalSampleTrack
 	interrupted     bool
 	playbackStarted bool
 	turnCtx         *TurnContext
 }
 
-func NewPlaybackSinkProcessor(room *lksdk.Room, turnCtx *TurnContext) *PlaybackSinkProcessor {
+func NewPlaybackSinkProcessor(logger *log.Logger, room *lksdk.Room, turnCtx *TurnContext) *PlaybackSinkProcessor {
 	botTrack, err := lksdk.NewLocalSampleTrack(webrtc.RTPCodecCapability{
 		MimeType:  webrtc.MimeTypeOpus,
 		ClockRate: 48000,
 		Channels:  2,
 	})
 	if err != nil {
-		log.Fatal("failed to create local track:", err)
+		logger.Fatal("failed to create local track:", err)
 	}
 	_, err = room.LocalParticipant.PublishTrack(botTrack, &lksdk.TrackPublicationOptions{
 		Name: "bot-audio",
 	})
 	if err != nil {
-		return nil
+		logger.Fatal("failed to publish track:", err)
 	}
-	log.Println("Published bot audio track")
+	logger.Println("Published bot audio track")
 	return &PlaybackSinkProcessor{
+		logger:   logger,
 		botTrack: botTrack,
 		turnCtx:  turnCtx,
 	}
@@ -47,7 +49,7 @@ func (p *PlaybackSinkProcessor) Process(in <-chan Frame, _ chan<- Frame) {
 		case <-done:
 			p.interrupted = true
 			done = nil
-			log.Println("Playback interrupted")
+			p.logger.Println("Playback interrupted")
 		case frame, ok := <-in:
 			if !ok {
 				return
@@ -66,7 +68,7 @@ func (p *PlaybackSinkProcessor) Process(in <-chan Frame, _ chan<- Frame) {
 					Duration: 20 * time.Millisecond,
 				}, nil)
 				if err != nil {
-					log.Println("track write error:", err)
+					p.logger.Println("track write error:", err)
 					continue
 				}
 				<-ticker.C
@@ -81,7 +83,7 @@ func (p *PlaybackSinkProcessor) Process(in <-chan Frame, _ chan<- Frame) {
 			case EndFrame:
 				return
 			default:
-				log.Printf("PlaybackSink received frame of type %T\n", f)
+				p.logger.Printf("PlaybackSink received frame of type %T\n", f)
 			}
 		}
 	}

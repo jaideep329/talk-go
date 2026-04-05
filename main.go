@@ -32,27 +32,9 @@ func main() {
 }
 
 func handleConnect(w http.ResponseWriter, r *http.Request) {
-	initPipeline()
+	roomName := createSession()
 
-	roomName := "default-room"
-	identity := "web-user"
-
-	if r.Method == http.MethodPost {
-		var req struct {
-			RoomName string `json:"room_name"`
-			Identity string `json:"identity"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err == nil {
-			if req.RoomName != "" {
-				roomName = req.RoomName
-			}
-			if req.Identity != "" {
-				identity = req.Identity
-			}
-		}
-	}
-
-	token, err := generateToken(roomName, identity)
+	token, err := generateToken(roomName, "web-user")
 	if err != nil {
 		log.Printf("failed to create token: %v", err)
 		http.Error(w, "failed to create token", http.StatusInternalServerError)

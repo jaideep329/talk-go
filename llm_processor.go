@@ -13,6 +13,7 @@ import (
 )
 
 type LLMProcessor struct {
+	logger            *log.Logger
 	messages          []map[string]string
 	currentTranscript string
 	isStreaming       bool
@@ -34,13 +35,13 @@ func (p *LLMProcessor) runLLM(ctx context.Context, userMessage string) {
 	}
 	jsonBody, err := json.Marshal(body)
 	if err != nil {
-		log.Println("json marshal error:", err)
+		p.logger.Println("json marshal error:", err)
 		return
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST", "https://api.openai.com/v1/chat/completions", bytes.NewReader(jsonBody))
 	if err != nil {
-		log.Println("request error:", err)
+		p.logger.Println("request error:", err)
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
@@ -48,7 +49,7 @@ func (p *LLMProcessor) runLLM(ctx context.Context, userMessage string) {
 	p.responseFrames <- LLMResponseStartFrame{}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		log.Println("LLM request failed:", err)
+		p.logger.Println("LLM request failed:", err)
 		return
 	}
 	defer resp.Body.Close()
@@ -86,17 +87,15 @@ func (p *LLMProcessor) runLLM(ctx context.Context, userMessage string) {
 	}
 }
 
-func NewLLMProcessor(turnCtx *TurnContext) *LLMProcessor {
+func NewLLMProcessor(logger *log.Logger, turnCtx *TurnContext) *LLMProcessor {
 	return &LLMProcessor{
+		logger:         logger,
 		messages:       []map[string]string{},
 		responseFrames: make(chan Frame, 100),
 		turnCtx:        turnCtx,
 	}
 }
 
-// commitSpokenText adds actually-spoken words to conversation history.
-// On barge-in, uses elapsed time to determine what was spoken.
-// On normal end, uses all words.
 func (p *LLMProcessor) commitSpokenText(interrupted bool) {
 	var spoken string
 	if interrupted {
@@ -105,7 +104,7 @@ func (p *LLMProcessor) commitSpokenText(interrupted bool) {
 		spoken = p.turnCtx.FlushAll()
 	}
 	if spoken != "" {
-		log.Printf("Committing to history (interrupted=%v): %s\n", interrupted, spoken)
+		p.logger.Printf("Committing to history (interrupted=%v): %s\n", interrupted, spoken)
 		p.messages = append(p.messages, map[string]string{"role": "assistant", "content": spoken})
 	}
 }
@@ -120,22 +119,19 @@ func (p *LLMProcessor) Process(in <-chan Frame, out chan<- Frame) {
 			switch f := frame.(type) {
 			case TranscriptFrame:
 				if p.isStreaming && !p.interruptSent {
-					// BARGE-IN
-					log.Println("Barge-in detected, cancelling LLM")
+					p.logger.Println("Barge-in detected, cancelling LLM")
 					if p.cancelLLM != nil {
 						p.cancelLLM()
 					}
 					p.turnCtx.Cancel()
 					p.isStreaming = false
 					p.interruptSent = true
-					// Commit only what was actually spoken based on elapsed time
 					p.commitSpokenText(true)
 				}
 				if f.IsFinal {
 					if f.Text == "<end>" {
 						if p.currentTranscript != "" {
-							log.Printf("Final transcript received: %s\n", p.currentTranscript)
-							// Commit previous turn's spoken text (if any)
+							p.logger.Printf("Final transcript received: %s\n", p.currentTranscript)
 							p.commitSpokenText(false)
 							p.isStreaming = false
 							p.interruptSent = false
@@ -159,8 +155,6 @@ func (p *LLMProcessor) Process(in <-chan Frame, out chan<- Frame) {
 				p.isStreaming = true
 				out <- responseFrame
 			case LLMResponseEndFrame:
-				// Don't commit here — word timestamps haven't all reached
-				// PlaybackSink yet. Commit when next turn starts or on barge-in.
 				out <- responseFrame
 			default:
 				if p.isStreaming {

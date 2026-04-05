@@ -49,7 +49,7 @@ type CartesiaTTSAudioChunkMessage struct {
 
 type CartesiaTTSWordTimestampMessage struct {
 	Type           string `json:"type"`
-	StatusCode     string `json:"status_code"`
+	StatusCode     int    `json:"status_code"`
 	ContextId      string `json:"context_id"`
 	Done           bool   `json:"done"`
 	Error          string `json:"error"`
@@ -62,7 +62,7 @@ type CartesiaTTSWordTimestampMessage struct {
 
 type CartesiaTTSDoneMessage struct {
 	Type       string `json:"type"`
-	StatusCode string `json:"status_code"`
+	StatusCode int    `json:"status_code"`
 	Done       bool   `json:"done"`
 	ContextId  string `json:"context_id"`
 	Error      string `json:"error"`

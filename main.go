@@ -7,12 +7,18 @@ import (
 	"net/http"
 	"os"
 	"strings"
+
+	"github.com/go-logr/stdr"
+	protoLogger "github.com/livekit/protocol/logger"
+	lksdk "github.com/livekit/server-sdk-go/v2"
 )
 
 func main() {
 	loadEnv(".env")
 	appLog, _ := os.Create("app.log")
 	log.SetOutput(io.MultiWriter(os.Stderr, appLog))
+	stdr.SetVerbosity(0)
+	lksdk.SetLogger(protoLogger.LogRLogger(stdr.New(log.New(io.Discard, "", 0))))
 	joinRoom()
 	http.HandleFunc("/getToken", handleGetToken)
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -36,7 +42,10 @@ func loadEnv(path string) {
 		}
 		parts := strings.SplitN(line, "=", 2)
 		if len(parts) == 2 {
-			os.Setenv(parts[0], parts[1])
+			err := os.Setenv(parts[0], parts[1])
+			if err != nil {
+				return
+			}
 		}
 	}
 }

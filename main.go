@@ -19,8 +19,7 @@ func main() {
 	log.SetOutput(io.MultiWriter(os.Stderr, appLog))
 	stdr.SetVerbosity(0)
 	lksdk.SetLogger(protoLogger.LogRLogger(stdr.New(log.New(io.Discard, "", 0))))
-	joinRoom()
-	http.HandleFunc("/getToken", handleGetToken)
+	http.HandleFunc("/connect", handleConnect)
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		http.ServeFile(w, r, "livekit-client.html")
 	})

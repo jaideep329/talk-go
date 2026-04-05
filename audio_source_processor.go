@@ -10,22 +10,16 @@ import (
 )
 
 type AudioSourceProcessor struct {
-	track       *webrtc.TrackRemote
 	audioFrames chan Frame
 }
 
-func NewAudioSourceProcessor(readTrack *webrtc.TrackRemote) *AudioSourceProcessor {
-	track := readTrack
-	if track == nil {
-		panic("AudioSourceProcessor requires a non-nil track")
-	}
+func NewAudioSourceProcessor() *AudioSourceProcessor {
 	return &AudioSourceProcessor{
-		track:       track,
 		audioFrames: make(chan Frame, 100), // Buffered channel for audio frames
 	}
 }
 
-func (a *AudioSourceProcessor) readAudioTrack() {
+func (a *AudioSourceProcessor) readAudioTrack(track *webrtc.TrackRemote) {
 	// Opus decoder outputting 16kHz mono — matches what Soniox expects
 	decoder, err := opus.NewDecoder(16000, 1)
 	if err != nil {
@@ -37,7 +31,7 @@ func (a *AudioSourceProcessor) readAudioTrack() {
 
 	for {
 		// Read an RTP packet from the track
-		rtpPacket, _, err := a.track.ReadRTP()
+		rtpPacket, _, err := track.ReadRTP()
 		if err != nil {
 			log.Println("track read error:", err)
 			return
@@ -60,9 +54,11 @@ func (a *AudioSourceProcessor) readAudioTrack() {
 	}
 }
 
-func (a *AudioSourceProcessor) Process(ctx context.Context, _ <-chan Frame, out chan<- Frame) {
-	go a.readAudioTrack()
+func (a *AudioSourceProcessor) SetTrack(track *webrtc.TrackRemote) {
+	go a.readAudioTrack(track)
+}
 
+func (a *AudioSourceProcessor) Process(ctx context.Context, _ <-chan Frame, out chan<- Frame) {
 	for {
 		select {
 		case frame := <-a.audioFrames:

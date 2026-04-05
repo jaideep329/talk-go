@@ -52,7 +52,7 @@
     }
 
     async function fetchToken() {
-      const res = await fetch("/getToken");
+      const res = await fetch("/connect");
       if (!res.ok) throw new Error(`Token fetch failed: ${res.statusText}`);
       return res.json();
     }

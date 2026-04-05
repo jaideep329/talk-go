@@ -1,6 +1,9 @@
 package main
 
-import "context"
+import (
+	"context"
+	"sync"
+)
 
 type Pipeline struct {
 	processors []FrameProcessor
@@ -17,4 +20,19 @@ func (p *Pipeline) Run(ctx context.Context) {
 		go processor.Process(ctx, current, out)
 		current = out
 	}
+}
+
+var pipelineOnce sync.Once
+
+func initPipeline() {
+	pipelineOnce.Do(func() {
+		audioSource := NewAudioSourceProcessor()
+		joinRoom(audioSource)
+		sttProcessor := NewSTTProcessor()
+		llmProcessor := NewLLMProcessor()
+		ttsProcessor := NewTTSProcessor()
+		playbackSink := NewPlaybackSinkProcessor(room)
+		pipeline := NewPipeline([]FrameProcessor{audioSource, sttProcessor, llmProcessor, ttsProcessor, playbackSink})
+		go pipeline.Run(context.Background())
+	})
 }

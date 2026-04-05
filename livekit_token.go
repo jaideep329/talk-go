@@ -20,14 +20,16 @@ type tokenResponse struct {
 	Token     string `json:"token"`
 }
 
-func handleGetToken(w http.ResponseWriter, r *http.Request) {
-	req := tokenRequest{
-		RoomName: "default-room",
-		Identity: "web-user",
-	}
+func handleConnect(w http.ResponseWriter, r *http.Request) {
+	initPipeline()
+
+	req := tokenRequest{}
 
 	if r.Method == http.MethodPost {
-		json.NewDecoder(r.Body).Decode(&req)
+		err := json.NewDecoder(r.Body).Decode(&req)
+		if err != nil {
+			return
+		}
 		if req.RoomName == "" {
 			req.RoomName = "default-room"
 		}

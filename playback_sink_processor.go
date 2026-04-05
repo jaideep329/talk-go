@@ -14,10 +14,9 @@ type PlaybackSinkProcessor struct {
 	interrupted     bool
 	playbackStarted bool
 	turnCtx         *TurnContext
-	spokenText      *SpokenText
 }
 
-func NewPlaybackSinkProcessor(room *lksdk.Room, turnCtx *TurnContext, spokenText *SpokenText) *PlaybackSinkProcessor {
+func NewPlaybackSinkProcessor(room *lksdk.Room, turnCtx *TurnContext) *PlaybackSinkProcessor {
 	botTrack, err := lksdk.NewLocalSampleTrack(webrtc.RTPCodecCapability{
 		MimeType:  webrtc.MimeTypeOpus,
 		ClockRate: 48000,
@@ -34,9 +33,8 @@ func NewPlaybackSinkProcessor(room *lksdk.Room, turnCtx *TurnContext, spokenText
 	}
 	log.Println("Published bot audio track")
 	return &PlaybackSinkProcessor{
-		botTrack:   botTrack,
-		turnCtx:    turnCtx,
-		spokenText: spokenText,
+		botTrack: botTrack,
+		turnCtx:  turnCtx,
 	}
 }
 
@@ -60,7 +58,7 @@ func (p *PlaybackSinkProcessor) Process(in <-chan Frame, _ chan<- Frame) {
 					continue
 				}
 				if !p.playbackStarted {
-					p.spokenText.StartPlayback()
+					p.turnCtx.StartPlayback()
 					p.playbackStarted = true
 				}
 				err := p.botTrack.WriteSample(media.Sample{
@@ -74,7 +72,7 @@ func (p *PlaybackSinkProcessor) Process(in <-chan Frame, _ chan<- Frame) {
 				<-ticker.C
 			case WordTimestampFrame:
 				if !p.interrupted {
-					p.spokenText.Append(f.Words, f.Start)
+					p.turnCtx.AppendWords(f.Words, f.Start)
 				}
 			case LLMResponseStartFrame:
 				p.interrupted = false

@@ -15,12 +15,11 @@ import (
 type LLMProcessor struct {
 	messages          []map[string]string
 	currentTranscript string
-	isStreaming        bool
+	isStreaming       bool
 	interruptSent     bool
 	cancelLLM         context.CancelFunc
 	responseFrames    chan Frame
 	turnCtx           *TurnContext
-	spokenText        *SpokenText
 }
 
 func (p *LLMProcessor) runLLM(ctx context.Context, userMessage string) {
@@ -87,12 +86,11 @@ func (p *LLMProcessor) runLLM(ctx context.Context, userMessage string) {
 	}
 }
 
-func NewLLMProcessor(turnCtx *TurnContext, spokenText *SpokenText) *LLMProcessor {
+func NewLLMProcessor(turnCtx *TurnContext) *LLMProcessor {
 	return &LLMProcessor{
 		messages:       []map[string]string{},
 		responseFrames: make(chan Frame, 100),
 		turnCtx:        turnCtx,
-		spokenText:     spokenText,
 	}
 }
 
@@ -102,9 +100,9 @@ func NewLLMProcessor(turnCtx *TurnContext, spokenText *SpokenText) *LLMProcessor
 func (p *LLMProcessor) commitSpokenText(interrupted bool) {
 	var spoken string
 	if interrupted {
-		spoken = p.spokenText.SpokenSoFar()
+		spoken = p.turnCtx.SpokenSoFar()
 	} else {
-		spoken = p.spokenText.FlushAll()
+		spoken = p.turnCtx.FlushAll()
 	}
 	if spoken != "" {
 		log.Printf("Committing to history (interrupted=%v): %s\n", interrupted, spoken)

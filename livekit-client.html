@@ -177,9 +177,19 @@
     </template>
   </div>
 
-  <div id="live-transcript" x-show="liveText" x-cloak>
-    <div class="live-label">speaking</div>
-    <div class="live-text" x-text="liveText"></div>
+  <div id="live-transcript" x-show="liveText || assistantLiveText" x-cloak>
+    <template x-if="assistantLiveText">
+      <div style="margin-bottom: 0.5rem;">
+        <div class="live-label">assistant</div>
+        <div class="live-text" style="color: var(--pico-secondary);" x-text="assistantLiveText"></div>
+      </div>
+    </template>
+    <template x-if="liveText">
+      <div>
+        <div class="live-label">you</div>
+        <div class="live-text" x-text="liveText"></div>
+      </div>
+    </template>
   </div>
 
   <footer>
@@ -204,6 +214,7 @@
         roomName: "",
         turns: [],
         liveText: "",
+        assistantLiveText: "",
         pendingLatency: null,
 
         get statusClass() {
@@ -289,6 +300,7 @@
         handleUIEvent(event) {
           switch (event.type) {
             case "user_transcript":
+              this.assistantLiveText = "";
               this.commitUserTurn(event.text);
               break;
 
@@ -296,10 +308,16 @@
               this.liveText = event.text;
               break;
 
+            case "assistant_speaking":
+              this.assistantLiveText += (this.assistantLiveText && event.text[0] !== '.' && event.text[0] !== ',' && event.text[0] !== '!' && event.text[0] !== '?' ? " " : "") + event.text;
+              this.scrollToBottom();
+              break;
+
             case "committed_assistant":
               if (event.text !== "") {
                 this.turns.push({ role: "assistant", text: event.text, latency: this.pendingLatency });
               }
+              this.assistantLiveText = "";
               this.pendingLatency = null;
               this.scrollToBottom();
               break;

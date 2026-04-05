@@ -7,21 +7,17 @@ import (
 )
 
 // TurnContext is shared across processors for per-turn cancellation and
-// tracking which words were actually spoken. LLM calls Reset() at the
-// start of each turn and Cancel() on barge-in. TTS and PlaybackSink
-// select on Done() to react instantly. PlaybackSink appends words via
-// AppendWords(). LLM reads them via SpokenSoFar() or FlushAll().
+// tracking which words were actually spoken. Words are appended by
+// PlaybackSink as they are played (interleaved with audio by TTS).
+// LLM calls Reset() at the start of each turn and Cancel() on barge-in.
 type TurnContext struct {
 	mu     sync.Mutex
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	// Spoken word tracking
-	words           []string
-	startTimes      []float64 // seconds from context start
-	playbackStarted time.Time // when first audio frame was played
-	turnStarted     time.Time // when user finished speaking (<end> token)
-	playbackDone    chan struct{}
+	words        []string
+	turnStarted  time.Time // when user finished speaking (<end> token)
+	playbackDone chan struct{}
 }
 
 func NewTurnContext() *TurnContext {
@@ -72,61 +68,37 @@ func (t *TurnContext) MarkPlaybackDone() {
 	defer t.mu.Unlock()
 	select {
 	case <-t.playbackDone:
-		// already closed
 	default:
 		close(t.playbackDone)
 	}
 }
 
-// StartPlayback records when audio playback began for this turn.
-func (t *TurnContext) StartPlayback() {
+// AppendWords adds words that have been played to the user.
+func (t *TurnContext) AppendWords(words []string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.playbackStarted = time.Now()
-}
-
-// AppendWords adds words and their start times.
-func (t *TurnContext) AppendWords(words []string, startTimes []float64) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	for i, w := range words {
+	for _, w := range words {
 		if len(t.words) > 0 && len(w) > 0 && w[0] != '.' && w[0] != ',' && w[0] != '!' && w[0] != '?' && w[0] != ';' && w[0] != ':' {
 			t.words = append(t.words, " "+w)
 		} else {
 			t.words = append(t.words, w)
 		}
-		if i < len(startTimes) {
-			t.startTimes = append(t.startTimes, startTimes[i])
-		}
 	}
 }
 
-// SpokenSoFar returns only the words that were actually spoken based on
-// elapsed playback time, then resets. Used on barge-in.
+// SpokenSoFar returns all words that were played and resets. Used on barge-in.
 func (t *TurnContext) SpokenSoFar() string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	elapsed := time.Since(t.playbackStarted).Seconds()
 	var spoken string
-	for i, w := range t.words {
-		if i < len(t.startTimes) && t.startTimes[i] <= elapsed {
-			spoken += w
-		}
+	for _, w := range t.words {
+		spoken += w
 	}
 	t.words = nil
-	t.startTimes = nil
 	return spoken
 }
 
 // FlushAll returns all words (full response completed) and resets.
 func (t *TurnContext) FlushAll() string {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	var text string
-	for _, w := range t.words {
-		text += w
-	}
-	t.words = nil
-	t.startTimes = nil
-	return text
+	return t.SpokenSoFar()
 }

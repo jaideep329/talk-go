@@ -58,7 +58,6 @@ func (f EndFrame) FrameType() FrameType { return End }
 
 type WordTimestampFrame struct {
 	Words []string
-	Start []float64 // seconds from start of context when each word begins
 }
 
 func (f WordTimestampFrame) FrameType() FrameType { return WordTimestamp }

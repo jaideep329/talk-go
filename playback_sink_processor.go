@@ -62,7 +62,6 @@ func (p *PlaybackSinkProcessor) Process(in <-chan Frame, _ chan<- Frame) {
 					continue
 				}
 				if !p.playbackStarted {
-					p.turnCtx.StartPlayback()
 					p.playbackStarted = true
 					e2eMs := time.Since(p.turnCtx.TurnStarted()).Milliseconds()
 					p.logger.Printf("End-to-end turn latency: %dms\n", e2eMs)
@@ -79,7 +78,8 @@ func (p *PlaybackSinkProcessor) Process(in <-chan Frame, _ chan<- Frame) {
 				<-ticker.C
 			case WordTimestampFrame:
 				if !p.interrupted {
-					p.turnCtx.AppendWords(f.Words, f.Start)
+					p.turnCtx.AppendWords(f.Words)
+					p.sessionCtx.UIEvents.Send(UIEvent{Type: "assistant_speaking", Text: f.Words[0]})
 				}
 			case TTSDoneFrame:
 				if !p.interrupted {

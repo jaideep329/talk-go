@@ -25,6 +25,11 @@ func endsWithPunctuation(s string) bool {
 	return unicode.IsPunct(lastRune)
 }
 
+type pendingWord struct {
+	word  string
+	start float64 // seconds from context start
+}
+
 type TTSProcessor struct {
 	logger             *log.Logger
 	currentAggregation string
@@ -35,6 +40,8 @@ type TTSProcessor struct {
 	audioFrames        chan Frame
 	turnCtx            *TurnContext
 	sessionCtx         *SessionContext
+	pendingWords       []pendingWord
+	audioTimePushed    float64 // seconds of audio pushed to audioFrames
 }
 
 type CartesiaTTSMessage struct {
@@ -135,6 +142,18 @@ func (t *TTSProcessor) handleAudioChunkMessage(audioMsg *CartesiaTTSAudioChunkMe
 			break
 		}
 		t.audioFrames <- AudioFrame{Data: opusFrame}
+		t.audioTimePushed += 0.02 // 20ms per opus frame
+		t.emitPendingWords()
+	}
+}
+
+// emitPendingWords sends WordTimestampFrames for words whose start time
+// has been reached by the audio pushed so far.
+func (t *TTSProcessor) emitPendingWords() {
+	for len(t.pendingWords) > 0 && t.pendingWords[0].start <= t.audioTimePushed {
+		w := t.pendingWords[0]
+		t.pendingWords = t.pendingWords[1:]
+		t.audioFrames <- WordTimestampFrame{Words: []string{w.word}}
 	}
 }
 
@@ -149,8 +168,14 @@ func (t *TTSProcessor) pushRemainingAudioFrames() {
 		opusFrame := t.makeOpusData()
 		if opusFrame != nil {
 			t.audioFrames <- AudioFrame{Data: opusFrame}
+			t.audioTimePushed += 0.02
 		}
 	}
+	// Flush any remaining pending words
+	for _, w := range t.pendingWords {
+		t.audioFrames <- WordTimestampFrame{Words: []string{w.word}}
+	}
+	t.pendingWords = nil
 }
 
 func (t *TTSProcessor) makeOpusData() []byte {
@@ -227,10 +252,11 @@ func (t *TTSProcessor) readTTSConnectionData() {
 				t.logger.Println("TTS word timestamp unmarshal error:", err)
 				continue
 			}
-			if t.currentContextId != "" && len(tsMsg.WordTimestamps.Words) > 0 {
-				t.audioFrames <- WordTimestampFrame{
-					Words: tsMsg.WordTimestamps.Words,
-					Start: tsMsg.WordTimestamps.Start,
+			if t.currentContextId != "" {
+				for i, w := range tsMsg.WordTimestamps.Words {
+					if i < len(tsMsg.WordTimestamps.Start) {
+						t.pendingWords = append(t.pendingWords, pendingWord{word: w, start: tsMsg.WordTimestamps.Start[i]})
+					}
 				}
 			}
 		case "done":
@@ -273,6 +299,8 @@ func (t *TTSProcessor) Process(in <-chan Frame, out chan<- Frame) {
 			t.currentAggregation = ""
 			t.currentContextId = ""
 			t.pcmBuffer = nil
+			t.pendingWords = nil
+			t.audioTimePushed = 0
 			done = nil
 			t.logger.Println("TTS interrupted, cleared state")
 		case frame, ok := <-in:
@@ -286,6 +314,8 @@ func (t *TTSProcessor) Process(in <-chan Frame, out chan<- Frame) {
 			case LLMResponseStartFrame:
 				t.currentAggregation = ""
 				t.pcmBuffer = nil
+				t.pendingWords = nil
+				t.audioTimePushed = 0
 				t.currentContextId = fmt.Sprintf("ctx-%d", rand.IntN(9000000))
 				done = t.turnCtx.Done()
 				t.logger.Println("LLM response started, resetting TTS aggregation")

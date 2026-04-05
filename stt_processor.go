@@ -9,6 +9,16 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+type SonioxToken struct {
+	Text    string `json:"text"`
+	IsFinal bool   `json:"is_final"`
+}
+
+type SonioxResponseMessage struct {
+	Tokens   []SonioxToken `json:"tokens"`
+	Finished bool          `json:"finished"`
+}
+
 type STTProcessor struct {
 	websocketConn    *websocket.Conn
 	transcriptFrames chan TranscriptFrame

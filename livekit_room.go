@@ -1,13 +1,10 @@
 package main
 
 import (
-	"encoding/binary"
 	"log"
 	"os"
 	"sync"
 
-	"github.com/gorilla/websocket"
-	"github.com/hraban/opus"
 	lksdk "github.com/livekit/server-sdk-go/v2"
 	"github.com/pion/webrtc/v4"
 )
@@ -56,56 +53,5 @@ func onTrackSubscribed(track *webrtc.TrackRemote, pub *lksdk.RemoteTrackPublicat
 		return
 	}
 
-	audioMu.Lock()
-	// Close old connections if there were any (stops old goroutines)
-	if sttConn != nil {
-		sttConn.Close()
-	}
-	if ttsConn != nil {
-		ttsConn.Close()
-	}
-	initializeSonioxWebsocket()
-	initializeTTSWebsocket()
-	go readSTTWebsocketLoop()
-	audioMu.Unlock()
-
-	go readAudioTrack(track)
-}
-
-func readAudioTrack(track *webrtc.TrackRemote) {
-	// Opus decoder outputting 16kHz mono — matches what Soniox expects
-	decoder, err := opus.NewDecoder(16000, 1)
-	if err != nil {
-		log.Fatal("failed to create opus decoder:", err)
-	}
-
-	// Buffer for decoded PCM samples (960 samples per Opus frame at 48kHz = 320 at 16kHz)
-	pcmBuf := make([]int16, 960)
-
-	for {
-		// Read an RTP packet from the track
-		rtpPacket, _, err := track.ReadRTP()
-		if err != nil {
-			log.Println("track read error:", err)
-			return
-		}
-
-		// Decode Opus payload → PCM samples
-		n, err := decoder.Decode(rtpPacket.Payload, pcmBuf)
-		if err != nil {
-			log.Println("opus decode error:", err)
-			continue
-		}
-
-		// Convert int16 samples to bytes (s16le) for Soniox
-		pcmBytes := make([]byte, n*2)
-		for i := 0; i < n; i++ {
-			binary.LittleEndian.PutUint16(pcmBytes[i*2:], uint16(pcmBuf[i]))
-		}
-
-		if err := sttConn.WriteMessage(websocket.BinaryMessage, pcmBytes); err != nil {
-			log.Println("stt write error:", err)
-			return
-		}
-	}
+	// TODO: Wire up pipeline here — create AudioSourceProcessor with track and start pipeline
 }

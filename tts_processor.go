@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
@@ -200,17 +199,18 @@ func NewTTSProcessor() *TTSProcessor {
 	return &TTSProcessor{currentAggregation: "", websocketConn: conn, opusEncoder: opusEncoder, audioFrames: audioFrames}
 }
 
-func (t *TTSProcessor) Process(ctx context.Context, in <-chan Frame, out chan<- Frame) {
+func (t *TTSProcessor) Process(in <-chan Frame, out chan<- Frame) {
 	go t.readTTSConnectionData()
 	for {
 		select {
-		case <-ctx.Done():
-			return
 		case frame, ok := <-in:
 			if !ok {
 				return
 			}
 			switch f := frame.(type) {
+			case EndFrame:
+				out <- f
+				return
 			case LLMResponseStartFrame:
 				t.currentAggregation = ""
 				t.pcmBuffer = nil

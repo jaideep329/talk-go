@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/binary"
 	"log"
 
@@ -58,13 +57,8 @@ func (a *AudioSourceProcessor) SetTrack(track *webrtc.TrackRemote) {
 	go a.readAudioTrack(track)
 }
 
-func (a *AudioSourceProcessor) Process(ctx context.Context, _ <-chan Frame, out chan<- Frame) {
-	for {
-		select {
-		case frame := <-a.audioFrames:
-			out <- frame
-		case <-ctx.Done():
-			return
-		}
+func (a *AudioSourceProcessor) Process(_ <-chan Frame, out chan<- Frame) {
+	for frame := range a.audioFrames {
+		out <- frame
 	}
 }

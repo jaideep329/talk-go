@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"sync"
 )
 
@@ -13,11 +12,11 @@ func NewPipeline(processors []FrameProcessor) *Pipeline {
 	return &Pipeline{processors: processors}
 }
 
-func (p *Pipeline) Run(ctx context.Context) {
+func (p *Pipeline) Run() {
 	current := make(chan Frame, 100) // first processor's input
 	for _, processor := range p.processors {
 		out := make(chan Frame, 100)
-		go processor.Process(ctx, current, out)
+		go processor.Process(current, out)
 		current = out
 	}
 }
@@ -33,6 +32,6 @@ func initPipeline() {
 		ttsProcessor := NewTTSProcessor()
 		playbackSink := NewPlaybackSinkProcessor(room)
 		pipeline := NewPipeline([]FrameProcessor{audioSource, sttProcessor, llmProcessor, ttsProcessor, playbackSink})
-		go pipeline.Run(context.Background())
+		go pipeline.Run()
 	})
 }

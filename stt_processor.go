@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"log"
 	"os"
@@ -79,23 +78,25 @@ func (s *STTProcessor) writeAudioWebsocket() {
 	}
 }
 
-func (p *STTProcessor) Process(ctx context.Context, in <-chan Frame, out chan<- Frame) {
+func (p *STTProcessor) Process(in <-chan Frame, out chan<- Frame) {
 	go p.readSTTWebsocket()
 	go p.writeAudioWebsocket()
 	for {
 		select {
-		case frame := <-in:
-			audioFrame, ok := frame.(AudioFrame)
+		case frame, ok := <-in:
 			if !ok {
-				log.Println("STTProcessor received non-audio frame")
-				continue
+				return
 			}
-			p.audioFrames <- audioFrame
+			switch f := frame.(type) {
+			case AudioFrame:
+				p.audioFrames <- f
+			case EndFrame:
+				return
+			default:
+				log.Printf("STTProcessor received unexpected frame: %T\n", frame)
+			}
 		case frame := <-p.transcriptFrames:
 			out <- frame
-		case <-ctx.Done():
-			return
 		}
 	}
-
 }

@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -91,11 +90,9 @@ func NewLLMProcessor() *LLMProcessor {
 	}
 }
 
-func (p *LLMProcessor) Process(ctx context.Context, in <-chan Frame, out chan<- Frame) {
+func (p *LLMProcessor) Process(in <-chan Frame, out chan<- Frame) {
 	for {
 		select {
-		case <-ctx.Done():
-			return
 		case frame, ok := <-in:
 			if !ok {
 				return
@@ -111,7 +108,9 @@ func (p *LLMProcessor) Process(ctx context.Context, in <-chan Frame, out chan<- 
 						p.currentTranscript += f.Text
 					}
 				}
-
+			case EndFrame:
+				out <- f
+				return
 			}
 		case responseFrame := <-p.responseFrames:
 			out <- responseFrame

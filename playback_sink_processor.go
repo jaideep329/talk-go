@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"log"
 	"time"
 
@@ -33,33 +32,25 @@ func NewPlaybackSinkProcessor(room *lksdk.Room) *PlaybackSinkProcessor {
 	return &PlaybackSinkProcessor{botTrack: botTrack}
 }
 
-func (p *PlaybackSinkProcessor) Process(ctx context.Context, in <-chan Frame, out chan<- Frame) {
+func (p *PlaybackSinkProcessor) Process(in <-chan Frame, _ chan<- Frame) {
 	ticker := time.NewTicker(20 * time.Millisecond)
 	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
+	for frame := range in {
+		switch f := frame.(type) {
+		case AudioFrame:
+			err := p.botTrack.WriteSample(media.Sample{
+				Data:     f.Data,
+				Duration: 20 * time.Millisecond,
+			}, nil)
+			if err != nil {
+				log.Println("track write error:", err)
+				continue
+			}
+			<-ticker.C
+		case EndFrame:
 			return
-		case frame, ok := <-in:
-			if !ok {
-				return // channel closed
-			}
-			switch f := frame.(type) {
-			case AudioFrame:
-				//log.Printf("Received audio frame with %d bytes\n", len(f.Data))
-				err := p.botTrack.WriteSample(media.Sample{
-					Data:     f.Data,
-					Duration: 20 * time.Millisecond,
-				}, nil)
-				if err != nil {
-					log.Println("track write error:", err)
-					continue
-				}
-				<-ticker.C
-			default:
-				log.Printf("Received non-audio frame of type %T\n", frame)
-			}
+		default:
+			log.Printf("PlaybackSink received frame of type %T\n", f)
 		}
-
 	}
 }

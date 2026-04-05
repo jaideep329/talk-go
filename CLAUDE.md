@@ -28,23 +28,24 @@ The Go server joins a LiveKit room as a "bot" participant. A browser client (`li
 
 ### Current State: Pipeline Architecture (Working)
 
-The pipeline refactor is **complete and working end-to-end**. All old non-pipeline files have been deleted. The pipeline is initialized lazily when the browser client clicks Connect (`/connect` endpoint).
+The pipeline is **complete and working end-to-end** with barge-in, word timestamp tracking, multi-session support, and websocket reconnection. Each `/connect` request creates an independent session with its own room, pipeline, and processors.
 
 #### Pipeline files:
 
 | File | Purpose |
 |------|---------|
-| `main.go` | Entry point. Loads `.env`, configures logging (both terminal + `app.log`), silences LiveKit/pion logs, serves HTTP (`:3000`). `handleConnect` endpoint initializes pipeline on first client connection via `sync.Once` |
-| `livekit_room.go` | `joinRoom(audioSource)` — bot joins LiveKit room. `onTrackSubscribed` calls `audioSource.SetTrack(track)` to swap tracks on renegotiation. `generateToken()` creates LiveKit JWT tokens |
-| `livekit-client.html` | Browser client using `livekit-client` JS SDK. Connects to room via `/connect`, enables mic, plays remote audio tracks |
-| `frame.go` | Frame types: `Frame` interface with `FrameType()` method. Concrete types: `AudioFrame`, `TextFrame`, `TranscriptFrame{Text, IsFinal}`, `InterruptFrame`, `LLMResponseStartFrame`, `LLMResponseEndFrame` |
-| `frame_processor.go` | `FrameProcessor` interface: `Process(ctx context.Context, in <-chan Frame, out chan<- Frame)` |
-| `pipeline.go` | `Pipeline` struct with `NewPipeline([]FrameProcessor)` and `Run(ctx context.Context)`. Creates buffered channels between processors, starts each in a goroutine. `initPipeline()` creates all processors and wires them up (called once via `sync.Once`) |
-| `audio_source_processor.go` | `AudioSourceProcessor` — source processor (ignores `in`). `SetTrack(track)` starts a new reader goroutine. Decodes Opus→PCM (16kHz mono), emits `AudioFrame`s via internal channel. Old reader goroutines exit naturally on track EOF |
-| `stt_processor.go` | `STTProcessor` — receives `AudioFrame`s, sends PCM to Soniox websocket, emits `TranscriptFrame`s (with `IsFinal` flag). Two background goroutines: websocket reader + audio writer. Contains `SonioxToken` and `SonioxResponseMessage` types |
-| `llm_processor.go` | `LLMProcessor` — accumulates final `TranscriptFrame` tokens, triggers `runLLM` on `<end>`. Streams OpenAI response (gpt-4.1), emits `LLMResponseStartFrame`, `TextFrame`s (tokens), `LLMResponseEndFrame`. Maintains conversation history. Async bridge pattern |
-| `tts_processor.go` | `TTSProcessor` — receives `TextFrame`s, aggregates into sentences (split on punctuation), sends to Cartesia with single `context_id` per turn (`continue: true`). PCM→Opus encoding (24kHz, 480 samples = 960 bytes per frame). Flushes remaining PCM with silence padding on Cartesia `"done"`. Sends `continue: false` on `LLMResponseEndFrame`. Async bridge pattern |
-| `playback_sink_processor.go` | `PlaybackSinkProcessor` — creates and publishes LiveKit audio track. Writes `AudioFrame`s to track with 20ms ticker pacing |
+| `main.go` | Entry point. Loads `.env`, configures logging (both terminal + `app.log`), silences LiveKit/pion logs, serves HTTP (`:3000`). `handleConnect` creates a new session per client |
+| `livekit_room.go` | `joinRoom(roomName, audioSource)` — bot joins a specific LiveKit room. `onTrackSubscribed` calls `audioSource.SetTrack(track)`. `generateToken()` creates LiveKit JWT tokens |
+| `livekit-client.html` | Browser client using `livekit-client` JS SDK. Connects to room via `/connect`, enables mic, plays remote audio tracks. Connect button disabled during request |
+| `frame.go` | Frame types: `Frame` interface. Concrete: `AudioFrame`, `TextFrame`, `TranscriptFrame{Text, IsFinal}`, `InterruptFrame`, `LLMResponseStartFrame`, `LLMResponseEndFrame`, `WordTimestampFrame{Words, Start}`, `EndFrame` |
+| `frame_processor.go` | `FrameProcessor` interface: `Process(in <-chan Frame, out chan<- Frame)` |
+| `pipeline.go` | `Pipeline` struct, `createSession()` — generates unique room name, creates all processors and wires them up. Each session is fully independent |
+| `turn_context.go` | `TurnContext` — shared across LLM, TTS, and PlaybackSink. Manages per-turn `context.WithCancel` for instant interrupt broadcast, plus spoken word tracking with timestamps |
+| `audio_source_processor.go` | Source processor (ignores `in`). `SetTrack(track)` starts a new reader goroutine. Decodes Opus→PCM (16kHz mono). Old readers exit naturally on track EOF |
+| `stt_processor.go` | Receives `AudioFrame`s, sends PCM to Soniox websocket, emits `TranscriptFrame`s. Auto-reconnects on websocket disconnect |
+| `llm_processor.go` | Accumulates final `TranscriptFrame` tokens, triggers `runLLM` on `<end>`. Streams OpenAI (gpt-4.1). Detects barge-in, manages conversation history via `TurnContext` spoken words |
+| `tts_processor.go` | Aggregates sentences, sends to Cartesia with single `context_id` per turn. PCM→Opus encoding. Interleaves `WordTimestampFrame`s with `AudioFrame`s. Auto-reconnects on websocket disconnect |
+| `playback_sink_processor.go` | Publishes LiveKit audio track. 20ms ticker pacing. Tracks spoken words via `TurnContext.AppendWords()`. Records `playbackStartedAt` on first audio frame |
 
 #### Pipeline wiring:
 ```go
@@ -53,40 +54,21 @@ AudioSourceProcessor → STTProcessor → LLMProcessor → TTSProcessor → Play
 
 ### Pipeline Design Decisions
 
-**Processor communication pattern:** Processors do NOT hold references to each other. All data communication flows through `Process(in, out)` — no shared context parameter. Each processor manages its own internal lifecycle. For processors with background goroutines (websocket readers, etc.), use an **internal channel** to bridge async work back to the `Process` select loop:
+**Processor communication pattern:** Processors do NOT hold references to each other. All data flows through `Process(in, out)` — no shared context parameter. Each processor manages its own lifecycle. For async work, use an **internal channel** to bridge background goroutines back to the `Process` select loop (async bridge pattern).
 
-```go
-// Pattern: async bridge (TTS, STT, Audio Source)
-type TTSProcessor struct {
-    audioFrames chan Frame  // internal: background goroutine → Process loop
-}
-
-func (t *TTSProcessor) Process(in <-chan Frame, out chan<- Frame) {
-    go t.readTTSConnectionData()  // background websocket reader
-    for {
-        select {
-        case frame := <-in:            // handle TextFrame, control frames
-        case frame := <-t.audioFrames: out <- frame  // forward async results
-        }
-    }
-}
-```
-
-Two processor patterns:
-1. **Synchronous**: frame in → process → frame out. No background goroutines needed.
-2. **Async bridge** (TTS, STT, Audio Source, LLM): background goroutine writes to internal `chan Frame`, `Process` forwards to `out`.
-
-**Pipeline lifecycle:** `EndFrame` propagates through the pipeline to shut down all processors. No shared `context.Context` — processors manage their own internal contexts.
+**Pipeline lifecycle:** `EndFrame` propagates through the pipeline to shut down all processors. No shared `context.Context` for lifecycle — processors manage their own internal contexts.
 
 **Cartesia TTS context strategy:** Single `context_id` per LLM turn (not per sentence). All sentences sent with `"continue": true` and `"add_timestamps": true` for word-level tracking. Final flush with `"continue": false`. On interrupt, sends `{"context_id": ..., "cancel": true}` to stop Cartesia server-side generation.
 
 **Track re-subscription:** `AudioSourceProcessor.SetTrack(track)` starts a new reader goroutine. Old goroutine exits naturally on EOF. No pipeline teardown needed.
 
-**Lazy pipeline initialization:** Pipeline is created on first `/connect` request (not at startup) via `sync.Once`.
+**Multi-session:** Each `/connect` request creates a new room (`room-<random>`), a new pipeline, and independent processor instances. No shared state between sessions. All logs prefixed with `[room-XXXXX]` via per-session `*log.Logger`.
+
+**Websocket reconnection:** STT and TTS processors auto-reconnect on websocket errors (handles Soniox/Cartesia idle timeouts of ~15-20s).
 
 #### Interruption / Barge-in (DONE)
 
-**TurnContext** (`pipeline.go`): Shared `context.WithCancel` across LLM, TTS, and PlaybackSink. LLM calls `Cancel()` on barge-in (wakes all processors instantly via `Done()` channel). Calls `Reset()` at the start of each new turn. Processors use the `nil` channel trick: after handling interrupt, set `done = nil` to stop selecting on the closed channel; re-enable on `LLMResponseStartFrame`.
+**TurnContext** (`turn_context.go`): Shared `context.WithCancel` across LLM, TTS, and PlaybackSink. LLM calls `Cancel()` on barge-in (wakes all processors instantly via `Done()` channel). Calls `Reset()` at the start of each new turn. Processors use the **nil channel trick**: after handling interrupt, set `done = nil` to stop selecting on the closed channel; re-enable on `LLMResponseStartFrame`.
 
 **Barge-in detection** (LLM Processor): Any `TranscriptFrame` (final or non-final) arriving while `isStreaming == true` triggers interrupt. Sub-millisecond reaction time (~0.17ms from transcript to cancel). `isStreaming` stays true after `LLMResponseEndFrame` (bot may still be speaking) — only reset on barge-in or next turn start.
 
@@ -96,7 +78,7 @@ Two processor patterns:
 - TTS requests `"add_timestamps": true` from Cartesia
 - Cartesia sends `"timestamps"` messages with words and start times (seconds from context start)
 - TTS pushes `WordTimestampFrame{Words, Start}` into `audioFrames` channel (interleaved with `AudioFrame`s)
-- `SpokenText` shared struct: PlaybackSink appends words + start times; records `playbackStartedAt` on first audio frame
+- `TurnContext` shared struct: PlaybackSink appends words + start times; records `playbackStartedAt` on first audio frame
 - On **barge-in**: `SpokenSoFar()` uses `elapsed = time.Since(playbackStartedAt)` to return only words whose `start <= elapsed`
 - On **normal turn end**: `FlushAll()` returns all words (committed when next turn starts, not on `LLMResponseEndFrame`, since word timestamps may not have all arrived yet)
 - LLM adds the result to `messages` as the assistant turn

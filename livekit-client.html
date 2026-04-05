@@ -1,121 +1,361 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>LiveKit Room</title>
+  <title>Talk</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
   <style>
-    body { font-family: sans-serif; max-width: 800px; margin: 2rem auto; padding: 0 1rem; }
-    #status { padding: 0.5rem; margin: 1rem 0; border-radius: 4px; background: #f0f0f0; }
-    #controls { margin: 1rem 0; }
-    button { padding: 0.5rem 1rem; margin-right: 0.5rem; cursor: pointer; }
-    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    :root {
+      --pico-font-family: "SF Mono", "Fira Code", "Fira Mono", Menlo, Consolas, monospace;
+      --pico-font-size: 14px;
+    }
+    body {
+      margin: 0;
+      padding: 0;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+    header {
+      padding: 1rem 1.5rem;
+      border-bottom: 1px solid var(--pico-muted-border-color);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    header h1 {
+      margin: 0;
+      font-size: 1.1rem;
+      font-weight: 600;
+      letter-spacing: 0.05em;
+    }
+    .controls {
+      display: flex;
+      gap: 0.5rem;
+      align-items: center;
+    }
+    .controls button {
+      margin: 0;
+      padding: 0.4rem 0.8rem;
+      font-size: 0.8rem;
+      width: auto;
+    }
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--pico-muted-color);
+      display: inline-block;
+    }
+    .status-dot.connected {
+      background: #4ade80;
+    }
+    .status-dot.connecting {
+      background: #facc15;
+      animation: pulse 1s infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.4; }
+    }
+    #transcript-area {
+      flex: 1;
+      overflow-y: auto;
+      padding: 1.5rem;
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+    }
+    .turn {
+      max-width: 720px;
+      width: 100%;
+      margin: 0 auto;
+    }
+    .turn-role {
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: var(--pico-muted-color);
+      margin-bottom: 0.25rem;
+    }
+    .turn-text {
+      line-height: 1.6;
+      white-space: pre-wrap;
+      word-wrap: break-word;
+    }
+    .turn.user .turn-text {
+      color: var(--pico-color);
+    }
+    .turn.assistant .turn-text {
+      color: var(--pico-secondary);
+    }
+    .turn-meta {
+      font-size: 0.7rem;
+      color: var(--pico-muted-color);
+      margin-top: 0.25rem;
+    }
+    .latency-badge {
+      display: inline-block;
+      padding: 0.1rem 0.4rem;
+      border-radius: 4px;
+      background: var(--pico-muted-border-color);
+      font-size: 0.65rem;
+      color: var(--pico-muted-color);
+    }
+    .empty-state {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--pico-muted-color);
+      font-size: 0.9rem;
+    }
+    footer {
+      padding: 0.75rem 1.5rem;
+      border-top: 1px solid var(--pico-muted-border-color);
+      text-align: center;
+      font-size: 0.7rem;
+      color: var(--pico-muted-color);
+    }
+    #remote-audio {
+      display: none;
+    }
   </style>
 </head>
-<body>
-  <h1>LiveKit Room Client</h1>
+<body x-data="app()">
+  <header>
+    <div style="display: flex; align-items: center; gap: 0.6rem;">
+      <h1>TALK</h1>
+      <span class="status-dot" :class="statusClass"></span>
+      <span style="font-size: 0.75rem; color: var(--pico-muted-color);" x-text="statusText"></span>
+    </div>
+    <div class="controls">
+      <button @click="connect()" :disabled="connected || connecting" class="outline">Connect</button>
+      <button @click="disconnect()" :disabled="!connected" class="outline secondary">Disconnect</button>
+      <button @click="toggleMic()" :disabled="!connected" class="outline contrast" x-text="micLabel"></button>
+    </div>
+  </header>
 
-  <div id="status">Disconnected</div>
-
-  <div id="controls">
-    <button id="btn-connect">Connect</button>
-    <button id="btn-disconnect" disabled>Disconnect</button>
-    <button id="btn-toggle-mic" disabled>Mute Mic</button>
+  <div id="transcript-area" x-ref="transcript">
+    <template x-if="turns.length === 0 && !connected">
+      <div class="empty-state">Click Connect to start a conversation</div>
+    </template>
+    <template x-if="turns.length === 0 && connected">
+      <div class="empty-state">Listening...</div>
+    </template>
+    <template x-for="(turn, i) in turns" :key="i">
+      <div class="turn" :class="turn.role">
+        <div class="turn-role" x-text="turn.role"></div>
+        <div class="turn-text" x-text="turn.text"></div>
+        <div class="turn-meta" x-show="turn.latency">
+          <span class="latency-badge" x-text="turn.latency + 'ms e2e'"></span>
+        </div>
+      </div>
+    </template>
   </div>
+
+  <footer>
+    <span x-show="connected" x-text="'Room: ' + roomName"></span>
+  </footer>
 
   <div id="remote-audio"></div>
 
-  <script type="module">
-    const {
-      Room,
-      RoomEvent,
-    } = await import("https://cdn.jsdelivr.net/npm/livekit-client@2/dist/livekit-client.esm.mjs");
+  <script>
+    // LiveKit SDK loaded lazily on first connect
+    let Room, RoomEvent;
+    // Keep room and ws outside Alpine's reactive proxy — LiveKit uses
+    // structuredClone internally which breaks on Proxy objects.
+    let _room = null;
+    let _ws = null;
 
-    const statusEl = document.getElementById("status");
-    const remoteAudioEl = document.getElementById("remote-audio");
-    const btnConnect = document.getElementById("btn-connect");
-    const btnDisconnect = document.getElementById("btn-disconnect");
-    const btnToggleMic = document.getElementById("btn-toggle-mic");
+    function app() {
+      return {
+        connected: false,
+        connecting: false,
+        micEnabled: true,
+        roomName: "",
+        turns: [],
+        currentUserText: "",
+        currentAssistantText: "",
 
-    let room = null;
+        get statusClass() {
+          if (this.connected) return "connected";
+          if (this.connecting) return "connecting";
+          return "";
+        },
+        get statusText() {
+          if (this.connected) return "Connected";
+          if (this.connecting) return "Connecting...";
+          return "Disconnected";
+        },
+        get micLabel() {
+          return this.micEnabled ? "Mute" : "Unmute";
+        },
 
-    function setStatus(msg) {
-      statusEl.textContent = msg;
-    }
+        async connect() {
+          this.connecting = true;
+          this.turns = [];
+          this.currentUserText = "";
+          this.currentAssistantText = "";
+          try {
+            // Lazy-load LiveKit SDK on first connect
+            if (!Room) {
+              const lk = await import("https://cdn.jsdelivr.net/npm/livekit-client@2/dist/livekit-client.esm.mjs");
+              Room = lk.Room;
+              RoomEvent = lk.RoomEvent;
+            }
 
-    function setConnectedUI(connected) {
-      btnConnect.disabled = connected;
-      btnDisconnect.disabled = !connected;
-      btnToggleMic.disabled = !connected;
-    }
+            const res = await fetch("/connect");
+            if (!res.ok) throw new Error(res.statusText);
+            const { server_url, token, room_name } = await res.json();
+            this.roomName = room_name;
 
-    async function connect() {
-      btnConnect.disabled = true;
-      setStatus("Creating session...");
+            // Connect WebSocket for UI events
+            const wsProtocol = location.protocol === "https:" ? "wss:" : "ws:";
+            _ws = new WebSocket(`${wsProtocol}//${location.host}/ws?room=${room_name}`);
+            _ws.onmessage = (e) => this.handleUIEvent(JSON.parse(e.data));
+            _ws.onclose = () => console.log("UI WebSocket closed");
 
-      try {
-        const res = await fetch("/connect");
-        if (!res.ok) throw new Error(`Session creation failed: ${res.statusText}`);
-        const { server_url, token } = await res.json();
+            // Connect LiveKit (outside Alpine proxy)
+            _room = new Room();
+            const remoteAudio = document.getElementById("remote-audio");
 
-        room = new Room();
+            _room.on(RoomEvent.TrackSubscribed, (track) => {
+              remoteAudio.appendChild(track.attach());
+            });
+            _room.on(RoomEvent.TrackUnsubscribed, (track) => {
+              for (const el of track.detach()) el.remove();
+            });
+            _room.on(RoomEvent.Disconnected, () => {
+              this.connected = false;
+              this.connecting = false;
+            });
 
-        room.on(RoomEvent.Connected, () => {
-          setStatus(`Connected to room: ${room.name}`);
-          setConnectedUI(true);
-        });
-
-        room.on(RoomEvent.Disconnected, () => {
-          setStatus("Disconnected");
-          setConnectedUI(false);
-          remoteAudioEl.innerHTML = "";
-        });
-
-        room.on(RoomEvent.TrackSubscribed, (track, _pub, participant) => {
-          const el = track.attach();
-          el.dataset.participantId = participant.identity;
-          el.dataset.trackSid = track.sid;
-          remoteAudioEl.appendChild(el);
-        });
-
-        room.on(RoomEvent.TrackUnsubscribed, (track) => {
-          for (const el of track.detach()) {
-            el.remove();
+            await _room.connect(server_url, token);
+            await _room.localParticipant.setMicrophoneEnabled(true);
+            this.connected = true;
+            this.connecting = false;
+          } catch (err) {
+            console.error("Connect error:", err);
+            this.connecting = false;
           }
-        });
+        },
 
-        room.on(RoomEvent.ParticipantConnected, (p) => {
-          setStatus(`Participant joined: ${p.identity}`);
-        });
+        disconnect() {
+          if (_room) {
+            _room.disconnect();
+            _room = null;
+          }
+          if (_ws) {
+            _ws.close();
+            _ws = null;
+          }
+          this.connected = false;
+          this.roomName = "";
+        },
 
-        room.on(RoomEvent.ParticipantDisconnected, (p) => {
-          setStatus(`Participant left: ${p.identity}`);
-        });
+        toggleMic() {
+          if (!_room) return;
+          this.micEnabled = !this.micEnabled;
+          _room.localParticipant.setMicrophoneEnabled(this.micEnabled);
+        },
 
-        setStatus("Connecting...");
-        await room.connect(server_url, token);
-        await room.localParticipant.setMicrophoneEnabled(true);
-      } catch (err) {
-        setStatus(`Error: ${err.message}`);
-        setConnectedUI(false);
-      }
+        handleUIEvent(event) {
+          switch (event.type) {
+            case "user_transcript":
+              if (event.is_final) {
+                this.commitUserTurn(event.text);
+              } else {
+                this.currentUserText += event.text;
+                this.updateOrCreateUserTurn();
+              }
+              break;
+
+            case "assistant_transcript":
+              this.currentAssistantText += event.text;
+              this.updateOrCreateAssistantTurn();
+              this.scrollToBottom();
+              break;
+
+            case "assistant_done":
+              this.currentAssistantText = "";
+              break;
+
+            case "committed_assistant": {
+              // Replace streaming text with what was actually committed to LLM history
+              const assistantTurn = this.findLastAssistantTurn();
+              if (assistantTurn) {
+                if (event.text === "") {
+                  // Nothing was spoken — remove the turn
+                  this.turns.splice(this.turns.indexOf(assistantTurn), 1);
+                } else {
+                  assistantTurn.text = event.text;
+                  assistantTurn.final = true;
+                }
+              }
+              this.currentAssistantText = "";
+              this.scrollToBottom();
+              break;
+            }
+
+            case "latency": {
+              const lastTurn = this.turns[this.turns.length - 1];
+              if (lastTurn && lastTurn.role === "assistant") {
+                lastTurn.latency = event.turn_e2e_ms;
+              }
+              break;
+            }
+          }
+        },
+
+        updateOrCreateUserTurn() {
+          const last = this.turns[this.turns.length - 1];
+          if (last && last.role === "user" && !last.final) {
+            last.text = this.currentUserText;
+          } else {
+            this.turns.push({ role: "user", text: this.currentUserText, final: false, latency: null });
+          }
+          this.scrollToBottom();
+        },
+
+        commitUserTurn(text) {
+          const last = this.turns[this.turns.length - 1];
+          if (last && last.role === "user" && !last.final) {
+            last.text = text;
+            last.final = true;
+          } else {
+            this.turns.push({ role: "user", text: text, final: true, latency: null });
+          }
+          this.currentUserText = "";
+          this.scrollToBottom();
+        },
+
+        updateOrCreateAssistantTurn() {
+          const last = this.turns[this.turns.length - 1];
+          if (last && last.role === "assistant" && this.currentAssistantText) {
+            last.text = this.currentAssistantText;
+          } else {
+            this.turns.push({ role: "assistant", text: this.currentAssistantText, final: false, latency: null });
+          }
+        },
+
+        findLastAssistantTurn() {
+          for (let i = this.turns.length - 1; i >= 0; i--) {
+            if (this.turns[i].role === "assistant") return this.turns[i];
+          }
+          return null;
+        },
+
+        scrollToBottom() {
+          this.$nextTick(() => {
+            const el = this.$refs.transcript;
+            if (el) el.scrollTop = el.scrollHeight;
+          });
+        },
+      };
     }
-
-    function disconnect() {
-      if (room) {
-        room.disconnect();
-        room = null;
-      }
-    }
-
-    btnConnect.addEventListener("click", connect);
-    btnDisconnect.addEventListener("click", disconnect);
-
-    btnToggleMic.addEventListener("click", () => {
-      const enabled = room.localParticipant.isMicrophoneEnabled;
-      room.localParticipant.setMicrophoneEnabled(!enabled);
-      btnToggleMic.textContent = enabled ? "Unmute Mic" : "Mute Mic";
-    });
   </script>
+  <script src="https://cdn.jsdelivr.net/npm/alpinejs@3/dist/cdn.min.js" defer></script>
 </body>
 </html>

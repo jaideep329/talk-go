@@ -22,6 +22,7 @@ func main() {
 	stdr.SetVerbosity(0)
 	lksdk.SetLogger(protoLogger.LogRLogger(stdr.New(log.New(io.Discard, "", 0))))
 	http.HandleFunc("/connect", handleConnect)
+	http.HandleFunc("/ws", handleWebSocket)
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		http.ServeFile(w, r, "livekit-client.html")
 	})
@@ -32,7 +33,7 @@ func main() {
 }
 
 func handleConnect(w http.ResponseWriter, r *http.Request) {
-	roomName := createSession()
+	roomName, _ := createSession()
 
 	token, err := generateToken(roomName, "web-user")
 	if err != nil {
@@ -45,7 +46,36 @@ func handleConnect(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{
 		"server_url": os.Getenv("LIVEKIT_URL"),
 		"token":      token,
+		"room_name":  roomName,
 	})
+}
+
+func handleWebSocket(w http.ResponseWriter, r *http.Request) {
+	roomName := r.URL.Query().Get("room")
+	session := getSession(roomName)
+	if session == nil {
+		http.Error(w, "unknown room", http.StatusNotFound)
+		return
+	}
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Printf("WebSocket upgrade error: %v", err)
+		return
+	}
+	session.UIEvents.AddClient(conn)
+	// Keep connection alive — read until client disconnects
+	for {
+		if _, _, err := conn.ReadMessage(); err != nil {
+			session.UIEvents.RemoveClient(conn)
+			// Cancel session context — stops STT/TTS background goroutines
+			session.Cancel()
+			// Disconnect LiveKit room
+			session.Room.Disconnect()
+			session.Logger.Println("Session cleaned up: LiveKit disconnected, goroutines cancelled")
+			removeSession(roomName)
+			return
+		}
+	}
 }
 
 func loadEnv(path string) {

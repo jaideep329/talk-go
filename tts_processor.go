@@ -34,6 +34,7 @@ type TTSProcessor struct {
 	opusEncoder        *opus.Encoder
 	audioFrames        chan Frame
 	turnCtx            *TurnContext
+	sessionCtx         *SessionContext
 }
 
 type CartesiaTTSMessage struct {
@@ -185,8 +186,17 @@ func (t *TTSProcessor) connect() {
 
 func (t *TTSProcessor) readTTSConnectionData() {
 	for {
+		if t.sessionCtx.Ctx.Err() != nil {
+			t.logger.Println("TTS reader exiting: session closed")
+			t.websocketConn.Close()
+			return
+		}
 		_, msg, err := t.websocketConn.ReadMessage()
 		if err != nil {
+			if t.sessionCtx.Ctx.Err() != nil {
+				t.logger.Println("TTS reader exiting: session closed")
+				return
+			}
 			t.logger.Println("TTS read error, reconnecting:", err)
 			t.connect()
 			continue
@@ -235,7 +245,7 @@ func (t *TTSProcessor) readTTSConnectionData() {
 	}
 }
 
-func NewTTSProcessor(logger *log.Logger, turnCtx *TurnContext) *TTSProcessor {
+func NewTTSProcessor(logger *log.Logger, turnCtx *TurnContext, sessionCtx *SessionContext) *TTSProcessor {
 	opusEncoder, err := opus.NewEncoder(24000, 1, opus.AppVoIP)
 	if err != nil {
 		logger.Println("opus encoder init failed:", err)
@@ -245,6 +255,7 @@ func NewTTSProcessor(logger *log.Logger, turnCtx *TurnContext) *TTSProcessor {
 		opusEncoder: opusEncoder,
 		audioFrames: make(chan Frame, 100),
 		turnCtx:     turnCtx,
+		sessionCtx:  sessionCtx,
 	}
 	t.connect()
 	return t

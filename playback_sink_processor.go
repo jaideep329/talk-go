@@ -15,9 +15,10 @@ type PlaybackSinkProcessor struct {
 	interrupted     bool
 	playbackStarted bool
 	turnCtx         *TurnContext
+	sessionCtx      *SessionContext
 }
 
-func NewPlaybackSinkProcessor(logger *log.Logger, room *lksdk.Room, turnCtx *TurnContext) *PlaybackSinkProcessor {
+func NewPlaybackSinkProcessor(logger *log.Logger, room *lksdk.Room, turnCtx *TurnContext, sessionCtx *SessionContext) *PlaybackSinkProcessor {
 	botTrack, err := lksdk.NewLocalSampleTrack(webrtc.RTPCodecCapability{
 		MimeType:  webrtc.MimeTypeOpus,
 		ClockRate: 48000,
@@ -34,9 +35,10 @@ func NewPlaybackSinkProcessor(logger *log.Logger, room *lksdk.Room, turnCtx *Tur
 	}
 	logger.Println("Published bot audio track")
 	return &PlaybackSinkProcessor{
-		logger:   logger,
-		botTrack: botTrack,
-		turnCtx:  turnCtx,
+		logger:     logger,
+		botTrack:   botTrack,
+		turnCtx:    turnCtx,
+		sessionCtx: sessionCtx,
 	}
 }
 
@@ -62,6 +64,9 @@ func (p *PlaybackSinkProcessor) Process(in <-chan Frame, _ chan<- Frame) {
 				if !p.playbackStarted {
 					p.turnCtx.StartPlayback()
 					p.playbackStarted = true
+					e2eMs := time.Since(p.turnCtx.TurnStarted()).Milliseconds()
+					p.logger.Printf("End-to-end turn latency: %dms\n", e2eMs)
+					p.sessionCtx.UIEvents.Send(UIEvent{Type: "latency", TurnE2EMs: e2eMs})
 				}
 				err := p.botTrack.WriteSample(media.Sample{
 					Data:     f.Data,

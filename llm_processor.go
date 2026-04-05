@@ -5,11 +5,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"strings"
+	"time"
 )
 
 type LLMProcessor struct {
@@ -21,6 +21,9 @@ type LLMProcessor struct {
 	cancelLLM         context.CancelFunc
 	responseFrames    chan Frame
 	turnCtx           *TurnContext
+	sessionCtx        *SessionContext
+	turnStartTime     time.Time
+	firstTokenSent    bool
 }
 
 func (p *LLMProcessor) runLLM(ctx context.Context, userMessage string) {
@@ -77,22 +80,31 @@ func (p *LLMProcessor) runLLM(ctx context.Context, userMessage string) {
 		}
 		if len(chunk.Choices) > 0 {
 			content := chunk.Choices[0].Delta.Content
-			fmt.Print(content)
+			if content == "" {
+				continue
+			}
+			if !p.firstTokenSent {
+				p.firstTokenSent = true
+				llmLatency := time.Since(p.turnStartTime).Milliseconds()
+				p.logger.Printf("LLM first token latency: %dms\n", llmLatency)
+			}
+			p.sessionCtx.UIEvents.Send(UIEvent{Type: "assistant_transcript", Role: "assistant", Text: content})
 			p.responseFrames <- TextFrame{Text: content}
 		}
 	}
 	if ctx.Err() == nil {
+		p.sessionCtx.UIEvents.Send(UIEvent{Type: "assistant_done"})
 		p.responseFrames <- LLMResponseEndFrame{}
-		fmt.Println()
 	}
 }
 
-func NewLLMProcessor(logger *log.Logger, turnCtx *TurnContext) *LLMProcessor {
+func NewLLMProcessor(logger *log.Logger, turnCtx *TurnContext, sessionCtx *SessionContext) *LLMProcessor {
 	return &LLMProcessor{
 		logger:         logger,
 		messages:       []map[string]string{},
 		responseFrames: make(chan Frame, 100),
 		turnCtx:        turnCtx,
+		sessionCtx:     sessionCtx,
 	}
 }
 
@@ -106,6 +118,10 @@ func (p *LLMProcessor) commitSpokenText(interrupted bool) {
 	if spoken != "" {
 		p.logger.Printf("Committing to history (interrupted=%v): %s\n", interrupted, spoken)
 		p.messages = append(p.messages, map[string]string{"role": "assistant", "content": spoken})
+		p.sessionCtx.UIEvents.Send(UIEvent{Type: "committed_assistant", Role: "assistant", Text: spoken})
+	} else if interrupted {
+		// Nothing was spoken — tell frontend to remove the assistant turn
+		p.sessionCtx.UIEvents.Send(UIEvent{Type: "committed_assistant", Role: "assistant", Text: ""})
 	}
 }
 
@@ -132,10 +148,13 @@ func (p *LLMProcessor) Process(in <-chan Frame, out chan<- Frame) {
 					if f.Text == "<end>" {
 						if p.currentTranscript != "" {
 							p.logger.Printf("Final transcript received: %s\n", p.currentTranscript)
+							p.sessionCtx.UIEvents.Send(UIEvent{Type: "user_transcript", Role: "user", Text: p.currentTranscript, IsFinal: true})
 							p.commitSpokenText(false)
 							p.isStreaming = false
 							p.interruptSent = false
 							p.turnCtx.Reset()
+							p.turnStartTime = time.Now()
+							p.firstTokenSent = false
 							ctx, cancel := context.WithCancel(context.Background())
 							p.cancelLLM = cancel
 							go p.runLLM(ctx, p.currentTranscript)
@@ -143,6 +162,7 @@ func (p *LLMProcessor) Process(in <-chan Frame, out chan<- Frame) {
 						}
 					} else {
 						p.currentTranscript += f.Text
+						p.sessionCtx.UIEvents.Send(UIEvent{Type: "user_transcript", Role: "user", Text: f.Text})
 					}
 				}
 			case EndFrame:

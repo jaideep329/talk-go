@@ -20,6 +20,7 @@ type TurnContext struct {
 	words           []string
 	startTimes      []float64 // seconds from context start
 	playbackStarted time.Time // when first audio frame was played
+	turnStarted     time.Time // when user finished speaking (<end> token)
 }
 
 func NewTurnContext() *TurnContext {
@@ -32,6 +33,14 @@ func (t *TurnContext) Reset() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.ctx, t.cancel = context.WithCancel(context.Background())
+	t.turnStarted = time.Now()
+}
+
+// TurnStarted returns when the current turn started.
+func (t *TurnContext) TurnStarted() time.Time {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.turnStarted
 }
 
 // Cancel cancels the current turn (barge-in).

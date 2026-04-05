@@ -24,6 +24,7 @@ type STTProcessor struct {
 	websocketConn    *websocket.Conn
 	transcriptFrames chan TranscriptFrame
 	audioFrames      chan AudioFrame
+	sessionCtx       *SessionContext
 }
 
 func (s *STTProcessor) connect() {
@@ -56,11 +57,12 @@ func (s *STTProcessor) connect() {
 	}
 }
 
-func NewSTTProcessor(logger *log.Logger) *STTProcessor {
+func NewSTTProcessor(logger *log.Logger, sessionCtx *SessionContext) *STTProcessor {
 	p := &STTProcessor{
 		logger:           logger,
 		transcriptFrames: make(chan TranscriptFrame, 100),
 		audioFrames:      make(chan AudioFrame, 100),
+		sessionCtx:       sessionCtx,
 	}
 	p.connect()
 	return p
@@ -68,8 +70,16 @@ func NewSTTProcessor(logger *log.Logger) *STTProcessor {
 
 func (s *STTProcessor) readSTTWebsocket() {
 	for {
+		if s.sessionCtx.Ctx.Err() != nil {
+			s.logger.Println("STT reader exiting: session closed")
+			return
+		}
 		_, msg, err := s.websocketConn.ReadMessage()
 		if err != nil {
+			if s.sessionCtx.Ctx.Err() != nil {
+				s.logger.Println("STT reader exiting: session closed")
+				return
+			}
 			s.logger.Println("STT read error, reconnecting:", err)
 			s.connect()
 			continue
@@ -87,10 +97,19 @@ func (s *STTProcessor) readSTTWebsocket() {
 
 func (s *STTProcessor) writeAudioWebsocket() {
 	for {
-		audioFrame := <-s.audioFrames
-		if err := s.websocketConn.WriteMessage(websocket.BinaryMessage, audioFrame.Data); err != nil {
-			s.logger.Println("STT write error, skipping frame:", err)
-			continue
+		select {
+		case <-s.sessionCtx.Ctx.Done():
+			s.logger.Println("STT writer exiting: session closed")
+			s.websocketConn.Close()
+			return
+		case audioFrame := <-s.audioFrames:
+			if err := s.websocketConn.WriteMessage(websocket.BinaryMessage, audioFrame.Data); err != nil {
+				if s.sessionCtx.Ctx.Err() != nil {
+					return
+				}
+				s.logger.Println("STT write error, skipping frame:", err)
+				continue
+			}
 		}
 	}
 }

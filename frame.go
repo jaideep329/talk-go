@@ -12,6 +12,7 @@ const (
 	Interrupt
 	LLMResponseStart
 	LLMResponseEnd
+	Transcript
 )
 
 type AudioFrame struct {
@@ -40,3 +41,10 @@ type LLMResponseEndFrame struct {
 }
 
 func (f LLMResponseEndFrame) FrameType() FrameType { return LLMResponseEnd }
+
+type TranscriptFrame struct {
+	Text    string
+	IsFinal bool
+}
+
+func (f TranscriptFrame) FrameType() FrameType { return Transcript }

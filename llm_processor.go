@@ -26,11 +26,7 @@ type LLMProcessor struct {
 	firstTokenSent    bool
 }
 
-func (p *LLMProcessor) runLLM(ctx context.Context, userMessage string) {
-	if len(p.messages) == 0 {
-		p.messages = append(p.messages, map[string]string{"role": "system", "content": "You are a helpful assistant. Always respond in exactly 2 sentences. Never respond with just 1 sentence."})
-	}
-	p.messages = append(p.messages, map[string]string{"role": "user", "content": userMessage})
+func (p *LLMProcessor) runLLM(ctx context.Context) {
 	body := map[string]interface{}{
 		"model":    "gpt-4.1",
 		"stream":   true,
@@ -117,9 +113,29 @@ func (p *LLMProcessor) commitSpokenText(interrupted bool) {
 		p.logger.Printf("Committing to history (interrupted=%v): %s\n", interrupted, spoken)
 		p.messages = append(p.messages, map[string]string{"role": "assistant", "content": spoken})
 		p.sessionCtx.UIEvents.Send(UIEvent{Type: "committed_assistant", Role: "assistant", Text: spoken})
-	} else if interrupted {
-		// Nothing was spoken — tell frontend to remove the assistant turn
-		p.sessionCtx.UIEvents.Send(UIEvent{Type: "committed_assistant", Role: "assistant", Text: ""})
+	}
+}
+
+// lastMessageRole returns the role of the last message in the conversation history.
+func (p *LLMProcessor) lastMessageRole() string {
+	if len(p.messages) == 0 {
+		return ""
+	}
+	return p.messages[len(p.messages)-1]["role"]
+}
+
+// addUserMessage either appends to the last user message (if no assistant
+// response came between) or creates a new user message.
+func (p *LLMProcessor) addUserMessage(text string) {
+	if p.lastMessageRole() == "user" {
+		// Concatenate — previous turn got no assistant response (barge-in with nothing spoken)
+		last := p.messages[len(p.messages)-1]
+		last["content"] += " " + text
+		p.logger.Printf("Concatenated user message: %s\n", last["content"])
+		p.sessionCtx.UIEvents.Send(UIEvent{Type: "user_transcript", Role: "user", Text: last["content"], IsFinal: true})
+	} else {
+		p.messages = append(p.messages, map[string]string{"role": "user", "content": text})
+		p.sessionCtx.UIEvents.Send(UIEvent{Type: "user_transcript", Role: "user", Text: text, IsFinal: true})
 	}
 }
 
@@ -152,19 +168,21 @@ func (p *LLMProcessor) Process(in <-chan Frame, out chan<- Frame) {
 					if f.Text == "<end>" {
 						if p.currentTranscript != "" {
 							p.logger.Printf("Final transcript received: %s\n", p.currentTranscript)
-							p.sessionCtx.UIEvents.Send(UIEvent{Type: "user_transcript", Role: "user", Text: p.currentTranscript, IsFinal: true})
+							if len(p.messages) == 0 {
+								p.messages = append(p.messages, map[string]string{"role": "system", "content": "You are a helpful assistant. Always respond in exactly 2 sentences. Never respond with just 1 sentence."})
+							}
+							p.addUserMessage(p.currentTranscript)
 							p.interruptSent = false
 							p.turnCtx.Reset()
 							p.turnStartTime = time.Now()
 							p.firstTokenSent = false
 							ctx, cancel := context.WithCancel(context.Background())
 							p.cancelLLM = cancel
-							go p.runLLM(ctx, p.currentTranscript)
+							go p.runLLM(ctx)
 							p.currentTranscript = ""
 						}
 					} else {
 						p.currentTranscript += f.Text
-						p.sessionCtx.UIEvents.Send(UIEvent{Type: "user_transcript", Role: "user", Text: f.Text})
 					}
 				}
 			case EndFrame:

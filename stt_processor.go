@@ -25,6 +25,7 @@ type STTProcessor struct {
 	transcriptFrames chan TranscriptFrame
 	audioFrames      chan AudioFrame
 	sessionCtx       *SessionContext
+	finalText        string // accumulated final tokens for live display
 }
 
 func (s *STTProcessor) connect() {
@@ -89,8 +90,28 @@ func (s *STTProcessor) readSTTWebsocket() {
 			s.logger.Println("STT json unmarshal error:", err)
 			continue
 		}
+
+		// Build live transcript: finals accumulate, non-finals replace each response
+		var nonFinalText string
+		var hasEnd bool
 		for _, token := range resp.Tokens {
+			if token.IsFinal {
+				if token.Text == "<end>" {
+					hasEnd = true
+				} else {
+					s.finalText += token.Text
+				}
+			} else {
+				nonFinalText += token.Text
+			}
 			s.transcriptFrames <- TranscriptFrame{Text: token.Text, IsFinal: token.IsFinal}
+		}
+
+		if hasEnd {
+			s.sessionCtx.UIEvents.Send(UIEvent{Type: "live_transcript", Text: ""})
+			s.finalText = ""
+		} else if s.finalText != "" || nonFinalText != "" {
+			s.sessionCtx.UIEvents.Send(UIEvent{Type: "live_transcript", Text: s.finalText + nonFinalText})
 		}
 	}
 }

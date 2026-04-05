@@ -118,6 +118,28 @@
       font-size: 0.7rem;
       color: var(--pico-muted-color);
     }
+    #live-transcript {
+      padding: 0.75rem 1.5rem;
+      border-top: 1px solid var(--pico-muted-border-color);
+      max-width: 720px;
+      margin: 0 auto;
+      width: 100%;
+    }
+    .live-label {
+      font-size: 0.65rem;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: var(--pico-muted-color);
+      margin-bottom: 0.2rem;
+    }
+    .live-text {
+      color: var(--pico-muted-color);
+      font-style: italic;
+      line-height: 1.5;
+    }
+    [x-cloak] {
+      display: none !important;
+    }
     #remote-audio {
       display: none;
     }
@@ -155,6 +177,11 @@
     </template>
   </div>
 
+  <div id="live-transcript" x-show="liveText" x-cloak>
+    <div class="live-label">speaking</div>
+    <div class="live-text" x-text="liveText"></div>
+  </div>
+
   <footer>
     <span x-show="connected" x-text="'Room: ' + roomName"></span>
   </footer>
@@ -176,7 +203,8 @@
         micEnabled: true,
         roomName: "",
         turns: [],
-        currentUserText: "",
+        liveText: "",
+        pendingLatency: null,
 
         get statusClass() {
           if (this.connected) return "connected";
@@ -195,7 +223,6 @@
         async connect() {
           this.connecting = true;
           this.turns = [];
-          this.currentUserText = "";
           try {
             // Lazy-load LiveKit SDK on first connect
             if (!Room) {
@@ -262,50 +289,35 @@
         handleUIEvent(event) {
           switch (event.type) {
             case "user_transcript":
-              if (event.is_final) {
-                this.commitUserTurn(event.text);
-              } else {
-                this.currentUserText += event.text;
-                this.updateOrCreateUserTurn();
-              }
+              this.commitUserTurn(event.text);
+              break;
+
+            case "live_transcript":
+              this.liveText = event.text;
               break;
 
             case "committed_assistant":
               if (event.text !== "") {
-                this.turns.push({ role: "assistant", text: event.text, latency: null });
+                this.turns.push({ role: "assistant", text: event.text, latency: this.pendingLatency });
               }
+              this.pendingLatency = null;
               this.scrollToBottom();
               break;
 
-            case "latency": {
-              const lastTurn = this.turns[this.turns.length - 1];
-              if (lastTurn && lastTurn.role === "assistant") {
-                lastTurn.latency = event.turn_e2e_ms;
-              }
+            case "latency":
+              this.pendingLatency = event.turn_e2e_ms;
               break;
-            }
           }
-        },
-
-        updateOrCreateUserTurn() {
-          const last = this.turns[this.turns.length - 1];
-          if (last && last.role === "user" && !last.final) {
-            last.text = this.currentUserText;
-          } else {
-            this.turns.push({ role: "user", text: this.currentUserText, final: false, latency: null });
-          }
-          this.scrollToBottom();
         },
 
         commitUserTurn(text) {
           const last = this.turns[this.turns.length - 1];
-          if (last && last.role === "user" && !last.final) {
+          if (last && last.role === "user") {
+            // Update existing user turn (concatenated from multiple endpoints)
             last.text = text;
-            last.final = true;
           } else {
-            this.turns.push({ role: "user", text: text, final: true, latency: null });
+            this.turns.push({ role: "user", text: text, latency: null });
           }
-          this.currentUserText = "";
           this.scrollToBottom();
         },
 

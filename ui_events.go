@@ -14,9 +14,9 @@ type UIEvent struct {
 	Type string `json:"type"`
 
 	// Transcript fields
-	Role    string `json:"role,omitempty"`     // "user" or "assistant"
-	Text    string `json:"text,omitempty"`     // transcript text
-	IsFinal bool   `json:"is_final,omitempty"` // true = final transcript, false = interim/streaming
+	Role    string `json:"role,omitempty"` // "user" or "assistant"
+	Text    string `json:"text"`           // transcript text (no omitempty — empty string is meaningful)
+	IsFinal bool   `json:"is_final,omitempty"`
 
 	// Latency fields
 	TurnE2EMs int64 `json:"turn_e2e_ms,omitempty"` // end-to-end turn latency

@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -14,10 +15,15 @@ import (
 type LLMProcessor struct {
 	messages          []map[string]string
 	currentTranscript string
+	currentResponse   string
+	isStreaming       bool
+	interruptSent     bool
+	cancelLLM         context.CancelFunc
 	responseFrames    chan Frame
+	turnCtx           *TurnContext
 }
 
-func (p *LLMProcessor) runLLM(userMessage string) {
+func (p *LLMProcessor) runLLM(ctx context.Context, userMessage string) {
 	if len(p.messages) == 0 {
 		p.messages = append(p.messages, map[string]string{"role": "system", "content": "You are a helpful assistant. Always respond in exactly 2 sentences. Never respond with just 1 sentence."})
 	}
@@ -33,7 +39,7 @@ func (p *LLMProcessor) runLLM(userMessage string) {
 		return
 	}
 
-	req, err := http.NewRequest("POST", "https://api.openai.com/v1/chat/completions", bytes.NewReader(jsonBody))
+	req, err := http.NewRequestWithContext(ctx, "POST", "https://api.openai.com/v1/chat/completions", bytes.NewReader(jsonBody))
 	if err != nil {
 		log.Println("request error:", err)
 		return
@@ -49,7 +55,6 @@ func (p *LLMProcessor) runLLM(userMessage string) {
 	defer resp.Body.Close()
 
 	scanner := bufio.NewScanner(resp.Body)
-	responseText := ""
 	for scanner.Scan() {
 		line := scanner.Text()
 		if !strings.HasPrefix(line, "data: ") {
@@ -73,20 +78,21 @@ func (p *LLMProcessor) runLLM(userMessage string) {
 		if len(chunk.Choices) > 0 {
 			content := chunk.Choices[0].Delta.Content
 			fmt.Print(content)
-			responseText += content
 			p.responseFrames <- TextFrame{Text: content}
 		}
 	}
-	p.responseFrames <- LLMResponseEndFrame{}
-	fmt.Println()
-	p.messages = append(p.messages, map[string]string{"role": "assistant", "content": responseText})
+	// Only send EndFrame if we weren't cancelled
+	if ctx.Err() == nil {
+		p.responseFrames <- LLMResponseEndFrame{}
+		fmt.Println()
+	}
 }
 
-func NewLLMProcessor() *LLMProcessor {
+func NewLLMProcessor(turnCtx *TurnContext) *LLMProcessor {
 	return &LLMProcessor{
-		messages:          []map[string]string{},
-		responseFrames:    make(chan Frame, 100),
-		currentTranscript: "",
+		messages:       []map[string]string{},
+		responseFrames: make(chan Frame, 100),
+		turnCtx:        turnCtx,
 	}
 }
 
@@ -99,11 +105,34 @@ func (p *LLMProcessor) Process(in <-chan Frame, out chan<- Frame) {
 			}
 			switch f := frame.(type) {
 			case TranscriptFrame:
+				if p.isStreaming && !p.interruptSent {
+					// BARGE-IN: trigger on any transcript while bot is speaking
+					log.Println("Barge-in detected, cancelling LLM")
+					if p.cancelLLM != nil {
+						p.cancelLLM()
+					}
+					p.turnCtx.Cancel() // broadcast to TTS + PlaybackSink
+					p.isStreaming = false
+					p.interruptSent = true
+					// Save partial response to history
+					if p.currentResponse != "" {
+						p.messages = append(p.messages, map[string]string{"role": "assistant", "content": p.currentResponse})
+						p.currentResponse = ""
+					}
+				}
+				// Always accumulate final tokens for transcript
 				if f.IsFinal {
 					if f.Text == "<end>" {
-						log.Printf("Final transcript received: %s\n", p.currentTranscript)
-						go p.runLLM(p.currentTranscript)
-						p.currentTranscript = ""
+						if p.currentTranscript != "" {
+							log.Printf("Final transcript received: %s\n", p.currentTranscript)
+							p.isStreaming = false
+							p.interruptSent = false
+							p.turnCtx.Reset() // new context for new turn
+							ctx, cancel := context.WithCancel(context.Background())
+							p.cancelLLM = cancel
+							go p.runLLM(ctx, p.currentTranscript)
+							p.currentTranscript = ""
+						}
 					} else {
 						p.currentTranscript += f.Text
 					}
@@ -113,7 +142,23 @@ func (p *LLMProcessor) Process(in <-chan Frame, out chan<- Frame) {
 				return
 			}
 		case responseFrame := <-p.responseFrames:
-			out <- responseFrame
+			switch responseFrame.(type) {
+			case LLMResponseStartFrame:
+				p.isStreaming = true
+				p.currentResponse = ""
+				out <- responseFrame
+			case LLMResponseEndFrame:
+				p.messages = append(p.messages, map[string]string{"role": "assistant", "content": p.currentResponse})
+				p.currentResponse = ""
+				out <- responseFrame
+			default:
+				if p.isStreaming {
+					if tf, ok := responseFrame.(TextFrame); ok {
+						p.currentResponse += tf.Text
+					}
+					out <- responseFrame
+				}
+			}
 		}
 	}
 }

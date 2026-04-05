@@ -18,6 +18,7 @@ func main() {
 	loadEnv(".env")
 	appLog, _ := os.Create("app.log")
 	log.SetOutput(io.MultiWriter(os.Stderr, appLog))
+	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
 	stdr.SetVerbosity(0)
 	lksdk.SetLogger(protoLogger.LogRLogger(stdr.New(log.New(io.Discard, "", 0))))
 	http.HandleFunc("/connect", handleConnect)

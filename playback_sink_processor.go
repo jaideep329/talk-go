@@ -10,10 +10,12 @@ import (
 )
 
 type PlaybackSinkProcessor struct {
-	botTrack *lksdk.LocalSampleTrack
+	botTrack    *lksdk.LocalSampleTrack
+	interrupted bool
+	turnCtx     *TurnContext
 }
 
-func NewPlaybackSinkProcessor(room *lksdk.Room) *PlaybackSinkProcessor {
+func NewPlaybackSinkProcessor(room *lksdk.Room, turnCtx *TurnContext) *PlaybackSinkProcessor {
 	botTrack, err := lksdk.NewLocalSampleTrack(webrtc.RTPCodecCapability{
 		MimeType:  webrtc.MimeTypeOpus,
 		ClockRate: 48000,
@@ -29,28 +31,49 @@ func NewPlaybackSinkProcessor(room *lksdk.Room) *PlaybackSinkProcessor {
 		return nil
 	}
 	log.Println("Published bot audio track")
-	return &PlaybackSinkProcessor{botTrack: botTrack}
+	return &PlaybackSinkProcessor{
+		botTrack: botTrack,
+		turnCtx:  turnCtx,
+	}
 }
 
 func (p *PlaybackSinkProcessor) Process(in <-chan Frame, _ chan<- Frame) {
 	ticker := time.NewTicker(20 * time.Millisecond)
 	defer ticker.Stop()
-	for frame := range in {
-		switch f := frame.(type) {
-		case AudioFrame:
-			err := p.botTrack.WriteSample(media.Sample{
-				Data:     f.Data,
-				Duration: 20 * time.Millisecond,
-			}, nil)
-			if err != nil {
-				log.Println("track write error:", err)
-				continue
+	done := p.turnCtx.Done()
+	for {
+		select {
+		case <-done:
+			p.interrupted = true
+			done = nil // stop selecting on closed channel until next turn
+			log.Println("Playback interrupted")
+		case frame, ok := <-in:
+			if !ok {
+				return
 			}
-			<-ticker.C
-		case EndFrame:
-			return
-		default:
-			log.Printf("PlaybackSink received frame of type %T\n", f)
+			switch f := frame.(type) {
+			case AudioFrame:
+				if p.interrupted {
+					continue
+				}
+				err := p.botTrack.WriteSample(media.Sample{
+					Data:     f.Data,
+					Duration: 20 * time.Millisecond,
+				}, nil)
+				if err != nil {
+					log.Println("track write error:", err)
+					continue
+				}
+				<-ticker.C
+			case LLMResponseStartFrame:
+				log.Println("LLM response started, resetting playback state")
+				p.interrupted = false
+				done = p.turnCtx.Done() // re-enable interrupt for new turn
+			case EndFrame:
+				return
+			default:
+				log.Printf("PlaybackSink received frame of type %T\n", f)
+			}
 		}
 	}
 }

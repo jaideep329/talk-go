@@ -31,6 +31,7 @@ type TTSProcessor struct {
 	pcmBuffer          []byte
 	opusEncoder        *opus.Encoder
 	audioFrames        chan Frame
+	turnCtx            *TurnContext
 }
 
 type CartesiaTTSMessage struct {
@@ -83,6 +84,9 @@ func (t *TTSProcessor) sendTextToTTS(text string) {
 }
 
 func (t *TTSProcessor) ResetTTSContext() {
+	if t.currentContextId == "" {
+		return // already cancelled by interrupt
+	}
 	payload := map[string]interface{}{
 		"model_id":      "sonic-3",
 		"transcript":    "",
@@ -97,7 +101,23 @@ func (t *TTSProcessor) ResetTTSContext() {
 	}
 }
 
+func (t *TTSProcessor) CancelTTSContext() {
+	if t.currentContextId == "" {
+		return
+	}
+	payload := map[string]interface{}{
+		"context_id": t.currentContextId,
+		"cancel":     true,
+	}
+	if err := t.websocketConn.WriteJSON(payload); err != nil {
+		log.Println("failed to cancel TTS context:", err)
+	}
+}
+
 func (t *TTSProcessor) handleAudioChunkMessage(audioMsg *CartesiaTTSAudioChunkMessage) {
+	if t.currentContextId == "" {
+		return // context was cancelled, ignore stale chunks
+	}
 	encodedBytes, err := base64.StdEncoding.DecodeString(audioMsg.Data)
 	if err != nil {
 		log.Println("base64 decode error:", err)
@@ -109,11 +129,12 @@ func (t *TTSProcessor) handleAudioChunkMessage(audioMsg *CartesiaTTSAudioChunkMe
 		opusFrame := t.makeOpusData()
 		t.audioFrames <- AudioFrame{Data: opusFrame}
 	}
-
 }
 
 func (t *TTSProcessor) pushRemainingAudioFrames() {
-
+	if t.currentContextId == "" {
+		return // context was cancelled
+	}
 	if len(t.pcmBuffer) > 0 {
 		for len(t.pcmBuffer) < 960 {
 			t.pcmBuffer = append(t.pcmBuffer, 0, 0)
@@ -153,7 +174,9 @@ func (t *TTSProcessor) readTTSConnectionData() {
 		}
 
 		if resp.Error != "" {
-			log.Println("TTS error message received:", resp.Error)
+			if !strings.Contains(resp.Error, "Invalid context ID") {
+				log.Println("TTS error message received:", resp.Error)
+			}
 			continue
 		} else {
 			switch resp.Type {
@@ -186,7 +209,7 @@ func (t *TTSProcessor) readTTSConnectionData() {
 	}
 }
 
-func NewTTSProcessor() *TTSProcessor {
+func NewTTSProcessor(turnCtx *TurnContext) *TTSProcessor {
 	conn, _, err := websocket.DefaultDialer.Dial("wss://api.cartesia.ai/tts/websocket?cartesia_version=2025-04-16&api_key="+os.Getenv("CARTESIA_API_KEY"), nil)
 	if err != nil {
 		log.Println("TTS websocket connect failed:", err)
@@ -196,13 +219,23 @@ func NewTTSProcessor() *TTSProcessor {
 		log.Println("opus encoder int failed:", err)
 	}
 	audioFrames := make(chan Frame, 100)
-	return &TTSProcessor{currentAggregation: "", websocketConn: conn, opusEncoder: opusEncoder, audioFrames: audioFrames}
+	return &TTSProcessor{currentAggregation: "", websocketConn: conn, opusEncoder: opusEncoder, audioFrames: audioFrames, turnCtx: turnCtx}
 }
 
 func (t *TTSProcessor) Process(in <-chan Frame, out chan<- Frame) {
 	go t.readTTSConnectionData()
+	done := t.turnCtx.Done()
 	for {
 		select {
+		case <-done:
+			// Barge-in: cancel Cartesia, clear state
+			t.CancelTTSContext()
+			drainChannel(t.audioFrames)
+			t.currentAggregation = ""
+			t.currentContextId = ""
+			t.pcmBuffer = nil
+			done = nil // stop selecting on closed channel until next turn
+			log.Println("TTS interrupted, cleared state")
 		case frame, ok := <-in:
 			if !ok {
 				return
@@ -215,6 +248,7 @@ func (t *TTSProcessor) Process(in <-chan Frame, out chan<- Frame) {
 				t.currentAggregation = ""
 				t.pcmBuffer = nil
 				t.currentContextId = fmt.Sprintf("ctx-%d", rand.IntN(9000000))
+				done = t.turnCtx.Done() // re-enable interrupt for new turn
 				log.Println("LLM response started, resetting TTS aggregation")
 				out <- f
 			case TextFrame:
@@ -223,26 +257,34 @@ func (t *TTSProcessor) Process(in <-chan Frame, out chan<- Frame) {
 					t.sendTextToTTS(t.currentAggregation)
 					t.currentAggregation = ""
 				}
-				//log.Printf("Received text frame: %s\n", f.Text)
 			case LLMResponseEndFrame:
-
 				if strings.TrimSpace(t.currentAggregation) != "" {
 					t.sendTextToTTS(t.currentAggregation)
 				}
 				t.ResetTTSContext()
 				t.currentAggregation = ""
-				t.currentContextId = ""
 				t.pcmBuffer = nil
-				log.Println("LLM response ended, clearing TTS aggregation and context")
+				log.Println("LLM response ended, flushing TTS context")
 				out <- f
 			default:
-				log.Printf("Received non-text frame of type %T\n", frame)
+				log.Printf("TTS received unexpected frame: %T\n", frame)
 			}
 		case frame, ok := <-t.audioFrames:
 			if !ok {
 				return
 			}
 			out <- frame
+		}
+	}
+}
+
+func drainChannel(ch chan Frame) {
+	for {
+		select {
+		case <-ch:
+			// discard the element
+		default:
+			return // channel is empty, stop
 		}
 	}
 }

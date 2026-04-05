@@ -2,20 +2,19 @@ package main
 
 import (
 	"encoding/binary"
-	"log"
 
 	"github.com/hraban/opus"
 	"github.com/pion/webrtc/v4"
 )
 
 type AudioSourceProcessor struct {
-	logger      *log.Logger
+	sessionCtx  *SessionContext
 	audioFrames chan Frame
 }
 
-func NewAudioSourceProcessor(logger *log.Logger) *AudioSourceProcessor {
+func NewAudioSourceProcessor(sessionCtx *SessionContext) *AudioSourceProcessor {
 	return &AudioSourceProcessor{
-		logger:      logger,
+		sessionCtx:  sessionCtx,
 		audioFrames: make(chan Frame, 100),
 	}
 }
@@ -23,7 +22,7 @@ func NewAudioSourceProcessor(logger *log.Logger) *AudioSourceProcessor {
 func (a *AudioSourceProcessor) readAudioTrack(track *webrtc.TrackRemote) {
 	decoder, err := opus.NewDecoder(16000, 1)
 	if err != nil {
-		a.logger.Fatal("failed to create opus decoder:", err)
+		a.sessionCtx.Logger.Fatal("failed to create opus decoder:", err)
 	}
 
 	pcmBuf := make([]int16, 960)
@@ -31,13 +30,13 @@ func (a *AudioSourceProcessor) readAudioTrack(track *webrtc.TrackRemote) {
 	for {
 		rtpPacket, _, err := track.ReadRTP()
 		if err != nil {
-			a.logger.Println("track read error:", err)
+			a.sessionCtx.Logger.Println("track read error:", err)
 			return
 		}
 
 		n, err := decoder.Decode(rtpPacket.Payload, pcmBuf)
 		if err != nil {
-			a.logger.Println("opus decode error:", err)
+			a.sessionCtx.Logger.Println("opus decode error:", err)
 			continue
 		}
 

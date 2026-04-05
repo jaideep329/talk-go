@@ -1,7 +1,6 @@
 package main
 
 import (
-	"log"
 	"time"
 
 	lksdk "github.com/livekit/server-sdk-go/v2"
@@ -10,35 +9,33 @@ import (
 )
 
 type PlaybackSinkProcessor struct {
-	logger          *log.Logger
+	sessionCtx      *SessionContext
+	turnCtx         *TurnContext
 	botTrack        *lksdk.LocalSampleTrack
 	interrupted     bool
 	playbackStarted bool
-	turnCtx         *TurnContext
-	sessionCtx      *SessionContext
 }
 
-func NewPlaybackSinkProcessor(logger *log.Logger, room *lksdk.Room, turnCtx *TurnContext, sessionCtx *SessionContext) *PlaybackSinkProcessor {
+func NewPlaybackSinkProcessor(sessionCtx *SessionContext, turnCtx *TurnContext) *PlaybackSinkProcessor {
 	botTrack, err := lksdk.NewLocalSampleTrack(webrtc.RTPCodecCapability{
 		MimeType:  webrtc.MimeTypeOpus,
 		ClockRate: 48000,
 		Channels:  2,
 	})
 	if err != nil {
-		logger.Fatal("failed to create local track:", err)
+		sessionCtx.Logger.Fatal("failed to create local track:", err)
 	}
-	_, err = room.LocalParticipant.PublishTrack(botTrack, &lksdk.TrackPublicationOptions{
+	_, err = sessionCtx.Room.LocalParticipant.PublishTrack(botTrack, &lksdk.TrackPublicationOptions{
 		Name: "bot-audio",
 	})
 	if err != nil {
-		logger.Fatal("failed to publish track:", err)
+		sessionCtx.Logger.Fatal("failed to publish track:", err)
 	}
-	logger.Println("Published bot audio track")
+	sessionCtx.Logger.Println("Published bot audio track")
 	return &PlaybackSinkProcessor{
-		logger:     logger,
-		botTrack:   botTrack,
-		turnCtx:    turnCtx,
 		sessionCtx: sessionCtx,
+		turnCtx:    turnCtx,
+		botTrack:   botTrack,
 	}
 }
 
@@ -51,7 +48,7 @@ func (p *PlaybackSinkProcessor) Process(in <-chan Frame, _ chan<- Frame) {
 		case <-done:
 			p.interrupted = true
 			done = nil
-			p.logger.Println("Playback interrupted")
+			p.sessionCtx.Logger.Println("Playback interrupted")
 		case frame, ok := <-in:
 			if !ok {
 				return
@@ -64,7 +61,7 @@ func (p *PlaybackSinkProcessor) Process(in <-chan Frame, _ chan<- Frame) {
 				if !p.playbackStarted {
 					p.playbackStarted = true
 					e2eMs := time.Since(p.turnCtx.TurnStarted()).Milliseconds()
-					p.logger.Printf("End-to-end turn latency: %dms\n", e2eMs)
+					p.sessionCtx.Logger.Printf("End-to-end turn latency: %dms\n", e2eMs)
 					p.sessionCtx.UIEvents.Send(UIEvent{Type: "latency", TurnE2EMs: e2eMs})
 				}
 				err := p.botTrack.WriteSample(media.Sample{
@@ -72,7 +69,7 @@ func (p *PlaybackSinkProcessor) Process(in <-chan Frame, _ chan<- Frame) {
 					Duration: 20 * time.Millisecond,
 				}, nil)
 				if err != nil {
-					p.logger.Println("track write error:", err)
+					p.sessionCtx.Logger.Println("track write error:", err)
 					continue
 				}
 				<-ticker.C
@@ -84,7 +81,7 @@ func (p *PlaybackSinkProcessor) Process(in <-chan Frame, _ chan<- Frame) {
 			case TTSDoneFrame:
 				if !p.interrupted {
 					p.turnCtx.MarkPlaybackDone()
-					p.logger.Println("Playback complete, marked turn done")
+					p.sessionCtx.Logger.Println("Playback complete, marked turn done")
 				}
 			case LLMResponseStartFrame:
 				p.interrupted = false
@@ -93,7 +90,7 @@ func (p *PlaybackSinkProcessor) Process(in <-chan Frame, _ chan<- Frame) {
 			case EndFrame:
 				return
 			default:
-				p.logger.Printf("PlaybackSink received frame of type %T\n", f)
+				p.sessionCtx.Logger.Printf("PlaybackSink received frame of type %T\n", f)
 			}
 		}
 	}

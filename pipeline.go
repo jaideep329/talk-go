@@ -27,18 +27,17 @@ func (p *Pipeline) Run() {
 	}
 }
 
-// SessionContext is passed to processors that need session-level concerns
-// (cancellation for cleanup, UI events for frontend updates).
+// SessionContext is the single dependency passed to all processors.
 type SessionContext struct {
 	Ctx      context.Context
+	Logger   *log.Logger
+	Room     *lksdk.Room
 	UIEvents *UIEventSender
 }
 
 type Session struct {
-	UIEvents *UIEventSender
-	Cancel   context.CancelFunc
-	Room     *lksdk.Room
-	Logger   *log.Logger
+	SessionCtx *SessionContext
+	Cancel     context.CancelFunc
 }
 
 var (
@@ -63,21 +62,20 @@ func createSession() (string, *Session) {
 	logger := log.New(log.Writer(), fmt.Sprintf("[%s] ", roomName), log.Flags())
 	ctx, cancel := context.WithCancel(context.Background())
 	uiEvents := NewUIEventSender(logger)
-	sessionCtx := &SessionContext{Ctx: ctx, UIEvents: uiEvents}
 
+	sessionCtx := &SessionContext{Ctx: ctx, Logger: logger, UIEvents: uiEvents}
 	turnCtx := NewTurnContext()
-	audioSource := NewAudioSourceProcessor(logger)
-	room := joinRoom(roomName, audioSource)
-
-	session := &Session{UIEvents: uiEvents, Cancel: cancel, Room: room, Logger: logger}
+	audioSource := NewAudioSourceProcessor(sessionCtx)
+	sessionCtx.Room = joinRoom(roomName, audioSource)
+	session := &Session{SessionCtx: sessionCtx, Cancel: cancel}
 	sessionsMu.Lock()
 	sessions[roomName] = session
 	sessionsMu.Unlock()
 
-	sttProcessor := NewSTTProcessor(logger, sessionCtx)
-	llmProcessor := NewLLMProcessor(logger, turnCtx, sessionCtx)
-	ttsProcessor := NewTTSProcessor(logger, turnCtx, sessionCtx)
-	playbackSink := NewPlaybackSinkProcessor(logger, room, turnCtx, sessionCtx)
+	sttProcessor := NewSTTProcessor(sessionCtx)
+	llmProcessor := NewLLMProcessor(sessionCtx, turnCtx)
+	ttsProcessor := NewTTSProcessor(sessionCtx, turnCtx)
+	playbackSink := NewPlaybackSinkProcessor(sessionCtx, turnCtx)
 	pipeline := NewPipeline([]FrameProcessor{audioSource, sttProcessor, llmProcessor, ttsProcessor, playbackSink})
 	go pipeline.Run()
 	return roomName, session

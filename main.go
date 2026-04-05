@@ -62,16 +62,14 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		log.Printf("WebSocket upgrade error: %v", err)
 		return
 	}
-	session.UIEvents.AddClient(conn)
+	session.SessionCtx.UIEvents.AddClient(conn)
 	// Keep connection alive — read until client disconnects
 	for {
 		if _, _, err := conn.ReadMessage(); err != nil {
-			session.UIEvents.RemoveClient(conn)
-			// Cancel session context — stops STT/TTS background goroutines
+			session.SessionCtx.UIEvents.RemoveClient(conn)
 			session.Cancel()
-			// Disconnect LiveKit room
-			session.Room.Disconnect()
-			session.Logger.Println("Session cleaned up: LiveKit disconnected, goroutines cancelled")
+			session.SessionCtx.Room.Disconnect()
+			session.SessionCtx.Logger.Println("Session cleaned up: LiveKit disconnected, goroutines cancelled")
 			removeSession(roomName)
 			return
 		}

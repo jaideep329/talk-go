@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"log"
 	"os"
 	"time"
 
@@ -20,11 +19,10 @@ type SonioxResponseMessage struct {
 }
 
 type STTProcessor struct {
-	logger           *log.Logger
+	sessionCtx       *SessionContext
 	websocketConn    *websocket.Conn
 	transcriptFrames chan TranscriptFrame
 	audioFrames      chan AudioFrame
-	sessionCtx       *SessionContext
 	finalText        string // accumulated final tokens for live display
 }
 
@@ -32,7 +30,7 @@ func (s *STTProcessor) connect() {
 	for {
 		conn, _, err := websocket.DefaultDialer.Dial("wss://stt-rt.soniox.com/transcribe-websocket", nil)
 		if err != nil {
-			s.logger.Printf("STT websocket connect failed: %v, retrying in 1s...", err)
+			s.sessionCtx.Logger.Printf("STT websocket connect failed: %v, retrying in 1s...", err)
 			time.Sleep(time.Second)
 			continue
 		}
@@ -47,23 +45,22 @@ func (s *STTProcessor) connect() {
 			"max_endpoint_delay_ms":     300,
 		}
 		if err := conn.WriteJSON(config); err != nil {
-			s.logger.Printf("STT config send failed: %v, retrying in 1s...", err)
+			s.sessionCtx.Logger.Printf("STT config send failed: %v, retrying in 1s...", err)
 			conn.Close()
 			time.Sleep(time.Second)
 			continue
 		}
 		s.websocketConn = conn
-		s.logger.Println("STT websocket connected")
+		s.sessionCtx.Logger.Println("STT websocket connected")
 		return
 	}
 }
 
-func NewSTTProcessor(logger *log.Logger, sessionCtx *SessionContext) *STTProcessor {
+func NewSTTProcessor(sessionCtx *SessionContext) *STTProcessor {
 	p := &STTProcessor{
-		logger:           logger,
+		sessionCtx:       sessionCtx,
 		transcriptFrames: make(chan TranscriptFrame, 100),
 		audioFrames:      make(chan AudioFrame, 100),
-		sessionCtx:       sessionCtx,
 	}
 	p.connect()
 	return p
@@ -72,22 +69,22 @@ func NewSTTProcessor(logger *log.Logger, sessionCtx *SessionContext) *STTProcess
 func (s *STTProcessor) readSTTWebsocket() {
 	for {
 		if s.sessionCtx.Ctx.Err() != nil {
-			s.logger.Println("STT reader exiting: session closed")
+			s.sessionCtx.Logger.Println("STT reader exiting: session closed")
 			return
 		}
 		_, msg, err := s.websocketConn.ReadMessage()
 		if err != nil {
 			if s.sessionCtx.Ctx.Err() != nil {
-				s.logger.Println("STT reader exiting: session closed")
+				s.sessionCtx.Logger.Println("STT reader exiting: session closed")
 				return
 			}
-			s.logger.Println("STT read error, reconnecting:", err)
+			s.sessionCtx.Logger.Println("STT read error, reconnecting:", err)
 			s.connect()
 			continue
 		}
 		var resp SonioxResponseMessage
 		if err := json.Unmarshal(msg, &resp); err != nil {
-			s.logger.Println("STT json unmarshal error:", err)
+			s.sessionCtx.Logger.Println("STT json unmarshal error:", err)
 			continue
 		}
 
@@ -120,7 +117,7 @@ func (s *STTProcessor) writeAudioWebsocket() {
 	for {
 		select {
 		case <-s.sessionCtx.Ctx.Done():
-			s.logger.Println("STT writer exiting: session closed")
+			s.sessionCtx.Logger.Println("STT writer exiting: session closed")
 			s.websocketConn.Close()
 			return
 		case audioFrame := <-s.audioFrames:
@@ -128,7 +125,7 @@ func (s *STTProcessor) writeAudioWebsocket() {
 				if s.sessionCtx.Ctx.Err() != nil {
 					return
 				}
-				s.logger.Println("STT write error, skipping frame:", err)
+				s.sessionCtx.Logger.Println("STT write error, skipping frame:", err)
 				continue
 			}
 		}
@@ -150,7 +147,7 @@ func (p *STTProcessor) Process(in <-chan Frame, out chan<- Frame) {
 			case EndFrame:
 				return
 			default:
-				p.logger.Printf("STT received unexpected frame: %T\n", frame)
+				p.sessionCtx.Logger.Printf("STT received unexpected frame: %T\n", frame)
 			}
 		case frame := <-p.transcriptFrames:
 			out <- frame

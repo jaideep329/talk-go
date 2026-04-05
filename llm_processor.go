@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"log"
 	"net/http"
 	"os"
 	"strings"
@@ -13,15 +12,14 @@ import (
 )
 
 type LLMProcessor struct {
-	logger            *log.Logger
+	sessionCtx        *SessionContext
+	turnCtx           *TurnContext
 	messages          []map[string]string
 	currentTranscript string
 	isStreaming       bool
 	interruptSent     bool
 	cancelLLM         context.CancelFunc
 	responseFrames    chan Frame
-	turnCtx           *TurnContext
-	sessionCtx        *SessionContext
 	turnStartTime     time.Time
 	firstTokenSent    bool
 }
@@ -34,13 +32,13 @@ func (p *LLMProcessor) runLLM(ctx context.Context) {
 	}
 	jsonBody, err := json.Marshal(body)
 	if err != nil {
-		p.logger.Println("json marshal error:", err)
+		p.sessionCtx.Logger.Println("json marshal error:", err)
 		return
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST", "https://api.openai.com/v1/chat/completions", bytes.NewReader(jsonBody))
 	if err != nil {
-		p.logger.Println("request error:", err)
+		p.sessionCtx.Logger.Println("request error:", err)
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
@@ -48,7 +46,7 @@ func (p *LLMProcessor) runLLM(ctx context.Context) {
 	p.responseFrames <- LLMResponseStartFrame{}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		p.logger.Println("LLM request failed:", err)
+		p.sessionCtx.Logger.Println("LLM request failed:", err)
 		return
 	}
 	defer resp.Body.Close()
@@ -82,7 +80,7 @@ func (p *LLMProcessor) runLLM(ctx context.Context) {
 			if !p.firstTokenSent {
 				p.firstTokenSent = true
 				llmLatency := time.Since(p.turnStartTime).Milliseconds()
-				p.logger.Printf("LLM first token latency: %dms\n", llmLatency)
+				p.sessionCtx.Logger.Printf("LLM first token latency: %dms\n", llmLatency)
 			}
 			p.responseFrames <- TextFrame{Text: content}
 		}
@@ -92,13 +90,12 @@ func (p *LLMProcessor) runLLM(ctx context.Context) {
 	}
 }
 
-func NewLLMProcessor(logger *log.Logger, turnCtx *TurnContext, sessionCtx *SessionContext) *LLMProcessor {
+func NewLLMProcessor(sessionCtx *SessionContext, turnCtx *TurnContext) *LLMProcessor {
 	return &LLMProcessor{
-		logger:         logger,
+		sessionCtx:     sessionCtx,
+		turnCtx:        turnCtx,
 		messages:       []map[string]string{},
 		responseFrames: make(chan Frame, 100),
-		turnCtx:        turnCtx,
-		sessionCtx:     sessionCtx,
 	}
 }
 
@@ -110,7 +107,7 @@ func (p *LLMProcessor) commitSpokenText(interrupted bool) {
 		spoken = p.turnCtx.FlushAll()
 	}
 	if spoken != "" {
-		p.logger.Printf("Committing to history (interrupted=%v): %s\n", interrupted, spoken)
+		p.sessionCtx.Logger.Printf("Committing to history (interrupted=%v): %s\n", interrupted, spoken)
 		p.messages = append(p.messages, map[string]string{"role": "assistant", "content": spoken})
 		p.sessionCtx.UIEvents.Send(UIEvent{Type: "committed_assistant", Role: "assistant", Text: spoken})
 	}
@@ -131,7 +128,7 @@ func (p *LLMProcessor) addUserMessage(text string) {
 		// Concatenate — previous turn got no assistant response (barge-in with nothing spoken)
 		last := p.messages[len(p.messages)-1]
 		last["content"] += " " + text
-		p.logger.Printf("Concatenated user message: %s\n", last["content"])
+		p.sessionCtx.Logger.Printf("Concatenated user message: %s\n", last["content"])
 		p.sessionCtx.UIEvents.Send(UIEvent{Type: "user_transcript", Role: "user", Text: last["content"], IsFinal: true})
 	} else {
 		p.messages = append(p.messages, map[string]string{"role": "user", "content": text})
@@ -154,7 +151,7 @@ func (p *LLMProcessor) Process(in <-chan Frame, out chan<- Frame) {
 			switch f := frame.(type) {
 			case TranscriptFrame:
 				if p.isStreaming && !p.interruptSent {
-					p.logger.Println("Barge-in detected, cancelling LLM")
+					p.sessionCtx.Logger.Println("Barge-in detected, cancelling LLM")
 					if p.cancelLLM != nil {
 						p.cancelLLM()
 					}
@@ -167,7 +164,7 @@ func (p *LLMProcessor) Process(in <-chan Frame, out chan<- Frame) {
 				if f.IsFinal {
 					if f.Text == "<end>" {
 						if p.currentTranscript != "" {
-							p.logger.Printf("Final transcript received: %s\n", p.currentTranscript)
+							p.sessionCtx.Logger.Printf("Final transcript received: %s\n", p.currentTranscript)
 							if len(p.messages) == 0 {
 								p.messages = append(p.messages, map[string]string{"role": "system", "content": "You are a helpful assistant. Always respond in exactly 2 sentences. Never respond with just 1 sentence."})
 							}

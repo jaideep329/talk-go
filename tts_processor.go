@@ -5,7 +5,6 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
-	"log"
 	"math/rand/v2"
 	"os"
 	"strings"
@@ -31,15 +30,14 @@ type pendingWord struct {
 }
 
 type TTSProcessor struct {
-	logger             *log.Logger
+	sessionCtx         *SessionContext
+	turnCtx            *TurnContext
 	currentAggregation string
 	currentContextId   string
 	websocketConn      *websocket.Conn
 	pcmBuffer          []byte
 	opusEncoder        *opus.Encoder
 	audioFrames        chan Frame
-	turnCtx            *TurnContext
-	sessionCtx         *SessionContext
 	pendingWords       []pendingWord
 	audioTimePushed    float64 // seconds of audio pushed to audioFrames
 }
@@ -89,7 +87,7 @@ func (t *TTSProcessor) sendTextToTTS(text string) {
 		"add_timestamps": true,
 	}
 	if err := t.websocketConn.WriteJSON(payload); err != nil {
-		t.logger.Println("failed to send TTS payload:", err)
+		t.sessionCtx.Logger.Println("failed to send TTS payload:", err)
 		return
 	}
 }
@@ -107,7 +105,7 @@ func (t *TTSProcessor) ResetTTSContext() {
 		"continue":      false,
 	}
 	if err := t.websocketConn.WriteJSON(payload); err != nil {
-		t.logger.Println("failed to reset TTS context:", err)
+		t.sessionCtx.Logger.Println("failed to reset TTS context:", err)
 		return
 	}
 }
@@ -121,7 +119,7 @@ func (t *TTSProcessor) CancelTTSContext() {
 		"cancel":     true,
 	}
 	if err := t.websocketConn.WriteJSON(payload); err != nil {
-		t.logger.Println("failed to cancel TTS context:", err)
+		t.sessionCtx.Logger.Println("failed to cancel TTS context:", err)
 	}
 }
 
@@ -131,7 +129,7 @@ func (t *TTSProcessor) handleAudioChunkMessage(audioMsg *CartesiaTTSAudioChunkMe
 	}
 	encodedBytes, err := base64.StdEncoding.DecodeString(audioMsg.Data)
 	if err != nil {
-		t.logger.Println("base64 decode error:", err)
+		t.sessionCtx.Logger.Println("base64 decode error:", err)
 		return
 	}
 	t.pcmBuffer = append(t.pcmBuffer, encodedBytes...)
@@ -190,7 +188,7 @@ func (t *TTSProcessor) makeOpusData() []byte {
 	opusData := make([]byte, 1000)
 	n, err := t.opusEncoder.Encode(frame, opusData)
 	if err != nil {
-		t.logger.Println("opus encode error:", err)
+		t.sessionCtx.Logger.Println("opus encode error:", err)
 	}
 	return opusData[:n]
 }
@@ -199,12 +197,12 @@ func (t *TTSProcessor) connect() {
 	for {
 		conn, _, err := websocket.DefaultDialer.Dial("wss://api.cartesia.ai/tts/websocket?cartesia_version=2025-04-16&api_key="+os.Getenv("CARTESIA_API_KEY"), nil)
 		if err != nil {
-			t.logger.Printf("TTS websocket connect failed: %v, retrying in 1s...", err)
+			t.sessionCtx.Logger.Printf("TTS websocket connect failed: %v, retrying in 1s...", err)
 			time.Sleep(time.Second)
 			continue
 		}
 		t.websocketConn = conn
-		t.logger.Println("TTS websocket connected")
+		t.sessionCtx.Logger.Println("TTS websocket connected")
 		return
 	}
 }
@@ -212,29 +210,29 @@ func (t *TTSProcessor) connect() {
 func (t *TTSProcessor) readTTSConnectionData() {
 	for {
 		if t.sessionCtx.Ctx.Err() != nil {
-			t.logger.Println("TTS reader exiting: session closed")
+			t.sessionCtx.Logger.Println("TTS reader exiting: session closed")
 			t.websocketConn.Close()
 			return
 		}
 		_, msg, err := t.websocketConn.ReadMessage()
 		if err != nil {
 			if t.sessionCtx.Ctx.Err() != nil {
-				t.logger.Println("TTS reader exiting: session closed")
+				t.sessionCtx.Logger.Println("TTS reader exiting: session closed")
 				return
 			}
-			t.logger.Println("TTS read error, reconnecting:", err)
+			t.sessionCtx.Logger.Println("TTS read error, reconnecting:", err)
 			t.connect()
 			continue
 		}
 		var resp CartesiaTTSMessage
 		if err := json.Unmarshal(msg, &resp); err != nil {
-			t.logger.Println("TTS json unmarshal error:", err)
+			t.sessionCtx.Logger.Println("TTS json unmarshal error:", err)
 			continue
 		}
 
 		if resp.Error != "" {
 			if !strings.Contains(resp.Error, "Invalid context ID") {
-				t.logger.Println("TTS error message received:", resp.Error)
+				t.sessionCtx.Logger.Println("TTS error message received:", resp.Error)
 			}
 			continue
 		}
@@ -242,14 +240,14 @@ func (t *TTSProcessor) readTTSConnectionData() {
 		case "chunk":
 			var audioMsg CartesiaTTSAudioChunkMessage
 			if err := json.Unmarshal(msg, &audioMsg); err != nil {
-				t.logger.Println("TTS audio chunk unmarshal error:", err)
+				t.sessionCtx.Logger.Println("TTS audio chunk unmarshal error:", err)
 				continue
 			}
 			t.handleAudioChunkMessage(&audioMsg)
 		case "timestamps":
 			var tsMsg CartesiaTTSWordTimestampMessage
 			if err := json.Unmarshal(msg, &tsMsg); err != nil {
-				t.logger.Println("TTS word timestamp unmarshal error:", err)
+				t.sessionCtx.Logger.Println("TTS word timestamp unmarshal error:", err)
 				continue
 			}
 			if t.currentContextId != "" {
@@ -262,27 +260,26 @@ func (t *TTSProcessor) readTTSConnectionData() {
 		case "done":
 			var doneMsg CartesiaTTSDoneMessage
 			if err := json.Unmarshal(msg, &doneMsg); err != nil {
-				t.logger.Println("TTS done message unmarshal error:", err)
+				t.sessionCtx.Logger.Println("TTS done message unmarshal error:", err)
 				continue
 			}
-			t.logger.Printf("TTS synthesis done: context_id=%s\n", doneMsg.ContextId)
+			t.sessionCtx.Logger.Printf("TTS synthesis done: context_id=%s\n", doneMsg.ContextId)
 			t.pushRemainingAudioFrames()
 			t.audioFrames <- TTSDoneFrame{}
 		}
 	}
 }
 
-func NewTTSProcessor(logger *log.Logger, turnCtx *TurnContext, sessionCtx *SessionContext) *TTSProcessor {
+func NewTTSProcessor(sessionCtx *SessionContext, turnCtx *TurnContext) *TTSProcessor {
 	opusEncoder, err := opus.NewEncoder(24000, 1, opus.AppVoIP)
 	if err != nil {
-		logger.Println("opus encoder init failed:", err)
+		sessionCtx.Logger.Println("opus encoder init failed:", err)
 	}
 	t := &TTSProcessor{
-		logger:      logger,
+		sessionCtx:  sessionCtx,
+		turnCtx:     turnCtx,
 		opusEncoder: opusEncoder,
 		audioFrames: make(chan Frame, 100),
-		turnCtx:     turnCtx,
-		sessionCtx:  sessionCtx,
 	}
 	t.connect()
 	return t
@@ -302,7 +299,7 @@ func (t *TTSProcessor) Process(in <-chan Frame, out chan<- Frame) {
 			t.pendingWords = nil
 			t.audioTimePushed = 0
 			done = nil
-			t.logger.Println("TTS interrupted, cleared state")
+			t.sessionCtx.Logger.Println("TTS interrupted, cleared state")
 		case frame, ok := <-in:
 			if !ok {
 				return
@@ -318,7 +315,7 @@ func (t *TTSProcessor) Process(in <-chan Frame, out chan<- Frame) {
 				t.audioTimePushed = 0
 				t.currentContextId = fmt.Sprintf("ctx-%d", rand.IntN(9000000))
 				done = t.turnCtx.Done()
-				t.logger.Println("LLM response started, resetting TTS aggregation")
+				t.sessionCtx.Logger.Println("LLM response started, resetting TTS aggregation")
 				out <- f
 			case TextFrame:
 				t.currentAggregation += f.Text
@@ -333,10 +330,10 @@ func (t *TTSProcessor) Process(in <-chan Frame, out chan<- Frame) {
 				t.ResetTTSContext()
 				t.currentAggregation = ""
 				t.pcmBuffer = nil
-				t.logger.Println("LLM response ended, flushing TTS context")
+				t.sessionCtx.Logger.Println("LLM response ended, flushing TTS context")
 				out <- f
 			default:
-				t.logger.Printf("TTS received unexpected frame: %T\n", frame)
+				t.sessionCtx.Logger.Printf("TTS received unexpected frame: %T\n", frame)
 			}
 		case frame, ok := <-t.audioFrames:
 			if !ok {

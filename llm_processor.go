@@ -15,12 +15,12 @@ import (
 type LLMProcessor struct {
 	messages          []map[string]string
 	currentTranscript string
-	currentResponse   string
-	isStreaming       bool
+	isStreaming        bool
 	interruptSent     bool
 	cancelLLM         context.CancelFunc
 	responseFrames    chan Frame
 	turnCtx           *TurnContext
+	spokenText        *SpokenText
 }
 
 func (p *LLMProcessor) runLLM(ctx context.Context, userMessage string) {
@@ -81,18 +81,34 @@ func (p *LLMProcessor) runLLM(ctx context.Context, userMessage string) {
 			p.responseFrames <- TextFrame{Text: content}
 		}
 	}
-	// Only send EndFrame if we weren't cancelled
 	if ctx.Err() == nil {
 		p.responseFrames <- LLMResponseEndFrame{}
 		fmt.Println()
 	}
 }
 
-func NewLLMProcessor(turnCtx *TurnContext) *LLMProcessor {
+func NewLLMProcessor(turnCtx *TurnContext, spokenText *SpokenText) *LLMProcessor {
 	return &LLMProcessor{
 		messages:       []map[string]string{},
 		responseFrames: make(chan Frame, 100),
 		turnCtx:        turnCtx,
+		spokenText:     spokenText,
+	}
+}
+
+// commitSpokenText adds actually-spoken words to conversation history.
+// On barge-in, uses elapsed time to determine what was spoken.
+// On normal end, uses all words.
+func (p *LLMProcessor) commitSpokenText(interrupted bool) {
+	var spoken string
+	if interrupted {
+		spoken = p.spokenText.SpokenSoFar()
+	} else {
+		spoken = p.spokenText.FlushAll()
+	}
+	if spoken != "" {
+		log.Printf("Committing to history (interrupted=%v): %s\n", interrupted, spoken)
+		p.messages = append(p.messages, map[string]string{"role": "assistant", "content": spoken})
 	}
 }
 
@@ -106,28 +122,26 @@ func (p *LLMProcessor) Process(in <-chan Frame, out chan<- Frame) {
 			switch f := frame.(type) {
 			case TranscriptFrame:
 				if p.isStreaming && !p.interruptSent {
-					// BARGE-IN: trigger on any transcript while bot is speaking
+					// BARGE-IN
 					log.Println("Barge-in detected, cancelling LLM")
 					if p.cancelLLM != nil {
 						p.cancelLLM()
 					}
-					p.turnCtx.Cancel() // broadcast to TTS + PlaybackSink
+					p.turnCtx.Cancel()
 					p.isStreaming = false
 					p.interruptSent = true
-					// Save partial response to history
-					if p.currentResponse != "" {
-						p.messages = append(p.messages, map[string]string{"role": "assistant", "content": p.currentResponse})
-						p.currentResponse = ""
-					}
+					// Commit only what was actually spoken based on elapsed time
+					p.commitSpokenText(true)
 				}
-				// Always accumulate final tokens for transcript
 				if f.IsFinal {
 					if f.Text == "<end>" {
 						if p.currentTranscript != "" {
 							log.Printf("Final transcript received: %s\n", p.currentTranscript)
+							// Commit previous turn's spoken text (if any)
+							p.commitSpokenText(false)
 							p.isStreaming = false
 							p.interruptSent = false
-							p.turnCtx.Reset() // new context for new turn
+							p.turnCtx.Reset()
 							ctx, cancel := context.WithCancel(context.Background())
 							p.cancelLLM = cancel
 							go p.runLLM(ctx, p.currentTranscript)
@@ -145,17 +159,13 @@ func (p *LLMProcessor) Process(in <-chan Frame, out chan<- Frame) {
 			switch responseFrame.(type) {
 			case LLMResponseStartFrame:
 				p.isStreaming = true
-				p.currentResponse = ""
 				out <- responseFrame
 			case LLMResponseEndFrame:
-				p.messages = append(p.messages, map[string]string{"role": "assistant", "content": p.currentResponse})
-				p.currentResponse = ""
+				// Don't commit here — word timestamps haven't all reached
+				// PlaybackSink yet. Commit when next turn starts or on barge-in.
 				out <- responseFrame
 			default:
 				if p.isStreaming {
-					if tf, ok := responseFrame.(TextFrame); ok {
-						p.currentResponse += tf.Text
-					}
 					out <- responseFrame
 				}
 			}

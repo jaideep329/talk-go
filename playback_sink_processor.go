@@ -10,12 +10,14 @@ import (
 )
 
 type PlaybackSinkProcessor struct {
-	botTrack    *lksdk.LocalSampleTrack
-	interrupted bool
-	turnCtx     *TurnContext
+	botTrack        *lksdk.LocalSampleTrack
+	interrupted     bool
+	playbackStarted bool
+	turnCtx         *TurnContext
+	spokenText      *SpokenText
 }
 
-func NewPlaybackSinkProcessor(room *lksdk.Room, turnCtx *TurnContext) *PlaybackSinkProcessor {
+func NewPlaybackSinkProcessor(room *lksdk.Room, turnCtx *TurnContext, spokenText *SpokenText) *PlaybackSinkProcessor {
 	botTrack, err := lksdk.NewLocalSampleTrack(webrtc.RTPCodecCapability{
 		MimeType:  webrtc.MimeTypeOpus,
 		ClockRate: 48000,
@@ -32,8 +34,9 @@ func NewPlaybackSinkProcessor(room *lksdk.Room, turnCtx *TurnContext) *PlaybackS
 	}
 	log.Println("Published bot audio track")
 	return &PlaybackSinkProcessor{
-		botTrack: botTrack,
-		turnCtx:  turnCtx,
+		botTrack:   botTrack,
+		turnCtx:    turnCtx,
+		spokenText: spokenText,
 	}
 }
 
@@ -45,7 +48,7 @@ func (p *PlaybackSinkProcessor) Process(in <-chan Frame, _ chan<- Frame) {
 		select {
 		case <-done:
 			p.interrupted = true
-			done = nil // stop selecting on closed channel until next turn
+			done = nil
 			log.Println("Playback interrupted")
 		case frame, ok := <-in:
 			if !ok {
@@ -56,6 +59,10 @@ func (p *PlaybackSinkProcessor) Process(in <-chan Frame, _ chan<- Frame) {
 				if p.interrupted {
 					continue
 				}
+				if !p.playbackStarted {
+					p.spokenText.StartPlayback()
+					p.playbackStarted = true
+				}
 				err := p.botTrack.WriteSample(media.Sample{
 					Data:     f.Data,
 					Duration: 20 * time.Millisecond,
@@ -65,10 +72,14 @@ func (p *PlaybackSinkProcessor) Process(in <-chan Frame, _ chan<- Frame) {
 					continue
 				}
 				<-ticker.C
+			case WordTimestampFrame:
+				if !p.interrupted {
+					p.spokenText.Append(f.Words, f.Start)
+				}
 			case LLMResponseStartFrame:
-				log.Println("LLM response started, resetting playback state")
 				p.interrupted = false
-				done = p.turnCtx.Done() // re-enable interrupt for new turn
+				p.playbackStarted = false
+				done = p.turnCtx.Done()
 			case EndFrame:
 				return
 			default:

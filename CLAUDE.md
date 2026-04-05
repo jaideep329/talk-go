@@ -53,7 +53,7 @@ AudioSourceProcessor → STTProcessor → LLMProcessor → TTSProcessor → Play
 
 ### Pipeline Design Decisions
 
-**Processor communication pattern:** Processors do NOT hold references to each other. All communication flows through `Process(ctx, in, out)`. For processors with background goroutines (websocket readers, etc.), use an **internal channel** to bridge async work back to the `Process` select loop:
+**Processor communication pattern:** Processors do NOT hold references to each other. All data communication flows through `Process(in, out)` — no shared context parameter. Each processor manages its own internal lifecycle. For processors with background goroutines (websocket readers, etc.), use an **internal channel** to bridge async work back to the `Process` select loop:
 
 ```go
 // Pattern: async bridge (TTS, STT, Audio Source)
@@ -61,46 +61,51 @@ type TTSProcessor struct {
     audioFrames chan Frame  // internal: background goroutine → Process loop
 }
 
-func (t *TTSProcessor) Process(ctx context.Context, in <-chan Frame, out chan<- Frame) {
+func (t *TTSProcessor) Process(in <-chan Frame, out chan<- Frame) {
     go t.readTTSConnectionData()  // background websocket reader
     for {
         select {
-        case <-ctx.Done(): return
-        case frame := <-in:          // handle TextFrame, control frames
+        case frame := <-in:            // handle TextFrame, control frames
         case frame := <-t.audioFrames: out <- frame  // forward async results
         }
     }
 }
 ```
 
-This is the Go equivalent of Pipecat's `push_frame()` + `asyncio.Queue` pattern. The `Process` select loop acts as a serialization point, which is safer than Pipecat's approach (Python asyncio is single-threaded; Go is not).
-
-Two processor patterns exist:
+Two processor patterns:
 1. **Synchronous**: frame in → process → frame out. No background goroutines needed.
 2. **Async bridge** (TTS, STT, Audio Source, LLM): background goroutine writes to internal `chan Frame`, `Process` forwards to `out`.
 
-**Cartesia TTS context strategy:** Single `context_id` per LLM turn (not per sentence). All sentences sent with `"continue": true`, final flush with `"continue": false`. This preserves prosodic continuity across sentences. One playback queue of interleaved audio frames and word timestamps. No context queue needed.
+**Pipeline lifecycle:** `EndFrame` propagates through the pipeline to shut down all processors. No shared `context.Context` — processors manage their own internal contexts.
 
-**Track re-subscription:** `AudioSourceProcessor.SetTrack(track)` starts a new reader goroutine. Old goroutine exits naturally on EOF when LiveKit closes the old track. No pipeline teardown needed — only the audio source swaps.
+**Cartesia TTS context strategy:** Single `context_id` per LLM turn (not per sentence). All sentences sent with `"continue": true` and `"add_timestamps": true` for word-level tracking. Final flush with `"continue": false`. On interrupt, sends `{"context_id": ..., "cancel": true}` to stop Cartesia server-side generation.
 
-**Lazy pipeline initialization:** Pipeline is created on first `/connect` request (not at startup) via `sync.Once`. This avoids websocket idle timeouts on Soniox/Cartesia before any client connects.
+**Track re-subscription:** `AudioSourceProcessor.SetTrack(track)` starts a new reader goroutine. Old goroutine exits naturally on EOF. No pipeline teardown needed.
+
+**Lazy pipeline initialization:** Pipeline is created on first `/connect` request (not at startup) via `sync.Once`.
+
+#### Interruption / Barge-in (DONE)
+
+**TurnContext** (`pipeline.go`): Shared `context.WithCancel` across LLM, TTS, and PlaybackSink. LLM calls `Cancel()` on barge-in (wakes all processors instantly via `Done()` channel). Calls `Reset()` at the start of each new turn. Processors use the `nil` channel trick: after handling interrupt, set `done = nil` to stop selecting on the closed channel; re-enable on `LLMResponseStartFrame`.
+
+**Barge-in detection** (LLM Processor): Any `TranscriptFrame` (final or non-final) arriving while `isStreaming == true` triggers interrupt. Sub-millisecond reaction time (~0.17ms from transcript to cancel). `isStreaming` stays true after `LLMResponseEndFrame` (bot may still be speaking) — only reset on barge-in or next turn start.
+
+**Interrupt propagation**: `TurnContext.Cancel()` broadcasts to all processors simultaneously (no frame-based propagation — frames get stuck behind buffered audio). TTS cancels Cartesia context, drains internal audio channel, clears buffers. PlaybackSink sets `interrupted = true`, skips audio frames until next `LLMResponseStartFrame`.
+
+**Word timestamp tracking** (for accurate LLM context):
+- TTS requests `"add_timestamps": true` from Cartesia
+- Cartesia sends `"timestamps"` messages with words and start times (seconds from context start)
+- TTS pushes `WordTimestampFrame{Words, Start}` into `audioFrames` channel (interleaved with `AudioFrame`s)
+- `SpokenText` shared struct: PlaybackSink appends words + start times; records `playbackStartedAt` on first audio frame
+- On **barge-in**: `SpokenSoFar()` uses `elapsed = time.Since(playbackStartedAt)` to return only words whose `start <= elapsed`
+- On **normal turn end**: `FlushAll()` returns all words (committed when next turn starts, not on `LLMResponseEndFrame`, since word timestamps may not have all arrived yet)
+- LLM adds the result to `messages` as the assistant turn
 
 ### What Needs to Happen Next
 
-#### Barge-in / Interruption (two passes):
-
-**Pass 1 — Basic barge-in:**
-1. **LLM Processor** detects barge-in: if it receives a `TranscriptFrame` while `isStreaming == true`, cancel the in-flight HTTP request (use `context.WithCancel`), send `InterruptFrame` downstream, add `responseText` accumulated so far as assistant message in history.
-2. **TTS Processor** handles `InterruptFrame`: stop sending to Cartesia, clear `pcmBuffer`, clear `currentAggregation`, drain pending `audioFrames`, forward `InterruptFrame` to `out`.
-3. **PlaybackSink Processor** handles `InterruptFrame`: stop playing immediately, discard buffered frames.
-
-**Pass 2 — Accurate context via word timestamps:**
-1. TTS pushes `WordTimestampFrame{Words []string}` through pipeline alongside audio frames.
-2. PlaybackSink tracks which words were actually played based on interleaved timestamps.
-3. On interrupt, only the actually-spoken words are added to LLM conversation history (instead of full `responseText` so far).
-
 #### Cleanup:
-- Consider renaming module from `awesomeProject`.
+- Consider renaming module from `awesomeProject`
+- Remove `InterruptFrame` from `frame.go` (no longer used — replaced by `TurnContext`)
 
 ### Key Technical Details
 

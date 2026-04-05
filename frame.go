@@ -14,6 +14,7 @@ const (
 	LLMResponseEnd
 	Transcript
 	End
+	WordTimestamp
 )
 
 type AudioFrame struct {
@@ -53,3 +54,10 @@ func (f TranscriptFrame) FrameType() FrameType { return Transcript }
 type EndFrame struct{}
 
 func (f EndFrame) FrameType() FrameType { return End }
+
+type WordTimestampFrame struct {
+	Words []string
+	Start []float64 // seconds from start of context when each word begins
+}
+
+func (f WordTimestampFrame) FrameType() FrameType { return WordTimestamp }

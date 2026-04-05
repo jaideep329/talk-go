@@ -70,12 +70,13 @@ type CartesiaTTSDoneMessage struct {
 
 func (t *TTSProcessor) sendTextToTTS(text string) {
 	payload := map[string]interface{}{
-		"model_id":      "sonic-3",
-		"transcript":    text,
-		"voice":         map[string]interface{}{"mode": "id", "id": "f786b574-daa5-4673-aa0c-cbe3e8534c02"},
-		"output_format": map[string]interface{}{"container": "raw", "encoding": "pcm_s16le", "sample_rate": 24000},
-		"context_id":    t.currentContextId,
-		"continue":      true,
+		"model_id":        "sonic-3",
+		"transcript":      text,
+		"voice":           map[string]interface{}{"mode": "id", "id": "f786b574-daa5-4673-aa0c-cbe3e8534c02"},
+		"output_format":   map[string]interface{}{"container": "raw", "encoding": "pcm_s16le", "sample_rate": 24000},
+		"context_id":      t.currentContextId,
+		"continue":        true,
+		"add_timestamps":  true,
 	}
 	if err := t.websocketConn.WriteJSON(payload); err != nil {
 		log.Println("failed to send TTS payload:", err)
@@ -188,13 +189,18 @@ func (t *TTSProcessor) readTTSConnectionData() {
 				}
 				//log.Printf("Received audio chunk: context_id=%s, done=%v\n", audioMsg.ContextId, audioMsg.Done)
 				t.handleAudioChunkMessage(&audioMsg)
-			case "word_timestamps":
+			case "timestamps":
 				var tsMsg CartesiaTTSWordTimestampMessage
 				if err := json.Unmarshal(msg, &tsMsg); err != nil {
 					log.Println("TTS word timestamp unmarshal error:", err)
 					continue
 				}
-				log.Printf("Received word timestamps: context_id=%s, words=%v\n", tsMsg.ContextId, tsMsg.WordTimestamps.Words)
+				if t.currentContextId != "" && len(tsMsg.WordTimestamps.Words) > 0 {
+					t.audioFrames <- WordTimestampFrame{
+						Words: tsMsg.WordTimestamps.Words,
+						Start: tsMsg.WordTimestamps.Start,
+					}
+				}
 			case "done":
 				var doneMsg CartesiaTTSDoneMessage
 				if err := json.Unmarshal(msg, &doneMsg); err != nil {

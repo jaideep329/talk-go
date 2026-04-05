@@ -13,7 +13,6 @@ import (
 
 type LLMProcessor struct {
 	sessionCtx        *SessionContext
-	turnCtx           *TurnContext
 	messages          []map[string]string
 	currentTranscript string
 	isStreaming       bool
@@ -22,6 +21,26 @@ type LLMProcessor struct {
 	responseFrames    chan Frame
 	turnStartTime     time.Time
 	firstTokenSent    bool
+	spokenWords       []string // words accumulated from upstream WordTimestampFrames
+}
+
+func (p *LLMProcessor) appendWords(words []string) {
+	for _, w := range words {
+		if len(p.spokenWords) > 0 && len(w) > 0 && w[0] != '.' && w[0] != ',' && w[0] != '!' && w[0] != '?' && w[0] != ';' && w[0] != ':' {
+			p.spokenWords = append(p.spokenWords, " "+w)
+		} else {
+			p.spokenWords = append(p.spokenWords, w)
+		}
+	}
+}
+
+func (p *LLMProcessor) spokenSoFar() string {
+	var spoken string
+	for _, w := range p.spokenWords {
+		spoken += w
+	}
+	p.spokenWords = nil
+	return spoken
 }
 
 func (p *LLMProcessor) runLLM(ctx context.Context) {
@@ -43,7 +62,7 @@ func (p *LLMProcessor) runLLM(ctx context.Context) {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+os.Getenv("OPENAI_API_KEY"))
-	p.responseFrames <- LLMResponseStartFrame{}
+	p.responseFrames <- LLMResponseStartFrame{StartedAt: p.turnStartTime}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		p.sessionCtx.Logger.Println("LLM request failed:", err)
@@ -90,22 +109,16 @@ func (p *LLMProcessor) runLLM(ctx context.Context) {
 	}
 }
 
-func NewLLMProcessor(sessionCtx *SessionContext, turnCtx *TurnContext) *LLMProcessor {
+func NewLLMProcessor(sessionCtx *SessionContext) *LLMProcessor {
 	return &LLMProcessor{
 		sessionCtx:     sessionCtx,
-		turnCtx:        turnCtx,
 		messages:       []map[string]string{},
 		responseFrames: make(chan Frame, 100),
 	}
 }
 
 func (p *LLMProcessor) commitSpokenText(interrupted bool) {
-	var spoken string
-	if interrupted {
-		spoken = p.turnCtx.SpokenSoFar()
-	} else {
-		spoken = p.turnCtx.FlushAll()
-	}
+	spoken := p.spokenSoFar()
 	if spoken != "" {
 		p.sessionCtx.Logger.Printf("Committing to history (interrupted=%v): %s\n", interrupted, spoken)
 		p.messages = append(p.messages, map[string]string{"role": "assistant", "content": spoken})
@@ -136,67 +149,81 @@ func (p *LLMProcessor) addUserMessage(text string) {
 	}
 }
 
-func (p *LLMProcessor) Process(in <-chan Frame, out chan<- Frame) {
-	var playbackDone <-chan struct{}
+func (p *LLMProcessor) Process(ch ProcessorChannels) {
 	for {
+		// Priority: check system channel first.
 		select {
-		case <-playbackDone:
-			p.commitSpokenText(false)
-			p.isStreaming = false
-			playbackDone = nil
-		case frame, ok := <-in:
-			if !ok {
-				return
-			}
-			switch f := frame.(type) {
-			case TranscriptFrame:
-				if p.isStreaming && !p.interruptSent {
-					p.sessionCtx.Logger.Println("Barge-in detected, cancelling LLM")
-					if p.cancelLLM != nil {
-						p.cancelLLM()
-					}
-					p.turnCtx.Cancel()
-					p.isStreaming = false
-					p.interruptSent = true
-					playbackDone = nil
-					p.commitSpokenText(true)
-				}
-				if f.IsFinal {
-					if f.Text == "<end>" {
-						if p.currentTranscript != "" {
-							p.sessionCtx.Logger.Printf("Final transcript received: %s\n", p.currentTranscript)
-							if len(p.messages) == 0 {
-								p.messages = append(p.messages, map[string]string{"role": "system", "content": "You are a helpful assistant. Always respond in exactly 2 sentences. Never respond with just 1 sentence."})
-							}
-							p.addUserMessage(p.currentTranscript)
-							p.interruptSent = false
-							p.turnCtx.Reset()
-							p.turnStartTime = time.Now()
-							p.firstTokenSent = false
-							ctx, cancel := context.WithCancel(context.Background())
-							p.cancelLLM = cancel
-							go p.runLLM(ctx)
-							p.currentTranscript = ""
-						}
-					} else {
-						p.currentTranscript += f.Text
-					}
-				}
+		case frame := <-ch.System:
+			switch frame.(type) {
 			case EndFrame:
-				out <- f
+				ch.Send(frame, Downstream)
 				return
 			}
-		case responseFrame := <-p.responseFrames:
-			switch responseFrame.(type) {
-			case LLMResponseStartFrame:
-				p.isStreaming = true
-				playbackDone = p.turnCtx.PlaybackDone()
-				out <- responseFrame
-			case LLMResponseEndFrame:
-				out <- responseFrame
-			default:
-				if p.isStreaming {
-					out <- responseFrame
+		default:
+			select {
+			case frame := <-ch.System:
+				switch frame.(type) {
+				case EndFrame:
+					ch.Send(frame, Downstream)
+					return
+				}
+			case frame, ok := <-ch.Data:
+				if !ok {
+					return
+				}
+				switch f := frame.(type) {
+				case TranscriptFrame:
+					if p.isStreaming && !p.interruptSent {
+						p.sessionCtx.Logger.Println("Barge-in detected, cancelling LLM")
+						if p.cancelLLM != nil {
+							p.cancelLLM()
+						}
+						ch.Send(InterruptFrame{}, Downstream)
+						p.isStreaming = false
+						p.interruptSent = true
+						p.commitSpokenText(true)
+					}
+					if f.IsFinal {
+						if f.Text == "<end>" {
+							if p.currentTranscript != "" {
+								p.sessionCtx.Logger.Printf("Final transcript received: %s\n", p.currentTranscript)
+								if len(p.messages) == 0 {
+									p.messages = append(p.messages, map[string]string{"role": "system", "content": "You are a helpful assistant. Always respond in exactly 2 sentences. Never respond with just 1 sentence."})
+								}
+								p.addUserMessage(p.currentTranscript)
+								p.interruptSent = false
+								p.spokenWords = nil
+								p.turnStartTime = time.Now()
+								p.firstTokenSent = false
+								ctx, cancel := context.WithCancel(context.Background())
+								p.cancelLLM = cancel
+								go p.runLLM(ctx)
+								p.currentTranscript = ""
+							}
+						} else {
+							p.currentTranscript += f.Text
+						}
+					}
+				// Upstream frames from PlaybackSink (via TTS)
+				case WordTimestampFrame:
+					p.appendWords(f.Words)
+				case TTSDoneFrame:
+					p.commitSpokenText(false)
+					p.isStreaming = false
+				default:
+					p.sessionCtx.Logger.Printf("LLM received unexpected frame: %T\n", f)
+				}
+			case responseFrame := <-p.responseFrames:
+				switch responseFrame.(type) {
+				case LLMResponseStartFrame:
+					p.isStreaming = true
+					ch.Send(responseFrame, Downstream)
+				case LLMResponseEndFrame:
+					ch.Send(responseFrame, Downstream)
+				default:
+					if p.isStreaming {
+						ch.Send(responseFrame, Downstream)
+					}
 				}
 			}
 		}

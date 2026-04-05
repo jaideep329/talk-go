@@ -132,25 +132,29 @@ func (s *STTProcessor) writeAudioWebsocket() {
 	}
 }
 
-func (p *STTProcessor) Process(in <-chan Frame, out chan<- Frame) {
+func (p *STTProcessor) Process(ch ProcessorChannels) {
 	go p.readSTTWebsocket()
 	go p.writeAudioWebsocket()
 	for {
 		select {
-		case frame, ok := <-in:
+		case frame := <-ch.System:
+			switch frame.(type) {
+			case EndFrame:
+				ch.Send(frame, Downstream)
+				return
+			}
+		case frame, ok := <-ch.Data:
 			if !ok {
 				return
 			}
 			switch f := frame.(type) {
 			case AudioFrame:
 				p.audioFrames <- f
-			case EndFrame:
-				return
 			default:
-				p.sessionCtx.Logger.Printf("STT received unexpected frame: %T\n", frame)
+				p.sessionCtx.Logger.Printf("STT received unexpected frame: %T\n", f)
 			}
 		case frame := <-p.transcriptFrames:
-			out <- frame
+			ch.Send(frame, Downstream)
 		}
 	}
 }

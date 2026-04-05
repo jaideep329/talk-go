@@ -53,8 +53,8 @@ func (a *AudioSourceProcessor) SetTrack(track *webrtc.TrackRemote) {
 	go a.readAudioTrack(track)
 }
 
-func (a *AudioSourceProcessor) Process(_ <-chan Frame, out chan<- Frame) {
+func (a *AudioSourceProcessor) Process(ch ProcessorChannels) {
 	for frame := range a.audioFrames {
-		out <- frame
+		ch.Send(frame, Downstream)
 	}
 }

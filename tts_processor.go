@@ -31,7 +31,6 @@ type pendingWord struct {
 
 type TTSProcessor struct {
 	sessionCtx         *SessionContext
-	turnCtx            *TurnContext
 	currentAggregation string
 	currentContextId   string
 	websocketConn      *websocket.Conn
@@ -270,14 +269,13 @@ func (t *TTSProcessor) readTTSConnectionData() {
 	}
 }
 
-func NewTTSProcessor(sessionCtx *SessionContext, turnCtx *TurnContext) *TTSProcessor {
+func NewTTSProcessor(sessionCtx *SessionContext) *TTSProcessor {
 	opusEncoder, err := opus.NewEncoder(24000, 1, opus.AppVoIP)
 	if err != nil {
 		sessionCtx.Logger.Println("opus encoder init failed:", err)
 	}
 	t := &TTSProcessor{
 		sessionCtx:  sessionCtx,
-		turnCtx:     turnCtx,
 		opusEncoder: opusEncoder,
 		audioFrames: make(chan Frame, 100),
 	}
@@ -285,61 +283,87 @@ func NewTTSProcessor(sessionCtx *SessionContext, turnCtx *TurnContext) *TTSProce
 	return t
 }
 
-func (t *TTSProcessor) Process(in <-chan Frame, out chan<- Frame) {
+func (t *TTSProcessor) Process(ch ProcessorChannels) {
 	go t.readTTSConnectionData()
-	done := t.turnCtx.Done()
 	for {
+		// Priority: check system channel first.
 		select {
-		case <-done:
-			t.CancelTTSContext()
-			drainChannel(t.audioFrames)
-			t.currentAggregation = ""
-			t.currentContextId = ""
-			t.pcmBuffer = nil
-			t.pendingWords = nil
-			t.audioTimePushed = 0
-			done = nil
-			t.sessionCtx.Logger.Println("TTS interrupted, cleared state")
-		case frame, ok := <-in:
-			if !ok {
-				return
-			}
-			switch f := frame.(type) {
-			case EndFrame:
-				out <- f
-				return
-			case LLMResponseStartFrame:
+		case frame := <-ch.System:
+			switch frame.(type) {
+			case InterruptFrame:
+				t.CancelTTSContext()
+				drainChannel(t.audioFrames)
 				t.currentAggregation = ""
+				t.currentContextId = ""
 				t.pcmBuffer = nil
 				t.pendingWords = nil
 				t.audioTimePushed = 0
-				t.currentContextId = fmt.Sprintf("ctx-%d", rand.IntN(9000000))
-				done = t.turnCtx.Done()
-				t.sessionCtx.Logger.Println("LLM response started, resetting TTS aggregation")
-				out <- f
-			case TextFrame:
-				t.currentAggregation += f.Text
-				if endsWithPunctuation(t.currentAggregation) {
-					t.sendTextToTTS(t.currentAggregation)
-					t.currentAggregation = ""
-				}
-			case LLMResponseEndFrame:
-				if strings.TrimSpace(t.currentAggregation) != "" {
-					t.sendTextToTTS(t.currentAggregation)
-				}
-				t.ResetTTSContext()
-				t.currentAggregation = ""
-				t.pcmBuffer = nil
-				t.sessionCtx.Logger.Println("LLM response ended, flushing TTS context")
-				out <- f
-			default:
-				t.sessionCtx.Logger.Printf("TTS received unexpected frame: %T\n", frame)
-			}
-		case frame, ok := <-t.audioFrames:
-			if !ok {
+				t.sessionCtx.Logger.Println("TTS interrupted, cleared state")
+				ch.Send(frame, Downstream) // propagate to PlaybackSink
+			case EndFrame:
+				ch.Send(frame, Downstream)
 				return
 			}
-			out <- frame
+		default:
+			select {
+			case frame := <-ch.System:
+				switch frame.(type) {
+				case InterruptFrame:
+					t.CancelTTSContext()
+					drainChannel(t.audioFrames)
+					t.currentAggregation = ""
+					t.currentContextId = ""
+					t.pcmBuffer = nil
+					t.pendingWords = nil
+					t.audioTimePushed = 0
+					t.sessionCtx.Logger.Println("TTS interrupted, cleared state")
+					ch.Send(frame, Downstream)
+				case EndFrame:
+					ch.Send(frame, Downstream)
+					return
+				}
+			case frame, ok := <-ch.Data:
+				if !ok {
+					return
+				}
+				switch f := frame.(type) {
+				case LLMResponseStartFrame:
+					t.currentAggregation = ""
+					t.pcmBuffer = nil
+					t.pendingWords = nil
+					t.audioTimePushed = 0
+					t.currentContextId = fmt.Sprintf("ctx-%d", rand.IntN(9000000))
+					t.sessionCtx.Logger.Println("LLM response started, resetting TTS aggregation")
+					ch.Send(f, Downstream)
+				case TextFrame:
+					t.currentAggregation += f.Text
+					if endsWithPunctuation(t.currentAggregation) {
+						t.sendTextToTTS(t.currentAggregation)
+						t.currentAggregation = ""
+					}
+				case LLMResponseEndFrame:
+					if strings.TrimSpace(t.currentAggregation) != "" {
+						t.sendTextToTTS(t.currentAggregation)
+					}
+					t.ResetTTSContext()
+					t.currentAggregation = ""
+					t.pcmBuffer = nil
+					t.sessionCtx.Logger.Println("LLM response ended, flushing TTS context")
+					ch.Send(f, Downstream)
+				// Upstream frames from PlaybackSink — forward to LLM
+				case WordTimestampFrame:
+					ch.Send(f, Upstream)
+				case TTSDoneFrame:
+					ch.Send(f, Upstream)
+				default:
+					t.sessionCtx.Logger.Printf("TTS received unexpected frame: %T\n", f)
+				}
+			case frame, ok := <-t.audioFrames:
+				if !ok {
+					return
+				}
+				ch.Send(frame, Downstream) // audio/word/done frames to PlaybackSink
+			}
 		}
 	}
 }

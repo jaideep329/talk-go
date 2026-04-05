@@ -19,11 +19,44 @@ func NewPipeline(processors []FrameProcessor) *Pipeline {
 }
 
 func (p *Pipeline) Run() {
-	current := make(chan Frame, 100)
-	for _, processor := range p.processors {
-		out := make(chan Frame, 100)
-		go processor.Process(current, out)
-		current = out
+	n := len(p.processors)
+
+	// Create data and system channels for each processor.
+	dataChs := make([]chan Frame, n)
+	sysChs := make([]chan Frame, n)
+	for i := range n {
+		dataChs[i] = make(chan Frame, 100)
+		sysChs[i] = make(chan Frame, 100)
+	}
+
+	// Build a Send function for each processor.
+	// Downstream: route to next processor's data or system channel based on IsSystem().
+	// Upstream: route to previous processor's data channel.
+	sendFn := func(i int) func(Frame, Direction) {
+		return func(frame Frame, dir Direction) {
+			switch dir {
+			case Downstream:
+				if i+1 < n {
+					if frame.IsSystem() {
+						sysChs[i+1] <- frame
+					} else {
+						dataChs[i+1] <- frame
+					}
+				}
+			case Upstream:
+				if i-1 >= 0 {
+					dataChs[i-1] <- frame
+				}
+			}
+		}
+	}
+
+	for i, processor := range p.processors {
+		go processor.Process(ProcessorChannels{
+			Data:   dataChs[i],
+			System: sysChs[i],
+			Send:   sendFn(i),
+		})
 	}
 }
 
@@ -64,7 +97,6 @@ func createSession() (string, *Session) {
 	uiEvents := NewUIEventSender(logger)
 
 	sessionCtx := &SessionContext{Ctx: ctx, Logger: logger, UIEvents: uiEvents}
-	turnCtx := NewTurnContext()
 	audioSource := NewAudioSourceProcessor(sessionCtx)
 	sessionCtx.Room = joinRoom(roomName, audioSource)
 	session := &Session{SessionCtx: sessionCtx, Cancel: cancel}
@@ -73,9 +105,9 @@ func createSession() (string, *Session) {
 	sessionsMu.Unlock()
 
 	sttProcessor := NewSTTProcessor(sessionCtx)
-	llmProcessor := NewLLMProcessor(sessionCtx, turnCtx)
-	ttsProcessor := NewTTSProcessor(sessionCtx, turnCtx)
-	playbackSink := NewPlaybackSinkProcessor(sessionCtx, turnCtx)
+	llmProcessor := NewLLMProcessor(sessionCtx)
+	ttsProcessor := NewTTSProcessor(sessionCtx)
+	playbackSink := NewPlaybackSinkProcessor(sessionCtx)
 	pipeline := NewPipeline([]FrameProcessor{audioSource, sttProcessor, llmProcessor, ttsProcessor, playbackSink})
 	go pipeline.Run()
 	return roomName, session

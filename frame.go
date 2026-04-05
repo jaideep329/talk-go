@@ -15,6 +15,7 @@ const (
 	Transcript
 	End
 	WordTimestamp
+	TTSDone
 )
 
 type AudioFrame struct {
@@ -61,3 +62,7 @@ type WordTimestampFrame struct {
 }
 
 func (f WordTimestampFrame) FrameType() FrameType { return WordTimestamp }
+
+type TTSDoneFrame struct{}
+
+func (f TTSDoneFrame) FrameType() FrameType { return TTSDone }

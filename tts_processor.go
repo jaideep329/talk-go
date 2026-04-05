@@ -241,6 +241,7 @@ func (t *TTSProcessor) readTTSConnectionData() {
 			}
 			t.logger.Printf("TTS synthesis done: context_id=%s\n", doneMsg.ContextId)
 			t.pushRemainingAudioFrames()
+			t.audioFrames <- TTSDoneFrame{}
 		}
 	}
 }

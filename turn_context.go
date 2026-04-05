@@ -21,11 +21,12 @@ type TurnContext struct {
 	startTimes      []float64 // seconds from context start
 	playbackStarted time.Time // when first audio frame was played
 	turnStarted     time.Time // when user finished speaking (<end> token)
+	playbackDone    chan struct{}
 }
 
 func NewTurnContext() *TurnContext {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &TurnContext{ctx: ctx, cancel: cancel}
+	return &TurnContext{ctx: ctx, cancel: cancel, playbackDone: make(chan struct{})}
 }
 
 // Reset creates a new context for a new turn.
@@ -34,6 +35,7 @@ func (t *TurnContext) Reset() {
 	defer t.mu.Unlock()
 	t.ctx, t.cancel = context.WithCancel(context.Background())
 	t.turnStarted = time.Now()
+	t.playbackDone = make(chan struct{})
 }
 
 // TurnStarted returns when the current turn started.
@@ -55,6 +57,25 @@ func (t *TurnContext) Done() <-chan struct{} {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.ctx.Done()
+}
+
+// PlaybackDone returns a channel that closes when all audio for this turn has been played.
+func (t *TurnContext) PlaybackDone() <-chan struct{} {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.playbackDone
+}
+
+// MarkPlaybackDone signals that all audio for this turn has been played.
+func (t *TurnContext) MarkPlaybackDone() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	select {
+	case <-t.playbackDone:
+		// already closed
+	default:
+		close(t.playbackDone)
+	}
 }
 
 // StartPlayback records when audio playback began for this turn.

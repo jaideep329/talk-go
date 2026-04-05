@@ -81,6 +81,11 @@ func (p *PlaybackSinkProcessor) Process(in <-chan Frame, _ chan<- Frame) {
 				if !p.interrupted {
 					p.turnCtx.AppendWords(f.Words, f.Start)
 				}
+			case TTSDoneFrame:
+				if !p.interrupted {
+					p.turnCtx.MarkPlaybackDone()
+					p.logger.Println("Playback complete, marked turn done")
+				}
 			case LLMResponseStartFrame:
 				p.interrupted = false
 				p.playbackStarted = false

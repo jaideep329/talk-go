@@ -88,12 +88,10 @@ func (p *LLMProcessor) runLLM(ctx context.Context, userMessage string) {
 				llmLatency := time.Since(p.turnStartTime).Milliseconds()
 				p.logger.Printf("LLM first token latency: %dms\n", llmLatency)
 			}
-			p.sessionCtx.UIEvents.Send(UIEvent{Type: "assistant_transcript", Role: "assistant", Text: content})
 			p.responseFrames <- TextFrame{Text: content}
 		}
 	}
 	if ctx.Err() == nil {
-		p.sessionCtx.UIEvents.Send(UIEvent{Type: "assistant_done"})
 		p.responseFrames <- LLMResponseEndFrame{}
 	}
 }
@@ -126,8 +124,13 @@ func (p *LLMProcessor) commitSpokenText(interrupted bool) {
 }
 
 func (p *LLMProcessor) Process(in <-chan Frame, out chan<- Frame) {
+	var playbackDone <-chan struct{}
 	for {
 		select {
+		case <-playbackDone:
+			p.commitSpokenText(false)
+			p.isStreaming = false
+			playbackDone = nil
 		case frame, ok := <-in:
 			if !ok {
 				return
@@ -142,6 +145,7 @@ func (p *LLMProcessor) Process(in <-chan Frame, out chan<- Frame) {
 					p.turnCtx.Cancel()
 					p.isStreaming = false
 					p.interruptSent = true
+					playbackDone = nil
 					p.commitSpokenText(true)
 				}
 				if f.IsFinal {
@@ -149,8 +153,6 @@ func (p *LLMProcessor) Process(in <-chan Frame, out chan<- Frame) {
 						if p.currentTranscript != "" {
 							p.logger.Printf("Final transcript received: %s\n", p.currentTranscript)
 							p.sessionCtx.UIEvents.Send(UIEvent{Type: "user_transcript", Role: "user", Text: p.currentTranscript, IsFinal: true})
-							p.commitSpokenText(false)
-							p.isStreaming = false
 							p.interruptSent = false
 							p.turnCtx.Reset()
 							p.turnStartTime = time.Now()
@@ -173,6 +175,7 @@ func (p *LLMProcessor) Process(in <-chan Frame, out chan<- Frame) {
 			switch responseFrame.(type) {
 			case LLMResponseStartFrame:
 				p.isStreaming = true
+				playbackDone = p.turnCtx.PlaybackDone()
 				out <- responseFrame
 			case LLMResponseEndFrame:
 				out <- responseFrame

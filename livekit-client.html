@@ -177,7 +177,6 @@
         roomName: "",
         turns: [],
         currentUserText: "",
-        currentAssistantText: "",
 
         get statusClass() {
           if (this.connected) return "connected";
@@ -197,7 +196,6 @@
           this.connecting = true;
           this.turns = [];
           this.currentUserText = "";
-          this.currentAssistantText = "";
           try {
             // Lazy-load LiveKit SDK on first connect
             if (!Room) {
@@ -272,32 +270,12 @@
               }
               break;
 
-            case "assistant_transcript":
-              this.currentAssistantText += event.text;
-              this.updateOrCreateAssistantTurn();
-              this.scrollToBottom();
-              break;
-
-            case "assistant_done":
-              this.currentAssistantText = "";
-              break;
-
-            case "committed_assistant": {
-              // Replace streaming text with what was actually committed to LLM history
-              const assistantTurn = this.findLastAssistantTurn();
-              if (assistantTurn) {
-                if (event.text === "") {
-                  // Nothing was spoken — remove the turn
-                  this.turns.splice(this.turns.indexOf(assistantTurn), 1);
-                } else {
-                  assistantTurn.text = event.text;
-                  assistantTurn.final = true;
-                }
+            case "committed_assistant":
+              if (event.text !== "") {
+                this.turns.push({ role: "assistant", text: event.text, latency: null });
               }
-              this.currentAssistantText = "";
               this.scrollToBottom();
               break;
-            }
 
             case "latency": {
               const lastTurn = this.turns[this.turns.length - 1];
@@ -329,22 +307,6 @@
           }
           this.currentUserText = "";
           this.scrollToBottom();
-        },
-
-        updateOrCreateAssistantTurn() {
-          const last = this.turns[this.turns.length - 1];
-          if (last && last.role === "assistant" && this.currentAssistantText) {
-            last.text = this.currentAssistantText;
-          } else {
-            this.turns.push({ role: "assistant", text: this.currentAssistantText, final: false, latency: null });
-          }
-        },
-
-        findLastAssistantTurn() {
-          for (let i = this.turns.length - 1; i >= 0; i--) {
-            if (this.turns[i].role === "assistant") return this.turns[i];
-          }
-          return null;
         },
 
         scrollToBottom() {

@@ -46,7 +46,7 @@ func (p *PlaybackSinkProcessor) Process(ctx context.Context, in <-chan Frame, ou
 			}
 			switch f := frame.(type) {
 			case AudioFrame:
-				log.Printf("Received audio frame with %d bytes\n", len(f.Data))
+				//log.Printf("Received audio frame with %d bytes\n", len(f.Data))
 				err := p.botTrack.WriteSample(media.Sample{
 					Data:     f.Data,
 					Duration: 20 * time.Millisecond,

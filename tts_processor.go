@@ -164,7 +164,7 @@ func (t *TTSProcessor) readTTSConnectionData() {
 					log.Println("TTS audio chunk unmarshal error:", err)
 					continue
 				}
-				log.Printf("Received audio chunk: context_id=%s, done=%v\n", audioMsg.ContextId, audioMsg.Done)
+				//log.Printf("Received audio chunk: context_id=%s, done=%v\n", audioMsg.ContextId, audioMsg.Done)
 				t.handleAudioChunkMessage(&audioMsg)
 			case "word_timestamps":
 				var tsMsg CartesiaTTSWordTimestampMessage
@@ -223,7 +223,7 @@ func (t *TTSProcessor) Process(ctx context.Context, in <-chan Frame, out chan<- 
 					t.sendTextToTTS(t.currentAggregation)
 					t.currentAggregation = ""
 				}
-				log.Printf("Received text frame: %s\n", f.Text)
+				//log.Printf("Received text frame: %s\n", f.Text)
 			case LLMResponseEndFrame:
 
 				if strings.TrimSpace(t.currentAggregation) != "" {

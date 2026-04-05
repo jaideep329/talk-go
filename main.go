@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -11,7 +12,7 @@ import (
 func main() {
 	loadEnv(".env")
 	appLog, _ := os.Create("app.log")
-	log.SetOutput(appLog)
+	log.SetOutput(io.MultiWriter(os.Stderr, appLog))
 	joinRoom()
 	http.HandleFunc("/getToken", handleGetToken)
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"log"
 	"os"
 	"sync"
@@ -53,5 +54,16 @@ func onTrackSubscribed(track *webrtc.TrackRemote, pub *lksdk.RemoteTrackPublicat
 		return
 	}
 
-	// TODO: Wire up pipeline here — create AudioSourceProcessor with track and start pipeline
+	initPipeline(track)
+}
+
+func initPipeline(track *webrtc.TrackRemote) {
+	ctx := context.Background()
+	audioSource := NewAudioSourceProcessor(track)
+	sttProcessor := NewSTTProcessor()
+	llmProcessor := NewLLMProcessor()
+	ttsProcessor := NewTTSProcessor()
+	playbackSink := NewPlaybackSinkProcessor(room)
+	pipeline := NewPipeline([]FrameProcessor{audioSource, sttProcessor, llmProcessor, ttsProcessor, playbackSink})
+	go pipeline.Run(ctx)
 }

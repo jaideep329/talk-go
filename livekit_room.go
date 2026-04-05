@@ -3,7 +3,9 @@ package main
 import (
 	"log"
 	"os"
+	"time"
 
+	"github.com/livekit/protocol/auth"
 	lksdk "github.com/livekit/server-sdk-go/v2"
 	"github.com/pion/webrtc/v4"
 )
@@ -31,4 +33,16 @@ func joinRoom(audioSource *AudioSourceProcessor) {
 		log.Fatal("failed to join room:", err)
 	}
 	log.Println("Bot joined the room")
+}
+
+func generateToken(roomName, identity string) (string, error) {
+	at := auth.NewAccessToken(os.Getenv("LIVEKIT_API_KEY"), os.Getenv("LIVEKIT_API_SECRET"))
+	grant := &auth.VideoGrant{
+		RoomJoin: true,
+		Room:     roomName,
+	}
+	at.SetVideoGrant(grant).
+		SetIdentity(identity).
+		SetValidFor(10 * time.Minute)
+	return at.ToJWT()
 }

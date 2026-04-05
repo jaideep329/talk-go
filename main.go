@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -29,6 +30,41 @@ func main() {
 	}
 }
 
+func handleConnect(w http.ResponseWriter, r *http.Request) {
+	initPipeline()
+
+	roomName := "default-room"
+	identity := "web-user"
+
+	if r.Method == http.MethodPost {
+		var req struct {
+			RoomName string `json:"room_name"`
+			Identity string `json:"identity"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err == nil {
+			if req.RoomName != "" {
+				roomName = req.RoomName
+			}
+			if req.Identity != "" {
+				identity = req.Identity
+			}
+		}
+	}
+
+	token, err := generateToken(roomName, identity)
+	if err != nil {
+		log.Printf("failed to create token: %v", err)
+		http.Error(w, "failed to create token", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"server_url": os.Getenv("LIVEKIT_URL"),
+		"token":      token,
+	})
+}
+
 func loadEnv(path string) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -41,8 +77,7 @@ func loadEnv(path string) {
 		}
 		parts := strings.SplitN(line, "=", 2)
 		if len(parts) == 2 {
-			err := os.Setenv(parts[0], parts[1])
-			if err != nil {
+			if err := os.Setenv(parts[0], parts[1]); err != nil {
 				return
 			}
 		}

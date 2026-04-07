@@ -35,18 +35,17 @@ The pipeline is **complete and working end-to-end** with barge-in, word timestam
 | File | Purpose |
 |------|---------|
 | `main.go` | Entry point. Loads `.env`, configures logging (both terminal + `app.log`), silences LiveKit/pion logs, serves HTTP (`:3000`). `/connect` creates sessions, `/ws` streams UI events |
-| `pipeline.go` | `Pipeline` struct with `Run()`. `SessionContext` (single dependency for all processors: Logger, Room, UIEvents, Ctx). `Session` struct for cleanup. `createSession()` wires everything |
-| `frame.go` | Frame types: `Frame` interface with `IsSystem()` (not yet used). Concrete: `AudioFrame`, `TextFrame`, `TranscriptFrame`, `LLMResponseStartFrame`, `LLMResponseEndFrame`, `WordTimestampFrame`, `TTSDoneFrame`, `EndFrame`, `InterruptFrame` (unused) |
-| `frame_processor.go` | `FrameProcessor` interface: `Process(in <-chan Frame, out chan<- Frame)` |
-| `turn_context.go` | `TurnContext` — shared across LLM, TTS, PlaybackSink. Per-turn `context.WithCancel` for interrupt broadcast. Word accumulation (words appended as played). `PlaybackDone` channel for commit timing |
+| `pipeline.go` | `Pipeline` struct with `Run()` — creates per-processor data/system channels, injects `Send` function for routing. `SessionContext` (single dependency for all processors: Logger, Room, UIEvents, Ctx). `Session` struct for cleanup. `createSession()` wires everything |
+| `frame.go` | Frame types: `Frame` interface with `IsSystem()` for routing priority. Concrete: `AudioFrame`, `TextFrame`, `TranscriptFrame`, `LLMResponseStartFrame` (carries `StartedAt` timestamp), `LLMResponseEndFrame`, `WordTimestampFrame`, `TTSDoneFrame`, `EndFrame`, `InterruptFrame`. System frames: `InterruptFrame`, `EndFrame` |
+| `frame_processor.go` | `Direction` (Downstream/Upstream), `ProcessorChannels` (Data, System channels + Send function), `FrameProcessor` interface: `Process(ch ProcessorChannels)` |
 | `ui_events.go` | `UIEvent` struct, `UIEventSender` — per-session WebSocket broadcaster to frontend |
 | `livekit_room.go` | `joinRoom(roomName, audioSource)` — bot joins LiveKit room. `generateToken()` creates JWT tokens |
 | `livekit-client.html` | Browser client: Pico CSS + Alpine.js. Dark theme. Live transcript (user speaking), committed turns (user + assistant), latency badges, connect/disconnect/mute controls |
 | `audio_source_processor.go` | Source processor. `SetTrack(track)` starts reader goroutine. Decodes Opus→PCM (16kHz mono) |
 | `stt_processor.go` | Sends PCM to Soniox websocket, emits `TranscriptFrame`s. Builds live transcript for UI (finals accumulate, non-finals replace per response). Auto-reconnects |
-| `llm_processor.go` | Accumulates final tokens, triggers `runLLM` on `<end>`. Streams OpenAI (gpt-4.1). Barge-in detection. Concatenates consecutive user messages when no assistant response between them. Commits spoken text on `PlaybackDone` or barge-in |
-| `tts_processor.go` | Aggregates sentences, sends to Cartesia. PCM→Opus encoding. Interleaves `WordTimestampFrame`s with `AudioFrame`s based on audio time pushed (words emitted at correct playback position). Auto-reconnects |
-| `playback_sink_processor.go` | Publishes LiveKit audio track. 20ms ticker pacing. On `WordTimestampFrame`: appends words to TurnContext + sends live `assistant_speaking` UI event. On `TTSDoneFrame`: marks playback done |
+| `llm_processor.go` | Accumulates final tokens, triggers `runLLM` on `<end>`. Streams OpenAI (gpt-4.1). Barge-in detection (sends `InterruptFrame` downstream). Concatenates consecutive user messages when no assistant response between them. Accumulates words internally from upstream `WordTimestampFrame`s. Commits spoken text on upstream `TTSDoneFrame` or barge-in |
+| `tts_processor.go` | Aggregates sentences, sends to Cartesia. PCM→Opus encoding. Interleaves `WordTimestampFrame`s with `AudioFrame`s based on audio time pushed (words emitted at correct playback position). Handles `InterruptFrame` on system channel. Forwards upstream frames (WordTimestamp, TTSDone) from PlaybackSink to LLM. Auto-reconnects |
+| `playback_sink_processor.go` | Publishes LiveKit audio track. 20ms ticker pacing. On `WordTimestampFrame`: sends `assistant_speaking` UI event + forwards upstream to LLM. On `TTSDoneFrame`: forwards upstream to LLM for commit. Handles `InterruptFrame` on system channel |
 
 #### Pipeline wiring:
 ```go
@@ -55,27 +54,46 @@ AudioSourceProcessor → STTProcessor → LLMProcessor → TTSProcessor → Play
 
 ### Processor Initialization Pattern
 
-All processors take `sessionCtx *SessionContext` as their first argument. Processors that need per-turn state also take `turnCtx *TurnContext`:
+All processors take only `sessionCtx *SessionContext`. No shared per-turn state — all cross-processor communication happens via frames.
 
 ```go
 NewAudioSourceProcessor(sessionCtx)
 NewSTTProcessor(sessionCtx)
-NewLLMProcessor(sessionCtx, turnCtx)
-NewTTSProcessor(sessionCtx, turnCtx)
-NewPlaybackSinkProcessor(sessionCtx, turnCtx)
+NewLLMProcessor(sessionCtx)
+NewTTSProcessor(sessionCtx)
+NewPlaybackSinkProcessor(sessionCtx)
 ```
 
 `SessionContext` is the single session-level dependency containing Logger, Room, UIEvents, and Ctx (for session cancellation).
 
 ### Key Design Decisions
 
+**Pipecat-style frame-only communication (no shared state):** All cross-processor communication happens via frames flowing through channels. No shared mutable objects between processors. Each processor is self-contained — receives frames on its channels, sends frames via its `Send` function.
+
+**ProcessorChannels pattern:** Every processor receives a `ProcessorChannels` struct with two input channels (Data, System) and a `Send` function. The pipeline creates these and injects routing logic:
+```go
+type ProcessorChannels struct {
+    Data   <-chan Frame    // normal priority input (from both upstream and downstream neighbors)
+    System <-chan Frame    // high priority input (InterruptFrame, EndFrame) — checked first
+    Send   func(frame Frame, dir Direction)  // routes to next/previous processor
+}
+```
+- `Send(frame, Downstream)` → routes to next processor's System channel (if `frame.IsSystem()`) or Data channel
+- `Send(frame, Upstream)` → routes to previous processor's Data channel
+
+**System channel priority (nested select trick):** Processors that handle InterruptFrame use a nested select: outer select checks System channel first with a `default` fallback to an inner select that checks both System and Data. This ensures system frames (interrupts) bypass any buffered data frames.
+
 **SessionContext as single dependency:** All session-level concerns (logging, LiveKit room, UI events, cancellation) live in one struct. Eliminates per-processor parameter sprawl.
 
-**TurnContext for cross-processor state (temporary — planned for removal):** Currently handles interrupt broadcast (`Cancel`/`Done`), word accumulation (`AppendWords`), and playback completion (`MarkPlaybackDone`/`PlaybackDone`). Will be replaced by frame-based communication in the upcoming refactor.
+**Bidirectional frame flow:** Frames flow downstream (AudioSource → PlaybackSink) and upstream (PlaybackSink → LLM). PlaybackSink sends `WordTimestampFrame` and `TTSDoneFrame` upstream. TTS forwards upstream frames it doesn't own. LLM accumulates words internally and commits on `TTSDoneFrame` or barge-in.
+
+**InterruptFrame for barge-in:** LLM detects barge-in (receives TranscriptFrame while streaming), cancels its HTTP request, and sends `InterruptFrame` downstream. TTS receives it on system channel (priority), cancels Cartesia context, drains buffered audio, resets state, and forwards downstream. PlaybackSink receives it and stops playback. No shared cancel context needed.
+
+**LLMResponseStartFrame carries timestamp:** `StartedAt time.Time` is set by LLM when the turn begins. PlaybackSink uses it for accurate E2E latency measurement (measures from LLM turn start to first audio frame played).
 
 **Word timestamp interleaving in TTS:** TTS tracks `audioTimePushed` (seconds) and buffers `pendingWords` from Cartesia timestamp messages. After each opus frame is pushed, words whose `start <= audioTimePushed` are emitted as `WordTimestampFrame`. This means words arrive at PlaybackSink in the correct playback order — no time-based calculation needed on the receiving end.
 
-**Commit timing:** Assistant text is committed to LLM history when `TTSDoneFrame` reaches PlaybackSink (normal completion) or on barge-in (partial text via `SpokenSoFar()`). NOT deferred to next turn.
+**Commit timing:** Assistant text is committed to LLM history when `TTSDoneFrame` flows upstream from PlaybackSink through TTS to LLM (normal completion) or on barge-in (partial text from internally accumulated words). NOT deferred to next turn.
 
 **User message concatenation:** If the user pauses mid-thought (Soniox fires `<end>`) and the LLM gets barged in before responding, the next user utterance is concatenated with the previous one in the messages array rather than creating separate entries.
 
@@ -86,28 +104,6 @@ NewPlaybackSinkProcessor(sessionCtx, turnCtx)
 **Session cleanup:** When UI WebSocket disconnects, session context is cancelled (stops STT/TTS background goroutines), LiveKit room is disconnected, session is removed from map.
 
 **Cartesia TTS context strategy:** Single `context_id` per LLM turn. All sentences sent with `"continue": true` and `"add_timestamps": true`. Final flush with `"continue": false`. On interrupt, sends `{"cancel": true}`.
-
-### Planned Refactor: Pipecat-Style Frame Communication
-
-The next major change eliminates `TurnContext` and adopts Pipecat's frame-only communication model:
-
-**New ProcessorChannels (replaces current `Process(in, out)`):**
-```go
-type ProcessorChannels struct {
-    Data   <-chan Frame                       // normal priority input
-    System <-chan Frame                       // high priority input (checked first)
-    Send   func(frame Frame, dir Direction)   // output anything, any direction
-}
-```
-
-**Key changes:**
-- **Two input channels with priority:** System channel checked first in select (nested select trick). `InterruptionFrame` goes on system channel — bypasses buffered audio. Eliminates need for `TurnContext.Cancel()/Done()`.
-- **Upstream frame flow:** `Send(frame, Upstream)` sends frames backwards through pipeline. PlaybackSink sends `WordTimestampFrame` and `TTSDoneFrame` upstream to LLM. Eliminates need for `TurnContext.AppendWords()` and `PlaybackDone()`.
-- **`Send` function injected by pipeline:** Routes based on `frame.IsSystem()` and direction. Processor doesn't think about output channels.
-- **Frame type hierarchy:** `IsSystem()` on Frame interface determines routing priority. `InterruptionFrame`, `EndFrame` are system frames.
-- **LLM as aggregator:** LLM accumulates words from upstream `WordTimestampFrame`s internally. Commits on `InterruptionFrame` or upstream `TTSDoneFrame`. No shared word tracking object.
-
-This enables: function calls (upstream result flow), custom processors (just implement `Process(ProcessorChannels)`), and dynamic pipeline composition without editing core infrastructure.
 
 ### Key Technical Details
 
@@ -159,8 +155,14 @@ go build ./...
 # Open http://localhost:3000, click Connect
 ```
 
+### Debugging / Profiling
+
+- `net/http/pprof` is imported in `main.go` — heap profiles available at `http://localhost:3000/debug/pprof/heap`
+- Typical memory: ~38-41 MB RSS for a single session (8 MB heap, rest is Go runtime + CGO/libopus + WebRTC + TLS)
+- All pipeline-level allocations are negligible — memory is dominated by LiveKit/pion/protobuf/opus internals
+
 ### Known Issues / Gotchas
 
 - Audio can sound choppy if Opus frames aren't paced at 20ms intervals — use `time.Ticker`, not `time.Sleep`
 - The go.mod module name is still `awesomeProject` (from the original learning project)
-- `InterruptFrame` in `frame.go` is unused (replaced by `TurnContext`) — will be repurposed in the refactor
+- Upstream frames (WordTimestampFrame, TTSDoneFrame) pass through TTS as a forwarding hop — TTS receives them on its Data channel from PlaybackSink and forwards upstream to LLM

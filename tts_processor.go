@@ -31,6 +31,7 @@ type pendingWord struct {
 
 type TTSProcessor struct {
 	sessionCtx         *SessionContext
+	metrics            *ProcessorMetrics
 	currentAggregation string
 	currentContextId   string
 	websocketConn      *websocket.Conn
@@ -39,6 +40,9 @@ type TTSProcessor struct {
 	audioFrames        chan Frame
 	pendingWords       []pendingWord
 	audioTimePushed    float64 // seconds of audio pushed to audioFrames
+	firstTextReceived  bool    // tracks first TextFrame per turn for aggregation metric
+	firstSentenceSent  bool    // tracks first sendTextToTTS per turn for aggregation + TTFB
+	firstAudioReceived bool    // tracks first audio chunk per turn for TTFB metric
 }
 
 type CartesiaTTSMessage struct {
@@ -125,6 +129,12 @@ func (t *TTSProcessor) CancelTTSContext() {
 func (t *TTSProcessor) handleAudioChunkMessage(audioMsg *CartesiaTTSAudioChunkMessage) {
 	if t.currentContextId == "" {
 		return
+	}
+	if !t.firstAudioReceived {
+		t.firstAudioReceived = true
+		if mf := t.metrics.Stop(MetricTTFB); mf != nil {
+			t.audioFrames <- *mf
+		}
 	}
 	encodedBytes, err := base64.StdEncoding.DecodeString(audioMsg.Data)
 	if err != nil {
@@ -276,6 +286,7 @@ func NewTTSProcessor(sessionCtx *SessionContext) *TTSProcessor {
 	}
 	t := &TTSProcessor{
 		sessionCtx:  sessionCtx,
+		metrics:     NewProcessorMetrics("tts"),
 		opusEncoder: opusEncoder,
 		audioFrames: make(chan Frame, 100),
 	}
@@ -298,6 +309,10 @@ func (t *TTSProcessor) Process(ch ProcessorChannels) {
 				t.pcmBuffer = nil
 				t.pendingWords = nil
 				t.audioTimePushed = 0
+				t.firstTextReceived = false
+				t.firstSentenceSent = false
+				t.firstAudioReceived = false
+				t.metrics.Reset()
 				t.sessionCtx.Logger.Println("TTS interrupted, cleared state")
 				ch.Send(frame, Downstream) // propagate to PlaybackSink
 			case EndFrame:
@@ -316,6 +331,10 @@ func (t *TTSProcessor) Process(ch ProcessorChannels) {
 					t.pcmBuffer = nil
 					t.pendingWords = nil
 					t.audioTimePushed = 0
+					t.firstTextReceived = false
+					t.firstSentenceSent = false
+					t.firstAudioReceived = false
+					t.metrics.Reset()
 					t.sessionCtx.Logger.Println("TTS interrupted, cleared state")
 					ch.Send(frame, Downstream)
 				case EndFrame:
@@ -332,12 +351,27 @@ func (t *TTSProcessor) Process(ch ProcessorChannels) {
 					t.pcmBuffer = nil
 					t.pendingWords = nil
 					t.audioTimePushed = 0
+					t.firstTextReceived = false
+					t.firstSentenceSent = false
+					t.firstAudioReceived = false
+					t.metrics.Reset()
 					t.currentContextId = fmt.Sprintf("ctx-%d", rand.IntN(9000000))
 					t.sessionCtx.Logger.Println("LLM response started, resetting TTS aggregation")
 					ch.Send(f, Downstream)
 				case TextFrame:
+					if !t.firstTextReceived {
+						t.firstTextReceived = true
+						t.metrics.Start(MetricTextAggregation)
+					}
 					t.currentAggregation += f.Text
 					if endsWithPunctuation(t.currentAggregation) {
+						if !t.firstSentenceSent {
+							t.firstSentenceSent = true
+							if mf := t.metrics.Stop(MetricTextAggregation); mf != nil {
+								ch.Send(*mf, Downstream)
+							}
+							t.metrics.Start(MetricTTFB) // TTS TTFB: text sent → first audio
+						}
 						t.sendTextToTTS(t.currentAggregation)
 						t.currentAggregation = ""
 					}

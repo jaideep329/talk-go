@@ -11,11 +11,12 @@ import (
 )
 
 type Pipeline struct {
-	processors []FrameProcessor
+	processors     []FrameProcessor
+	metricsHandler func(MetricsFrame)
 }
 
-func NewPipeline(processors []FrameProcessor) *Pipeline {
-	return &Pipeline{processors: processors}
+func NewPipeline(processors []FrameProcessor, metricsHandler func(MetricsFrame)) *Pipeline {
+	return &Pipeline{processors: processors, metricsHandler: metricsHandler}
 }
 
 func (p *Pipeline) Run() {
@@ -34,6 +35,13 @@ func (p *Pipeline) Run() {
 	// Upstream: route to previous processor's data channel.
 	sendFn := func(i int) func(Frame, Direction) {
 		return func(frame Frame, dir Direction) {
+			// Intercept MetricsFrames — route to handler, don't forward.
+			if mf, ok := frame.(MetricsFrame); ok {
+				if p.metricsHandler != nil {
+					p.metricsHandler(mf)
+				}
+				return
+			}
 			switch dir {
 			case Downstream:
 				if i+1 < n {
@@ -108,7 +116,17 @@ func createSession() (string, *Session) {
 	llmProcessor := NewLLMProcessor(sessionCtx)
 	ttsProcessor := NewTTSProcessor(sessionCtx)
 	playbackSink := NewPlaybackSinkProcessor(sessionCtx)
-	pipeline := NewPipeline([]FrameProcessor{audioSource, sttProcessor, llmProcessor, ttsProcessor, playbackSink})
+	metricsHandler := func(mf MetricsFrame) {
+		for _, d := range mf.Data {
+			logger.Printf("Metric [%s] %s: %.1fms\n", d.Processor, d.Label, d.ValueMs)
+			uiEvents.Send(UIEvent{Type: Metrics, Data: map[string]interface{}{
+				"processor": d.Processor,
+				"label":     string(d.Label),
+				"value_ms":  d.ValueMs,
+			}})
+		}
+	}
+	pipeline := NewPipeline([]FrameProcessor{audioSource, sttProcessor, llmProcessor, ttsProcessor, playbackSink}, metricsHandler)
 	go pipeline.Run()
 	return roomName, session
 }

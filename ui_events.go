@@ -16,7 +16,7 @@ const (
 	UserTranscript     UIEventType = "user_transcript"
 	CommittedAssistant UIEventType = "committed_assistant"
 	AssistantSpeaking  UIEventType = "assistant_speaking"
-	Latency            UIEventType = "latency"
+	Metrics            UIEventType = "metrics"
 )
 
 // UIEvent is a typed message sent to the frontend over WebSocket.

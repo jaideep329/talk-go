@@ -13,14 +13,13 @@ import (
 
 type LLMProcessor struct {
 	sessionCtx        *SessionContext
+	metrics           *ProcessorMetrics
 	messages          []map[string]string
 	currentTranscript string
 	isStreaming       bool
 	interruptSent     bool
 	cancelLLM         context.CancelFunc
 	responseFrames    chan Frame
-	turnStartTime     time.Time
-	firstTokenSent    bool
 	spokenWords       []string // words accumulated from upstream WordTimestampFrames
 }
 
@@ -62,7 +61,9 @@ func (p *LLMProcessor) runLLM(ctx context.Context) {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+os.Getenv("OPENAI_API_KEY"))
-	p.responseFrames <- LLMResponseStartFrame{StartedAt: p.turnStartTime}
+	p.metrics.Start(MetricTTFB)
+	p.metrics.Start(MetricProcessing)
+	p.responseFrames <- LLMResponseStartFrame{StartedAt: time.Now()}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		p.sessionCtx.Logger.Println("LLM request failed:", err)
@@ -70,6 +71,7 @@ func (p *LLMProcessor) runLLM(ctx context.Context) {
 	}
 	defer resp.Body.Close()
 
+	firstToken := true
 	scanner := bufio.NewScanner(resp.Body)
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -96,15 +98,19 @@ func (p *LLMProcessor) runLLM(ctx context.Context) {
 			if content == "" {
 				continue
 			}
-			if !p.firstTokenSent {
-				p.firstTokenSent = true
-				llmLatency := time.Since(p.turnStartTime).Milliseconds()
-				p.sessionCtx.Logger.Printf("LLM first token latency: %dms\n", llmLatency)
+			if firstToken {
+				firstToken = false
+				if mf := p.metrics.Stop(MetricTTFB); mf != nil {
+					p.responseFrames <- *mf
+				}
 			}
 			p.responseFrames <- TextFrame{Text: content}
 		}
 	}
 	if ctx.Err() == nil {
+		if mf := p.metrics.Stop(MetricProcessing); mf != nil {
+			p.responseFrames <- *mf
+		}
 		p.responseFrames <- LLMResponseEndFrame{}
 	}
 }
@@ -112,6 +118,7 @@ func (p *LLMProcessor) runLLM(ctx context.Context) {
 func NewLLMProcessor(sessionCtx *SessionContext) *LLMProcessor {
 	return &LLMProcessor{
 		sessionCtx:     sessionCtx,
+		metrics:        NewProcessorMetrics("llm"),
 		messages:       []map[string]string{},
 		responseFrames: make(chan Frame, 100),
 	}
@@ -178,6 +185,7 @@ func (p *LLMProcessor) Process(ch ProcessorChannels) {
 						if p.cancelLLM != nil {
 							p.cancelLLM()
 						}
+						p.metrics.Reset()
 						ch.Send(InterruptFrame{}, Downstream)
 						p.isStreaming = false
 						p.interruptSent = true
@@ -193,8 +201,6 @@ func (p *LLMProcessor) Process(ch ProcessorChannels) {
 								p.addUserMessage(p.currentTranscript)
 								p.interruptSent = false
 								p.spokenWords = nil
-								p.turnStartTime = time.Now()
-								p.firstTokenSent = false
 								ctx, cancel := context.WithCancel(context.Background())
 								p.cancelLLM = cancel
 								go p.runLLM(ctx)

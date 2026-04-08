@@ -102,6 +102,7 @@
       background: var(--pico-muted-border-color);
       font-size: 0.65rem;
       color: var(--pico-muted-color);
+      margin-right: 0.3rem;
     }
     .empty-state {
       flex: 1;
@@ -170,8 +171,10 @@
       <div class="turn" :class="turn.role">
         <div class="turn-role" x-text="turn.role"></div>
         <div class="turn-text" x-text="turn.text"></div>
-        <div class="turn-meta" x-show="turn.latency">
-          <span class="latency-badge" x-text="turn.latency + 'ms e2e'"></span>
+        <div class="turn-meta" x-show="turn.metrics && turn.metrics.length">
+          <template x-for="m in (turn.metrics || [])">
+            <span class="latency-badge" x-text="m.processor + ' ' + m.label + ': ' + Math.round(m.value_ms) + 'ms'"></span>
+          </template>
         </div>
       </div>
     </template>
@@ -215,7 +218,7 @@
         turns: [],
         liveText: "",
         assistantLiveText: "",
-        pendingLatency: null,
+        pendingMetrics: [],
 
         get statusClass() {
           if (this.connected) return "connected";
@@ -316,15 +319,15 @@
 
             case "committed_assistant":
               if (d.text !== "") {
-                this.turns.push({ role: "assistant", text: d.text, latency: this.pendingLatency });
+                this.turns.push({ role: "assistant", text: d.text, metrics: [...this.pendingMetrics] });
               }
               this.assistantLiveText = "";
-              this.pendingLatency = null;
+              this.pendingMetrics = [];
               this.scrollToBottom();
               break;
 
-            case "latency":
-              this.pendingLatency = d.turn_e2e_ms;
+            case "metrics":
+              this.pendingMetrics.push(d);
               break;
           }
         },
@@ -335,7 +338,7 @@
             // Update existing user turn (concatenated from multiple endpoints)
             last.text = text;
           } else {
-            this.turns.push({ role: "user", text: text, latency: null });
+            this.turns.push({ role: "user", text: text, metrics: null });
           }
           this.scrollToBottom();
         },

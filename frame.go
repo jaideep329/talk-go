@@ -19,6 +19,7 @@ const (
 	End
 	WordTimestamp
 	TTSDone
+	MetricsType
 )
 
 type AudioFrame struct {

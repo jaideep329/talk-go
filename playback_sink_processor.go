@@ -11,9 +11,9 @@ import (
 type PlaybackSinkProcessor struct {
 	sessionCtx      *SessionContext
 	botTrack        *lksdk.LocalSampleTrack
+	metrics         *ProcessorMetrics
 	interrupted     bool
 	playbackStarted bool
-	turnStarted     time.Time
 }
 
 func NewPlaybackSinkProcessor(sessionCtx *SessionContext) *PlaybackSinkProcessor {
@@ -35,6 +35,7 @@ func NewPlaybackSinkProcessor(sessionCtx *SessionContext) *PlaybackSinkProcessor
 	return &PlaybackSinkProcessor{
 		sessionCtx: sessionCtx,
 		botTrack:   botTrack,
+		metrics:    NewProcessorMetrics("playback"),
 	}
 }
 
@@ -73,9 +74,9 @@ func (p *PlaybackSinkProcessor) Process(ch ProcessorChannels) {
 					}
 					if !p.playbackStarted {
 						p.playbackStarted = true
-						e2eMs := time.Since(p.turnStarted).Milliseconds()
-						p.sessionCtx.Logger.Printf("End-to-end turn latency: %dms\n", e2eMs)
-						p.sessionCtx.UIEvents.Send(UIEvent{Type: Latency, Data: map[string]interface{}{"turn_e2e_ms": e2eMs}})
+						if mf := p.metrics.Stop(MetricE2ELatency); mf != nil {
+							ch.Send(*mf, Downstream)
+						}
 					}
 					err := p.botTrack.WriteSample(media.Sample{
 						Data:     f.Data,
@@ -99,7 +100,7 @@ func (p *PlaybackSinkProcessor) Process(ch ProcessorChannels) {
 				case LLMResponseStartFrame:
 					p.interrupted = false
 					p.playbackStarted = false
-					p.turnStarted = f.StartedAt
+					p.metrics.StartAt(MetricE2ELatency, f.StartedAt)
 				case LLMResponseEndFrame:
 					// Not used by PlaybackSink — ignore silently.
 				default:

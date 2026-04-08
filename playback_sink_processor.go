@@ -75,7 +75,7 @@ func (p *PlaybackSinkProcessor) Process(ch ProcessorChannels) {
 						p.playbackStarted = true
 						e2eMs := time.Since(p.turnStarted).Milliseconds()
 						p.sessionCtx.Logger.Printf("End-to-end turn latency: %dms\n", e2eMs)
-						p.sessionCtx.UIEvents.Send(UIEvent{Type: "latency", TurnE2EMs: e2eMs})
+						p.sessionCtx.UIEvents.Send(UIEvent{Type: Latency, Data: map[string]interface{}{"turn_e2e_ms": e2eMs}})
 					}
 					err := p.botTrack.WriteSample(media.Sample{
 						Data:     f.Data,
@@ -88,7 +88,7 @@ func (p *PlaybackSinkProcessor) Process(ch ProcessorChannels) {
 					<-ticker.C
 				case WordTimestampFrame:
 					if !p.interrupted {
-						p.sessionCtx.UIEvents.Send(UIEvent{Type: "assistant_speaking", Text: f.Words[0]})
+						p.sessionCtx.UIEvents.Send(UIEvent{Type: AssistantSpeaking, Data: map[string]interface{}{"text": f.Words[0]}})
 						ch.Send(f, Upstream) // LLM accumulates words
 					}
 				case TTSDoneFrame:

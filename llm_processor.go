@@ -122,7 +122,7 @@ func (p *LLMProcessor) commitSpokenText(interrupted bool) {
 	if spoken != "" {
 		p.sessionCtx.Logger.Printf("Committing to history (interrupted=%v): %s\n", interrupted, spoken)
 		p.messages = append(p.messages, map[string]string{"role": "assistant", "content": spoken})
-		p.sessionCtx.UIEvents.Send(UIEvent{Type: "committed_assistant", Role: "assistant", Text: spoken})
+		p.sessionCtx.UIEvents.Send(UIEvent{Type: CommittedAssistant, Data: map[string]interface{}{"role": "assistant", "text": spoken}})
 	}
 }
 
@@ -142,10 +142,10 @@ func (p *LLMProcessor) addUserMessage(text string) {
 		last := p.messages[len(p.messages)-1]
 		last["content"] += " " + text
 		p.sessionCtx.Logger.Printf("Concatenated user message: %s\n", last["content"])
-		p.sessionCtx.UIEvents.Send(UIEvent{Type: "user_transcript", Role: "user", Text: last["content"], IsFinal: true})
+		p.sessionCtx.UIEvents.Send(UIEvent{Type: UserTranscript, Data: map[string]interface{}{"role": "user", "text": last["content"], "is_final": true}})
 	} else {
 		p.messages = append(p.messages, map[string]string{"role": "user", "content": text})
-		p.sessionCtx.UIEvents.Send(UIEvent{Type: "user_transcript", Role: "user", Text: text, IsFinal: true})
+		p.sessionCtx.UIEvents.Send(UIEvent{Type: UserTranscript, Data: map[string]interface{}{"role": "user", "text": text, "is_final": true}})
 	}
 }
 

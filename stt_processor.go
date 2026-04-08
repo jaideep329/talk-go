@@ -105,10 +105,10 @@ func (s *STTProcessor) readSTTWebsocket() {
 		}
 
 		if hasEnd {
-			s.sessionCtx.UIEvents.Send(UIEvent{Type: "live_transcript", Text: ""})
+			s.sessionCtx.UIEvents.Send(UIEvent{Type: LiveTranscript, Data: map[string]interface{}{"text": ""}})
 			s.finalText = ""
 		} else if s.finalText != "" || nonFinalText != "" {
-			s.sessionCtx.UIEvents.Send(UIEvent{Type: "live_transcript", Text: s.finalText + nonFinalText})
+			s.sessionCtx.UIEvents.Send(UIEvent{Type: LiveTranscript, Data: map[string]interface{}{"text": s.finalText + nonFinalText}})
 		}
 	}
 }

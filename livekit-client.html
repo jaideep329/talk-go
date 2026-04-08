@@ -298,24 +298,25 @@
         },
 
         handleUIEvent(event) {
+          const d = event.data;
           switch (event.type) {
             case "user_transcript":
               this.assistantLiveText = "";
-              this.commitUserTurn(event.text);
+              this.commitUserTurn(d.text);
               break;
 
             case "live_transcript":
-              this.liveText = event.text;
+              this.liveText = d.text;
               break;
 
             case "assistant_speaking":
-              this.assistantLiveText += (this.assistantLiveText && event.text[0] !== '.' && event.text[0] !== ',' && event.text[0] !== '!' && event.text[0] !== '?' ? " " : "") + event.text;
+              this.assistantLiveText += (this.assistantLiveText && d.text[0] !== '.' && d.text[0] !== ',' && d.text[0] !== '!' && d.text[0] !== '?' ? " " : "") + d.text;
               this.scrollToBottom();
               break;
 
             case "committed_assistant":
-              if (event.text !== "") {
-                this.turns.push({ role: "assistant", text: event.text, latency: this.pendingLatency });
+              if (d.text !== "") {
+                this.turns.push({ role: "assistant", text: d.text, latency: this.pendingLatency });
               }
               this.assistantLiveText = "";
               this.pendingLatency = null;
@@ -323,7 +324,7 @@
               break;
 
             case "latency":
-              this.pendingLatency = event.turn_e2e_ms;
+              this.pendingLatency = d.turn_e2e_ms;
               break;
           }
         },

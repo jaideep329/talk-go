@@ -9,17 +9,21 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// UIEvent is a JSON message sent to the frontend over WebSocket.
+type UIEventType string
+
+const (
+	LiveTranscript     UIEventType = "live_transcript"
+	UserTranscript     UIEventType = "user_transcript"
+	CommittedAssistant UIEventType = "committed_assistant"
+	AssistantSpeaking  UIEventType = "assistant_speaking"
+	Latency            UIEventType = "latency"
+)
+
+// UIEvent is a typed message sent to the frontend over WebSocket.
+// Type is an enum for compile-time safety. Data holds arbitrary payload.
 type UIEvent struct {
-	Type string `json:"type"`
-
-	// Transcript fields
-	Role    string `json:"role,omitempty"` // "user" or "assistant"
-	Text    string `json:"text"`           // transcript text (no omitempty — empty string is meaningful)
-	IsFinal bool   `json:"is_final,omitempty"`
-
-	// Latency fields
-	TurnE2EMs int64 `json:"turn_e2e_ms,omitempty"` // end-to-end turn latency
+	Type UIEventType            `json:"type"`
+	Data map[string]interface{} `json:"data"`
 }
 
 // UIEventSender broadcasts UIEvents to connected WebSocket clients.

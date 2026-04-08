@@ -8,6 +8,7 @@ import (
 	"math/rand/v2"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -34,15 +35,16 @@ type TTSProcessor struct {
 	metrics            *ProcessorMetrics
 	currentAggregation string
 	currentContextId   string
+	activeContextId    atomic.Value // string — safe for reader goroutine to check
 	websocketConn      *websocket.Conn
 	pcmBuffer          []byte
 	opusEncoder        *opus.Encoder
 	audioFrames        chan Frame
 	pendingWords       []pendingWord
 	audioTimePushed    float64 // seconds of audio pushed to audioFrames
-	firstTextReceived  bool    // tracks first TextFrame per turn for aggregation metric
-	firstSentenceSent  bool    // tracks first sendTextToTTS per turn for aggregation + TTFB
-	firstAudioReceived bool    // tracks first audio chunk per turn for TTFB metric
+	firstTextReceived  bool
+	firstSentenceSent  bool
+	firstAudioReceived bool
 }
 
 type CartesiaTTSMessage struct {
@@ -77,6 +79,11 @@ type CartesiaTTSDoneMessage struct {
 	Done       bool   `json:"done"`
 	ContextId  string `json:"context_id"`
 	Error      string `json:"error"`
+}
+
+func (t *TTSProcessor) isActiveContext(contextId string) bool {
+	active, _ := t.activeContextId.Load().(string)
+	return active != "" && active == contextId
 }
 
 func (t *TTSProcessor) sendTextToTTS(text string) {
@@ -252,6 +259,9 @@ func (t *TTSProcessor) readTTSConnectionData() {
 				t.sessionCtx.Logger.Println("TTS audio chunk unmarshal error:", err)
 				continue
 			}
+			if !t.isActiveContext(audioMsg.ContextId) {
+				continue
+			}
 			t.handleAudioChunkMessage(&audioMsg)
 		case "timestamps":
 			var tsMsg CartesiaTTSWordTimestampMessage
@@ -259,17 +269,22 @@ func (t *TTSProcessor) readTTSConnectionData() {
 				t.sessionCtx.Logger.Println("TTS word timestamp unmarshal error:", err)
 				continue
 			}
-			if t.currentContextId != "" {
-				for i, w := range tsMsg.WordTimestamps.Words {
-					if i < len(tsMsg.WordTimestamps.Start) {
-						t.pendingWords = append(t.pendingWords, pendingWord{word: w, start: tsMsg.WordTimestamps.Start[i]})
-					}
+			if !t.isActiveContext(tsMsg.ContextId) {
+				continue
+			}
+			for i, w := range tsMsg.WordTimestamps.Words {
+				if i < len(tsMsg.WordTimestamps.Start) {
+					t.pendingWords = append(t.pendingWords, pendingWord{word: w, start: tsMsg.WordTimestamps.Start[i]})
 				}
 			}
 		case "done":
 			var doneMsg CartesiaTTSDoneMessage
 			if err := json.Unmarshal(msg, &doneMsg); err != nil {
 				t.sessionCtx.Logger.Println("TTS done message unmarshal error:", err)
+				continue
+			}
+			if !t.isActiveContext(doneMsg.ContextId) {
+				t.sessionCtx.Logger.Printf("TTS ignoring stale done: context_id=%s\n", doneMsg.ContextId)
 				continue
 			}
 			t.sessionCtx.Logger.Printf("TTS synthesis done: context_id=%s\n", doneMsg.ContextId)
@@ -306,6 +321,7 @@ func (t *TTSProcessor) Process(ch ProcessorChannels) {
 				drainChannel(t.audioFrames)
 				t.currentAggregation = ""
 				t.currentContextId = ""
+				t.activeContextId.Store("")
 				t.pcmBuffer = nil
 				t.pendingWords = nil
 				t.audioTimePushed = 0
@@ -347,6 +363,7 @@ func (t *TTSProcessor) Process(ch ProcessorChannels) {
 				}
 				switch f := frame.(type) {
 				case LLMResponseStartFrame:
+					drainChannel(t.audioFrames) // flush stale frames from previous context
 					t.currentAggregation = ""
 					t.pcmBuffer = nil
 					t.pendingWords = nil
@@ -356,6 +373,7 @@ func (t *TTSProcessor) Process(ch ProcessorChannels) {
 					t.firstAudioReceived = false
 					t.metrics.Reset()
 					t.currentContextId = fmt.Sprintf("ctx-%d", rand.IntN(9000000))
+					t.activeContextId.Store(t.currentContextId)
 					t.sessionCtx.Logger.Println("LLM response started, resetting TTS aggregation")
 					ch.Send(f, Downstream)
 				case TextFrame:
@@ -384,10 +402,30 @@ func (t *TTSProcessor) Process(ch ProcessorChannels) {
 					t.pcmBuffer = nil
 					t.sessionCtx.Logger.Println("LLM response ended, flushing TTS context")
 					ch.Send(f, Downstream)
-				// Upstream frames from PlaybackSink — forward to LLM
+				case TTSSpeakFrame:
+					// Standalone synthesis — send full text immediately
+					t.currentAggregation = ""
+					t.pcmBuffer = nil
+					t.pendingWords = nil
+					t.audioTimePushed = 0
+					t.firstTextReceived = false
+					t.firstSentenceSent = true // skip aggregation metrics for idle prompts
+					t.firstAudioReceived = false
+					t.metrics.Reset()
+					t.currentContextId = fmt.Sprintf("ctx-%d", rand.IntN(9000000))
+					t.activeContextId.Store(t.currentContextId)
+					t.metrics.Start(MetricTTFB)
+					t.sendTextToTTS(f.Text)
+					t.ResetTTSContext()
+					ch.Send(f, Downstream) // tell PlaybackSink to reset interrupted state
+				// Upstream frames from PlaybackSink — forward to LLM/UserIdleProcessor
 				case WordTimestampFrame:
 					ch.Send(f, Upstream)
 				case TTSDoneFrame:
+					ch.Send(f, Upstream)
+				case BotStartedSpeakingFrame:
+					ch.Send(f, Upstream)
+				case BotStoppedSpeakingFrame:
 					ch.Send(f, Upstream)
 				default:
 					t.sessionCtx.Logger.Printf("TTS received unexpected frame: %T\n", f)

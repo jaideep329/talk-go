@@ -113,6 +113,8 @@ func createSession() (string, *Session) {
 	sessionsMu.Unlock()
 
 	sttProcessor := NewSTTProcessor(sessionCtx)
+	userIdle := NewUserIdleProcessor(sessionCtx)
+	contextAggregator := NewContextAggregator(sessionCtx)
 	llmProcessor := NewLLMProcessor(sessionCtx)
 	ttsProcessor := NewTTSProcessor(sessionCtx)
 	playbackSink := NewPlaybackSinkProcessor(sessionCtx)
@@ -126,7 +128,7 @@ func createSession() (string, *Session) {
 			}})
 		}
 	}
-	pipeline := NewPipeline([]FrameProcessor{audioSource, sttProcessor, llmProcessor, ttsProcessor, playbackSink}, metricsHandler)
+	pipeline := NewPipeline([]FrameProcessor{audioSource, sttProcessor, userIdle, contextAggregator, llmProcessor, ttsProcessor, playbackSink}, metricsHandler)
 	go pipeline.Run()
 	return roomName, session
 }

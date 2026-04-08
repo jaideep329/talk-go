@@ -20,6 +20,10 @@ const (
 	WordTimestamp
 	TTSDone
 	MetricsType
+	TTSSpeak
+	BotStartedSpeaking
+	BotStoppedSpeaking
+	LLMMessages
 )
 
 type AudioFrame struct {
@@ -79,3 +83,27 @@ type TTSDoneFrame struct{}
 
 func (f TTSDoneFrame) FrameType() FrameType { return TTSDone }
 func (f TTSDoneFrame) IsSystem() bool       { return false }
+
+type TTSSpeakFrame struct {
+	Text string
+}
+
+func (f TTSSpeakFrame) FrameType() FrameType { return TTSSpeak }
+func (f TTSSpeakFrame) IsSystem() bool       { return false }
+
+type BotStartedSpeakingFrame struct{}
+
+func (f BotStartedSpeakingFrame) FrameType() FrameType { return BotStartedSpeaking }
+func (f BotStartedSpeakingFrame) IsSystem() bool       { return false }
+
+type BotStoppedSpeakingFrame struct{}
+
+func (f BotStoppedSpeakingFrame) FrameType() FrameType { return BotStoppedSpeaking }
+func (f BotStoppedSpeakingFrame) IsSystem() bool       { return false }
+
+type LLMMessagesFrame struct {
+	Messages []map[string]string
+}
+
+func (f LLMMessagesFrame) FrameType() FrameType { return LLMMessages }
+func (f LLMMessagesFrame) IsSystem() bool       { return false }

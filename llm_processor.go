@@ -12,41 +12,26 @@ import (
 )
 
 type LLMProcessor struct {
-	sessionCtx        *SessionContext
-	metrics           *ProcessorMetrics
-	messages          []map[string]string
-	currentTranscript string
-	isStreaming       bool
-	interruptSent     bool
-	cancelLLM         context.CancelFunc
-	responseFrames    chan Frame
-	spokenWords       []string // words accumulated from upstream WordTimestampFrames
+	sessionCtx     *SessionContext
+	metrics        *ProcessorMetrics
+	isStreaming    bool
+	cancelLLM      context.CancelFunc
+	responseFrames chan Frame
 }
 
-func (p *LLMProcessor) appendWords(words []string) {
-	for _, w := range words {
-		if len(p.spokenWords) > 0 && len(w) > 0 && w[0] != '.' && w[0] != ',' && w[0] != '!' && w[0] != '?' && w[0] != ';' && w[0] != ':' {
-			p.spokenWords = append(p.spokenWords, " "+w)
-		} else {
-			p.spokenWords = append(p.spokenWords, w)
-		}
+func NewLLMProcessor(sessionCtx *SessionContext) *LLMProcessor {
+	return &LLMProcessor{
+		sessionCtx:     sessionCtx,
+		metrics:        NewProcessorMetrics("llm"),
+		responseFrames: make(chan Frame, 100),
 	}
 }
 
-func (p *LLMProcessor) spokenSoFar() string {
-	var spoken string
-	for _, w := range p.spokenWords {
-		spoken += w
-	}
-	p.spokenWords = nil
-	return spoken
-}
-
-func (p *LLMProcessor) runLLM(ctx context.Context) {
+func (p *LLMProcessor) runLLM(ctx context.Context, messages []map[string]string) {
 	body := map[string]interface{}{
 		"model":    "gpt-4.1",
 		"stream":   true,
-		"messages": p.messages,
+		"messages": messages,
 	}
 	jsonBody, err := json.Marshal(body)
 	if err != nil {
@@ -115,53 +100,18 @@ func (p *LLMProcessor) runLLM(ctx context.Context) {
 	}
 }
 
-func NewLLMProcessor(sessionCtx *SessionContext) *LLMProcessor {
-	return &LLMProcessor{
-		sessionCtx:     sessionCtx,
-		metrics:        NewProcessorMetrics("llm"),
-		messages:       []map[string]string{},
-		responseFrames: make(chan Frame, 100),
-	}
-}
-
-func (p *LLMProcessor) commitSpokenText(interrupted bool) {
-	spoken := p.spokenSoFar()
-	if spoken != "" {
-		p.sessionCtx.Logger.Printf("Committing to history (interrupted=%v): %s\n", interrupted, spoken)
-		p.messages = append(p.messages, map[string]string{"role": "assistant", "content": spoken})
-		p.sessionCtx.UIEvents.Send(UIEvent{Type: CommittedAssistant, Data: map[string]interface{}{"role": "assistant", "text": spoken}})
-	}
-}
-
-// lastMessageRole returns the role of the last message in the conversation history.
-func (p *LLMProcessor) lastMessageRole() string {
-	if len(p.messages) == 0 {
-		return ""
-	}
-	return p.messages[len(p.messages)-1]["role"]
-}
-
-// addUserMessage either appends to the last user message (if no assistant
-// response came between) or creates a new user message.
-func (p *LLMProcessor) addUserMessage(text string) {
-	if p.lastMessageRole() == "user" {
-		// Concatenate — previous turn got no assistant response (barge-in with nothing spoken)
-		last := p.messages[len(p.messages)-1]
-		last["content"] += " " + text
-		p.sessionCtx.Logger.Printf("Concatenated user message: %s\n", last["content"])
-		p.sessionCtx.UIEvents.Send(UIEvent{Type: UserTranscript, Data: map[string]interface{}{"role": "user", "text": last["content"], "is_final": true}})
-	} else {
-		p.messages = append(p.messages, map[string]string{"role": "user", "content": text})
-		p.sessionCtx.UIEvents.Send(UIEvent{Type: UserTranscript, Data: map[string]interface{}{"role": "user", "text": text, "is_final": true}})
-	}
-}
-
 func (p *LLMProcessor) Process(ch ProcessorChannels) {
 	for {
-		// Priority: check system channel first.
 		select {
 		case frame := <-ch.System:
 			switch frame.(type) {
+			case InterruptFrame:
+				if p.cancelLLM != nil {
+					p.cancelLLM()
+				}
+				p.metrics.Reset()
+				p.isStreaming = false
+				ch.Send(frame, Downstream) // propagate to TTS/PlaybackSink
 			case EndFrame:
 				ch.Send(frame, Downstream)
 				return
@@ -170,6 +120,13 @@ func (p *LLMProcessor) Process(ch ProcessorChannels) {
 			select {
 			case frame := <-ch.System:
 				switch frame.(type) {
+				case InterruptFrame:
+					if p.cancelLLM != nil {
+						p.cancelLLM()
+					}
+					p.metrics.Reset()
+					p.isStreaming = false
+					ch.Send(frame, Downstream)
 				case EndFrame:
 					ch.Send(frame, Downstream)
 					return
@@ -179,43 +136,23 @@ func (p *LLMProcessor) Process(ch ProcessorChannels) {
 					return
 				}
 				switch f := frame.(type) {
-				case TranscriptFrame:
-					if p.isStreaming && !p.interruptSent {
-						p.sessionCtx.Logger.Println("Barge-in detected, cancelling LLM")
-						if p.cancelLLM != nil {
-							p.cancelLLM()
-						}
-						p.metrics.Reset()
-						ch.Send(InterruptFrame{}, Downstream)
-						p.isStreaming = false
-						p.interruptSent = true
-						p.commitSpokenText(true)
-					}
-					if f.IsFinal {
-						if f.Text == "<end>" {
-							if p.currentTranscript != "" {
-								p.sessionCtx.Logger.Printf("Final transcript received: %s\n", p.currentTranscript)
-								if len(p.messages) == 0 {
-									p.messages = append(p.messages, map[string]string{"role": "system", "content": "You are a helpful assistant. Always respond in exactly 2 sentences. Never respond with just 1 sentence."})
-								}
-								p.addUserMessage(p.currentTranscript)
-								p.interruptSent = false
-								p.spokenWords = nil
-								ctx, cancel := context.WithCancel(context.Background())
-								p.cancelLLM = cancel
-								go p.runLLM(ctx)
-								p.currentTranscript = ""
-							}
-						} else {
-							p.currentTranscript += f.Text
-						}
-					}
-				// Upstream frames from PlaybackSink (via TTS)
+				case LLMMessagesFrame:
+					ctx, cancel := context.WithCancel(context.Background())
+					p.cancelLLM = cancel
+					go p.runLLM(ctx, f.Messages)
+				// Pass-through downstream
+				case TTSSpeakFrame:
+					ch.Send(f, Downstream)
+				// Upstream frames — forward to ContextAggregator
 				case WordTimestampFrame:
-					p.appendWords(f.Words)
+					ch.Send(f, Upstream)
 				case TTSDoneFrame:
-					p.commitSpokenText(false)
 					p.isStreaming = false
+					ch.Send(f, Upstream)
+				case BotStartedSpeakingFrame:
+					ch.Send(f, Upstream)
+				case BotStoppedSpeakingFrame:
+					ch.Send(f, Upstream)
 				default:
 					p.sessionCtx.Logger.Printf("LLM received unexpected frame: %T\n", f)
 				}

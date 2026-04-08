@@ -74,6 +74,7 @@ func (p *PlaybackSinkProcessor) Process(ch ProcessorChannels) {
 					}
 					if !p.playbackStarted {
 						p.playbackStarted = true
+						ch.Send(BotStartedSpeakingFrame{}, Upstream)
 						if mf := p.metrics.Stop(MetricE2ELatency); mf != nil {
 							ch.Send(*mf, Downstream)
 						}
@@ -95,12 +96,16 @@ func (p *PlaybackSinkProcessor) Process(ch ProcessorChannels) {
 				case TTSDoneFrame:
 					if !p.interrupted {
 						p.sessionCtx.Logger.Println("Playback complete")
-						ch.Send(f, Upstream) // LLM commits spoken text
+						ch.Send(f, Upstream)                         // LLM commits spoken text
+						ch.Send(BotStoppedSpeakingFrame{}, Upstream) // idle detection signal
 					}
 				case LLMResponseStartFrame:
 					p.interrupted = false
 					p.playbackStarted = false
 					p.metrics.StartAt(MetricE2ELatency, f.StartedAt)
+				case TTSSpeakFrame:
+					p.interrupted = false
+					p.playbackStarted = false
 				case LLMResponseEndFrame:
 					// Not used by PlaybackSink — ignore silently.
 				default:

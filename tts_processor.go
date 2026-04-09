@@ -90,7 +90,7 @@ func (t *TTSProcessor) sendTextToTTS(text string) {
 	payload := map[string]interface{}{
 		"model_id":       "sonic-3",
 		"transcript":     text,
-		"voice":          map[string]interface{}{"mode": "id", "id": "f786b574-daa5-4673-aa0c-cbe3e8534c02"},
+		"voice":          map[string]interface{}{"mode": "id", "id": "95d51f79-c397-46f9-b49a-23763d3eaa2d"},
 		"output_format":  map[string]interface{}{"container": "raw", "encoding": "pcm_s16le", "sample_rate": 24000},
 		"context_id":     t.currentContextId,
 		"continue":       true,
@@ -109,7 +109,7 @@ func (t *TTSProcessor) ResetTTSContext() {
 	payload := map[string]interface{}{
 		"model_id":      "sonic-3",
 		"transcript":    "",
-		"voice":         map[string]interface{}{"mode": "id", "id": "f786b574-daa5-4673-aa0c-cbe3e8534c02"},
+		"voice":         map[string]interface{}{"mode": "id", "id": "95d51f79-c397-46f9-b49a-23763d3eaa2d"},
 		"output_format": map[string]interface{}{"container": "raw", "encoding": "pcm_s16le", "sample_rate": 24000},
 		"context_id":    t.currentContextId,
 		"continue":      false,

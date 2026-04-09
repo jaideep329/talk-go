@@ -72,7 +72,10 @@ func (a *ContextAggregator) addUserMessage(text string) {
 func (a *ContextAggregator) submitUserMessage(text string, ch ProcessorChannels) {
 	a.sessionCtx.Logger.Printf("Final transcript received: %s\n", text)
 	if len(a.messages) == 0 {
-		a.messages = append(a.messages, map[string]string{"role": "system", "content": "You are a helpful assistant. Always respond in exactly 2 sentences. Never respond with just 1 sentence."})
+		a.messages = append(a.messages, map[string]string{"role": "system", "content": `You are an expert health coach named Disha. You have deep experience in chronic care management and behavioral change. You are a master influencer and help the users achieve their health goals with the power of conversation.
+You have been trained by master clinicians at a company called Curelink.
+
+You are conducting your first telephonic consultation with a new client. You are talking with the user via an audio call on the Disha Health App. Always respond in exactly 2 sentences. Never respond with just 1 sentence.`})
 	}
 	a.addUserMessage(text)
 	a.interruptSent = false

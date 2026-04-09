@@ -40,7 +40,7 @@ func (s *STTProcessor) connect() {
 			"audio_format":              "s16le",
 			"sample_rate":               16000,
 			"num_channels":              1,
-			"language_hints":            []string{"en"},
+			"language_hints":            []string{"hi"},
 			"enable_endpoint_detection": true,
 			"max_endpoint_delay_ms":     300,
 		}

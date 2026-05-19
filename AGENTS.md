@@ -1,4 +1,4 @@
-# talk-go — Project Context for Codex
+# talk-go — Project Context
 
 ## About the User
 
@@ -12,7 +12,7 @@ Jaideep is an experienced Python backend engineer learning Go by building real p
 - **Keep responses concise.** He can read code — don't summarize what you just did.
 - **Don't over-engineer.** He will push back if something is unnecessarily complex. Prefer the simplest solution first.
 - **When debugging, check `app.log` first** — all `log.*` output goes there. `fmt.Print*` goes to stdout/terminal. Logs go to both `app.log` and terminal via `io.MultiWriter`.
-- **After major design decisions or discussions, always update AGENTS.md and memory.** Don't wait to be asked — if a design pattern, architecture choice, or strategy was decided in conversation, persist it immediately.
+- **After major design decisions or discussions, always update AGENTS.md, CLAUDE.md, and memory.** Don't wait to be asked — if a design pattern, architecture choice, or strategy was decided in conversation, persist it immediately.
 
 ## Project Overview
 

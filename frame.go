@@ -60,8 +60,10 @@ func (f LLMResponseEndFrame) FrameType() FrameType { return LLMResponseEnd }
 func (f LLMResponseEndFrame) IsSystem() bool       { return false }
 
 type TranscriptFrame struct {
-	Text    string
-	IsFinal bool
+	Text       string
+	IsFinal    bool
+	ResponseID int  // Groups tokens from the same STT websocket message.
+	Finished   bool // Stream-level Soniox flag; not an utterance boundary.
 }
 
 func (f TranscriptFrame) FrameType() FrameType { return Transcript }

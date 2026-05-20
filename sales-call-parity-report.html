@@ -1,0 +1,790 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>talk-go vs Disha-Backend Sales Call Parity Report</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f6f7f9;
+      --panel: #ffffff;
+      --ink: #1d2430;
+      --muted: #647084;
+      --line: #d9dee7;
+      --soft: #eef2f7;
+      --accent: #0f766e;
+      --accent-soft: #dcf5f1;
+      --warn: #a15c00;
+      --warn-soft: #fff2d7;
+      --bad: #b42318;
+      --bad-soft: #ffe7e4;
+      --good: #137333;
+      --good-soft: #e3f5e8;
+      --info: #2458a6;
+      --info-soft: #e6eefb;
+      --shadow: 0 12px 30px rgba(22, 34, 51, 0.08);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.55;
+    }
+
+    header {
+      background: #18212f;
+      color: #f8fafc;
+      padding: 42px 32px 36px;
+      border-bottom: 4px solid var(--accent);
+    }
+
+    main {
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 28px 24px 64px;
+    }
+
+    h1, h2, h3 {
+      margin: 0;
+      line-height: 1.2;
+      letter-spacing: 0;
+    }
+
+    h1 {
+      font-size: 34px;
+      max-width: 920px;
+    }
+
+    h2 {
+      font-size: 22px;
+      margin-bottom: 14px;
+    }
+
+    h3 {
+      font-size: 16px;
+      margin: 24px 0 8px;
+    }
+
+    p {
+      margin: 0 0 12px;
+    }
+
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      background: var(--soft);
+      color: #263244;
+      padding: 2px 5px;
+      border-radius: 4px;
+      font-size: 0.92em;
+    }
+
+    .lede {
+      max-width: 920px;
+      margin-top: 14px;
+      color: #cbd5e1;
+      font-size: 17px;
+    }
+
+    .meta {
+      margin-top: 22px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      color: #dbeafe;
+      font-size: 13px;
+    }
+
+    .meta span {
+      border: 1px solid rgba(255,255,255,0.24);
+      border-radius: 6px;
+      padding: 5px 8px;
+    }
+
+    .section {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 22px;
+      margin: 20px 0;
+      box-shadow: var(--shadow);
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(12, 1fr);
+      gap: 16px;
+    }
+
+    .span-4 {
+      grid-column: span 4;
+    }
+
+    .span-6 {
+      grid-column: span 6;
+    }
+
+    .span-8 {
+      grid-column: span 8;
+    }
+
+    .span-12 {
+      grid-column: span 12;
+    }
+
+    .card {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 16px;
+      background: #ffffff;
+    }
+
+    .card h3 {
+      margin-top: 0;
+    }
+
+    .callout {
+      border-left: 4px solid var(--accent);
+      background: var(--accent-soft);
+      padding: 14px 16px;
+      border-radius: 6px;
+      margin: 12px 0;
+    }
+
+    .callout.warn {
+      border-left-color: var(--warn);
+      background: var(--warn-soft);
+    }
+
+    .callout.bad {
+      border-left-color: var(--bad);
+      background: var(--bad-soft);
+    }
+
+    .badge {
+      display: inline-block;
+      border-radius: 999px;
+      padding: 3px 9px;
+      font-size: 12px;
+      font-weight: 700;
+      margin-right: 6px;
+      white-space: nowrap;
+    }
+
+    .done {
+      background: var(--good-soft);
+      color: var(--good);
+    }
+
+    .partial {
+      background: var(--warn-soft);
+      color: var(--warn);
+    }
+
+    .missing {
+      background: var(--bad-soft);
+      color: var(--bad);
+    }
+
+    .info {
+      background: var(--info-soft);
+      color: var(--info);
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 12px;
+      font-size: 14px;
+    }
+
+    th, td {
+      border: 1px solid var(--line);
+      padding: 10px 12px;
+      vertical-align: top;
+      text-align: left;
+    }
+
+    th {
+      background: #f1f4f8;
+      font-weight: 700;
+    }
+
+    tr:nth-child(even) td {
+      background: #fbfcfe;
+    }
+
+    ul, ol {
+      margin: 8px 0 0 20px;
+      padding: 0;
+    }
+
+    li {
+      margin: 6px 0;
+    }
+
+    .pipeline {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      margin: 14px 0 4px;
+    }
+
+    .node {
+      background: #edf5f4;
+      border: 1px solid #bddbd7;
+      border-radius: 6px;
+      padding: 8px 10px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 13px;
+    }
+
+    .arrow {
+      color: var(--muted);
+      font-weight: 700;
+    }
+
+    .small {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .score {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 12px;
+      margin-top: 14px;
+    }
+
+    .score div {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fbfcfe;
+      padding: 14px;
+    }
+
+    .score strong {
+      display: block;
+      font-size: 24px;
+      margin-bottom: 3px;
+    }
+
+    .footnote {
+      color: var(--muted);
+      font-size: 13px;
+      margin-top: 14px;
+    }
+
+    @media (max-width: 860px) {
+      header {
+        padding: 30px 20px;
+      }
+
+      main {
+        padding: 18px 14px 44px;
+      }
+
+      h1 {
+        font-size: 26px;
+      }
+
+      .span-4, .span-6, .span-8, .span-12 {
+        grid-column: span 12;
+      }
+
+      .score {
+        grid-template-columns: 1fr;
+      }
+
+      table {
+        display: block;
+        overflow-x: auto;
+        white-space: normal;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>talk-go vs Disha-Backend sales-call feature parity report</h1>
+    <p class="lede">A current-state review of the Go LiveKit voice pipeline, the Python <code>bots/sales_call</code> flow in Disha-Backend, and the work required to run the full sales-call product flow from this Go application.</p>
+    <div class="meta">
+      <span>Generated: 2026-05-19</span>
+      <span>talk-go: <code>/Users/jaideepsingh/Projects/talk-go</code></span>
+      <span>Disha-Backend: <code>/Users/jaideepsingh/Projects/disha-backend</code></span>
+      <span>Build check: <code>go test ./...</code> passed, no test files</span>
+    </div>
+  </header>
+
+  <main>
+    <section class="section">
+      <h2>Executive Summary</h2>
+      <p><code>talk-go</code> is a working real-time voice prototype. It already handles browser audio over LiveKit, Opus decode/encode, Soniox STT, streamed OpenAI responses, Cartesia TTS, sentence-level TTS aggregation, paced playback, barge-in interruption, word-timestamp-based assistant commit, idle prompts, a basic live UI, multi-session in-memory routing, and latency metrics.</p>
+      <p>It is not yet a sales-call product runner. The Python sales-call flow in Disha-Backend is tied into user/conversation state, prompt documents, pricing experiment variants, previous conversation resume, Redis/S3/DB persistence, LLM logging, RTVI client events, scheduled call orchestration, worker pod lifecycle, Daily room lifecycle, talktime limits, post-call operations, and metrics/debug-log upload.</p>
+      <div class="callout bad">
+        <strong>Bottom line:</strong> the low-level voice loop is the part closest to parity. The biggest missing pieces are the surrounding application contract: how a call is created, how a <code>conversation_id</code> and <code>user_id</code> enter the session, how prompt/context is loaded, how messages and metrics are saved, and how the backend is notified when the call starts, ends, fails, or exhausts talktime.
+      </div>
+      <div class="score">
+        <div>
+          <strong>High</strong>
+          <span>Voice transport and streaming feasibility</span>
+        </div>
+        <div>
+          <strong>Medium</strong>
+          <span>Turn handling and interruption parity</span>
+        </div>
+        <div>
+          <strong>Low</strong>
+          <span>Sales-call prompt/context parity</span>
+        </div>
+        <div>
+          <strong>Low</strong>
+          <span>Backend lifecycle and persistence parity</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>Current talk-go Implementation</h2>
+      <div class="pipeline">
+        <span class="node">AudioSourceProcessor</span>
+        <span class="arrow">→</span>
+        <span class="node">STTProcessor</span>
+        <span class="arrow">→</span>
+        <span class="node">UserIdleProcessor</span>
+        <span class="arrow">→</span>
+        <span class="node">ContextAggregator</span>
+        <span class="arrow">→</span>
+        <span class="node">LLMProcessor</span>
+        <span class="arrow">→</span>
+        <span class="node">TTSProcessor</span>
+        <span class="arrow">→</span>
+        <span class="node">PlaybackSinkProcessor</span>
+      </div>
+      <p class="small">The pipeline is custom-built in Go using data/system channels and directional frame routing. System frames such as <code>InterruptFrame</code> bypass normal buffered data on the downstream path.</p>
+
+      <div class="grid">
+        <div class="card span-6">
+          <h3>What Works Today</h3>
+          <ul>
+            <li><span class="badge done">Implemented</span>Browser client served from <code>livekit-client.html</code> with connect, disconnect, mute, live transcript, assistant live text, committed turns, and metric badges.</li>
+            <li><span class="badge done">Implemented</span><code>/connect</code> creates an in-memory session, joins a LiveKit room as bot, and returns a web-user token.</li>
+            <li><span class="badge done">Implemented</span>LiveKit input track subscription, Opus decode to 16 kHz mono PCM, and Soniox realtime STT.</li>
+            <li><span class="badge done">Implemented</span>Soniox final/interim token handling, live transcript UI updates, and endpoint detection via <code>&lt;end&gt;</code>.</li>
+            <li><span class="badge done">Implemented</span>Conversation aggregation, min-3-word barge-in, below-threshold utterance discard while bot is speaking, and concatenation of user turns after interrupted responses.</li>
+            <li><span class="badge done">Implemented</span>OpenAI streaming LLM call, TTFB/processing metrics, and cancellation on interruption.</li>
+            <li><span class="badge done">Implemented</span>Cartesia websocket TTS with one context per turn, context cancellation, stale context filtering, word timestamp interleaving, PCM-to-Opus encoding, and reconnect logic.</li>
+            <li><span class="badge done">Implemented</span>20 ms playback pacing through LiveKit, bot started/stopped speaking frames, E2E latency metric, and background office-audio mixing.</li>
+            <li><span class="badge done">Implemented</span>Session cleanup when the UI websocket disconnects.</li>
+          </ul>
+        </div>
+
+        <div class="card span-6">
+          <h3>Current Constraints</h3>
+          <ul>
+            <li><span class="badge missing">Missing</span>No real <code>user_id</code>, <code>conversation_id</code>, <code>client_session_id</code>, scheduled-call ID, or backend session identity.</li>
+            <li><span class="badge missing">Missing</span>No DB, Redis, S3, SQS, Sentry, GKE worker, app notification, recording, or post-call integration.</li>
+            <li><span class="badge missing">Missing</span>System prompt is hard-coded in <code>context_aggregator.go</code>; there is no prompt document lookup or pricing-variant prompt selection.</li>
+            <li><span class="badge missing">Missing</span>LLM is hard-coded to OpenAI <code>gpt-4.1</code>; no Disha model config switching, Azure/Grok/OpenRouter/Vertex routing, failover, token logging, or tool-call logging.</li>
+            <li><span class="badge partial">Partial</span>Idle behavior exists but does not end the call. Current code uses 7 seconds and 7 prompts; Disha sales_call uses 5 seconds, 6 retries, then cancels the task with <code>USER_IDLE</code>.</li>
+            <li><span class="badge partial">Partial</span>Metrics are visible in the browser and logs, but are not persisted on conversation chunks or uploaded with debug data.</li>
+            <li><span class="badge partial">Partial</span>Multi-session support is in-memory only and tied to a single process. There is no durable reservation, readiness, worker state, or active-session API.</li>
+            <li><span class="badge partial">Partial</span>Frontend is a local debug page, not the Disha app/admin RTVI client contract.</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="callout warn">
+        <strong>Documentation drift found:</strong> the project instructions describe <code>net/http/pprof</code> in <code>main.go</code> and a 15-second, max-2 idle prompt policy. The current code does not import pprof, and <code>user_idle_processor.go</code> uses 7 seconds with max 7 prompts.
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>Disha-Backend Sales Call Flow</h2>
+      <p>The Python sales-call implementation is a Pipecat/Daily voice worker plus a backend orchestration layer. The voice worker itself lives in <code>bots/sales_call/sales_call.py</code>, but its behavior depends on reusable modules under <code>bots/onboarding_call</code>, <code>bots/followup_call</code>, <code>bots/services</code>, <code>bots/managers</code>, <code>calling</code>, <code>documents</code>, and <code>services</code>.</p>
+
+      <div class="pipeline">
+        <span class="node">Daily input</span>
+        <span class="arrow">→</span>
+        <span class="node">UserIdle</span>
+        <span class="arrow">→</span>
+        <span class="node">RTVI</span>
+        <span class="arrow">→</span>
+        <span class="node">CustomSonioxSTT</span>
+        <span class="arrow">→</span>
+        <span class="node">LLM user aggregator</span>
+        <span class="arrow">→</span>
+        <span class="node">CustomOpenAILLM</span>
+        <span class="arrow">→</span>
+        <span class="node">TalktimeMonitor</span>
+        <span class="arrow">→</span>
+        <span class="node">Cartesia TTS</span>
+        <span class="arrow">→</span>
+        <span class="node">Daily output</span>
+        <span class="arrow">→</span>
+        <span class="node">LLM assistant aggregator</span>
+      </div>
+
+      <div class="grid">
+        <div class="card span-4">
+          <h3>Conversation Bootstrap</h3>
+          <ul>
+            <li>Fetches <code>CallConversation</code>, user profile, previous chunks, resume data, unprocessed chat context, and Cartesia API key through <code>fetch_conversation()</code>.</li>
+            <li>Selects one of three sales prompts based on <code>campaign_pricing_experiment_flag</code>.</li>
+            <li>Renders prompt documents via <code>DocumentManager</code> with <code>patient_info</code> and IST datetime variables.</li>
+            <li>Seeds context with previous messages, a resume system message if needed, or <code>hello?</code> for fresh calls.</li>
+          </ul>
+        </div>
+
+        <div class="card span-4">
+          <h3>Runtime Call Behavior</h3>
+          <ul>
+            <li>Uses Soniox with Hindi language hints.</li>
+            <li>Uses Cartesia <code>sonic-3</code>, Hindi voice, and <code>PhoneticTextFilter</code> loaded from S3.</li>
+            <li>Uses Pipecat turn strategies: min 3 words to start, 0.05 s speech timeout to stop.</li>
+            <li>Allows interruptions through Pipecat <code>PipelineParams(allow_interruptions=True)</code>.</li>
+            <li>Uses user idle prompts every 5 seconds, up to 6 retries, then cancels and marks <code>USER_IDLE</code>.</li>
+            <li>Enforces remaining sales-call talktime and emits a final exhaustion message.</li>
+          </ul>
+        </div>
+
+        <div class="card span-4">
+          <h3>Backend and Ops</h3>
+          <ul>
+            <li>Updates <code>bot_joined_at</code>, <code>user_joined_at</code>, <code>user_first_speech_at</code>, and <code>bot_first_speech_at</code>.</li>
+            <li>Persists user/assistant chunks to Redis, uploads prompt params/state to S3 where relevant, and queues DB sync.</li>
+            <li>Logs LLM calls with model, prompt metadata, token usage, latency, status, errors, and interrupted-call state.</li>
+            <li>Uploads RTVI/debug logs to S3 and runs post-call operations.</li>
+            <li>Queues Daily metrics collection and worker cleanup.</li>
+            <li>Scheduled calls, callbacks, missed/rejected outcomes, app notifications, and GKE worker reservations are handled outside the worker.</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>Feature Parity Matrix</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Area</th>
+            <th>Disha-Backend sales_call</th>
+            <th>talk-go today</th>
+            <th>Gap</th>
+            <th>Priority</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Transport</td>
+            <td>Daily room, Pipecat Daily transport, RTVI client protocol, Daily app messages, Daily metrics, optional cloud recording.</td>
+            <td>LiveKit room, custom browser client, local websocket UI events, no recording or Daily metrics.</td>
+            <td>Decide whether Go is intentionally switching transport to LiveKit. If yes, Disha Backend needs a LiveKit room/token path, LiveKit recording/metrics replacement, and client integration.</td>
+            <td><span class="badge missing">Must</span></td>
+          </tr>
+          <tr>
+            <td>Call creation</td>
+            <td><code>/bot/create_fly_room</code> creates/reuses conversation, assigns worker pod, creates Daily room/token, forwards to <code>/bot/create_worker_room</code>.</td>
+            <td><code>/connect</code> creates a random local room and session with no user or conversation.</td>
+            <td>Replace or augment <code>/connect</code> with a backend-compatible session creation contract carrying <code>user_id</code>, <code>conversation_id</code>, <code>client_session_id</code>, bot type, and room metadata.</td>
+            <td><span class="badge missing">Must</span></td>
+          </tr>
+          <tr>
+            <td>Scheduled calls and callbacks</td>
+            <td><code>/bot/trigger_call</code>, scheduled-call rows, app notifications, missed/rejected outcomes, callback retry, reservation jobs.</td>
+            <td>No scheduling; user manually opens browser and clicks Connect.</td>
+            <td>Keep scheduling in Disha Backend and make Go a worker target, or port a scheduling subset. Reusing backend is simpler.</td>
+            <td><span class="badge missing">Must</span></td>
+          </tr>
+          <tr>
+            <td>Conversation context</td>
+            <td>Loads user profile, patient info, previous messages, resume messages, short-term memory, unprocessed chat context, prompt variables.</td>
+            <td>Starts with empty messages and injects one hard-coded system prompt on first user message.</td>
+            <td>Implement <code>fetch_conversation</code>-equivalent behavior through backend APIs or shared DB access.</td>
+            <td><span class="badge missing">Must</span></td>
+          </tr>
+          <tr>
+            <td>Sales-call prompt selection</td>
+            <td>Chooses <code>sales_call/main_sys-3day_v2</code>, <code>sales_call/main_sys-3day_21rs_v2</code>, or <code>sales_call/main_sys-30day_299rs_v2</code>.</td>
+            <td>Hard-coded generic Disha health-coach prompt.</td>
+            <td>Add document lookup and prompt metadata. Without this, it is not the sales-call flow.</td>
+            <td><span class="badge missing">Must</span></td>
+          </tr>
+          <tr>
+            <td>STT</td>
+            <td>Custom Soniox service with Hindi hints, Pipecat reconnect behavior, initial connect retry, interruption tracking.</td>
+            <td>Direct Soniox websocket, Hindi hints, endpoint detection, reconnect loop.</td>
+            <td>Mostly present. Add retry/fatal handling, STT metrics persistence, and equivalent endpoint/speech-timeout tuning.</td>
+            <td><span class="badge partial">High</span></td>
+          </tr>
+          <tr>
+            <td>Turn start/stop</td>
+            <td>Pipecat min-3-word turn start plus 0.05 s speech timeout stop strategy.</td>
+            <td>Min-3-word barge-in and Soniox <code>&lt;end&gt;</code> for turn stop.</td>
+            <td>Interruption threshold is close; normal user-turn stop behavior is not identical because Go relies on Soniox endpointing rather than the Pipecat stop strategy.</td>
+            <td><span class="badge partial">High</span></td>
+          </tr>
+          <tr>
+            <td>Barge-in interruption</td>
+            <td>Pipecat interruption frames with <code>allow_interruptions=True</code>.</td>
+            <td>Custom <code>InterruptFrame</code> cascades LLM cancel, TTS cancel/drain, playback queue clear.</td>
+            <td>Mechanically strong. Needs production testing under noisy/live conditions and parity around exactly when partial assistant text is committed.</td>
+            <td><span class="badge partial">High</span></td>
+          </tr>
+          <tr>
+            <td>TTS</td>
+            <td>Cartesia <code>sonic-3</code>, Hindi voice, Pipecat TTS frames, phonetic filter, background mixer through Daily output.</td>
+            <td>Cartesia <code>sonic-3</code>, same Hindi voice, direct websocket, timestamps, context cancellation, background mixer in playback sink.</td>
+            <td>Core synthesis is close. Missing phonetic dictionary filter, TTS text cleanup, and production credential source from conversation.</td>
+            <td><span class="badge partial">High</span></td>
+          </tr>
+          <tr>
+            <td>LLM provider</td>
+            <td>Custom OpenAI-compatible service, currently configured for Grok model group with Azure-compatible endpoint, LLM switching/fallback, latency health polling, full logging.</td>
+            <td>Raw OpenAI Chat Completions request using <code>gpt-4.1</code> and one API key.</td>
+            <td>Add model config, provider switching, prompt metadata, token usage capture, error handling, interrupted-call logging, and backend log upload.</td>
+            <td><span class="badge missing">Must</span></td>
+          </tr>
+          <tr>
+            <td>Tool/function calls</td>
+            <td>Custom LLM service can stream and log tool calls, then run registered function callbacks.</td>
+            <td>No tool call support.</td>
+            <td>Probably not first blocker for sales-call parity unless current sales prompts rely on tools, but the infrastructure gap exists.</td>
+            <td><span class="badge info">Medium</span></td>
+          </tr>
+          <tr>
+            <td>User idle</td>
+            <td>Prompt <code>hello?</code> after 5 s; after 6 retries, cancel task and mark <code>USER_IDLE</code>.</td>
+            <td>Prompt <code>Hello?</code> after 7 s; max 7 prompts; no automatic call end or backend end reason.</td>
+            <td>Make idle behavior configurable and call-ending aware.</td>
+            <td><span class="badge partial">High</span></td>
+          </tr>
+          <tr>
+            <td>Talktime limit</td>
+            <td>Reads <code>remaining_sales_call_talktime_seconds</code>, prevents new calls when exhausted, monitors live call, sends exhaustion message, updates end reason, deducts duration post-call.</td>
+            <td>No talktime concept.</td>
+            <td>Add admission check, runtime monitor, exhaustion message, backend event, and post-call deduction path.</td>
+            <td><span class="badge missing">Must</span></td>
+          </tr>
+          <tr>
+            <td>Persistence</td>
+            <td>Conversation chunks saved to Redis with DB sync fallback/jobs; includes role, timestamps, bot type, metrics, prompt key, debug/additional data.</td>
+            <td>Messages live only in process memory and browser UI.</td>
+            <td>Add a conversation persistence processor and reliable backend/API queueing strategy.</td>
+            <td><span class="badge missing">Must</span></td>
+          </tr>
+          <tr>
+            <td>Post-call operations</td>
+            <td>Uploads logs, runs <code>/bot/run_post_call_operations</code>, deducts sales talktime, queues STM generation, queues machine cleanup and metrics collection.</td>
+            <td>On UI disconnect: cancel context, disconnect LiveKit, remove session.</td>
+            <td>Add cleanup idempotency, backend post-call API call, log upload, duration calculation, and worker cleanup.</td>
+            <td><span class="badge missing">Must</span></td>
+          </tr>
+          <tr>
+            <td>Lifecycle timestamps</td>
+            <td>Tracks bot joined, user joined, first audio frame, first user speech, first bot speech, user left, ended at, total user duration.</td>
+            <td>Tracks none of these durably; some events are implicit in logs only.</td>
+            <td>Add event tracking and backend updates.</td>
+            <td><span class="badge missing">Must</span></td>
+          </tr>
+          <tr>
+            <td>Frontend contract</td>
+            <td>App/admin uses Pipecat client + Daily transport and reports join failure/end data through backend endpoints.</td>
+            <td>Standalone Alpine/LiveKit debug page.</td>
+            <td>Build a LiveKit-capable Disha client path or an adapter that preserves expected client-session behavior.</td>
+            <td><span class="badge missing">Must</span></td>
+          </tr>
+          <tr>
+            <td>Observability</td>
+            <td>Sentry, structured logs, LLM logs to S3, debug logs to S3, Daily metrics job, conversation metrics fields.</td>
+            <td><code>app.log</code>, terminal logs, UI metrics only.</td>
+            <td>Add durable logs, metrics, Sentry/error reporting, and admin-readable debug traces.</td>
+            <td><span class="badge partial">High</span></td>
+          </tr>
+          <tr>
+            <td>Worker lifecycle</td>
+            <td>GKE worker reservations, readiness, safe-to-evict, active-session guards, pod cleanup jobs.</td>
+            <td>Single Go HTTP server with local sessions map and simple deploy script.</td>
+            <td>Make Go worker deployable under the same orchestration model or define a replacement orchestration model.</td>
+            <td><span class="badge missing">Must</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="section">
+      <h2>What Is Required For Parity</h2>
+
+      <h3>1. Make Go sessions conversation-aware</h3>
+      <p>Add a session creation API that accepts or receives from Disha Backend: <code>user_id</code>, <code>conversation_id</code>, <code>client_session_id</code>, <code>bot_type=sales_call</code>, room name, tokens, and feature/config flags. A <code>SessionContext</code> should carry this identity along with logger, room, UI events, cancellation, backend client, and session config.</p>
+      <p><strong>Expected work:</strong> replace random local sessions as the production entry path, keep the current debug <code>/connect</code> as a local-only path if useful.</p>
+
+      <h3>2. Recreate <code>fetch_conversation()</code> behavior</h3>
+      <p>The Go app needs to load conversation and user context before the first LLM turn. The simplest path is not direct DB access from Go; it is a Disha Backend API that returns the same normalized payload the Python worker currently assembles: patient info, previous chunks, resume message, prompt variables, campaign pricing flag, Cartesia API key, remaining talktime, and unprocessed chat context.</p>
+      <p><strong>Expected work:</strong> define a typed Go <code>ConversationBootstrap</code> model and a backend endpoint or internal service call that produces it.</p>
+
+      <h3>3. Replace the hard-coded prompt with document-backed sales prompts</h3>
+      <p>Prompt parity requires selecting the prompt by <code>campaign_pricing_experiment_flag</code> and rendering it from Disha's document system. At minimum, Go needs either a prompt-render API or a pre-rendered prompt in the bootstrap payload, plus prompt name/version metadata for logging.</p>
+      <p><strong>Expected work:</strong> avoid copying prompt text into Go. Keep Disha Backend as the source of truth for prompt documents.</p>
+
+      <h3>4. Add production persistence</h3>
+      <p>Create a Go equivalent of <code>ConversationPersistenceProcessor</code>. It should save user and assistant turns with timestamps, role, conversation ID, user ID, bot type, metrics, prompt key, and additional/debug data. The most practical implementation is to call Disha Backend APIs or a queue-backed ingestion endpoint rather than writing Redis/S3/DB logic directly in Go.</p>
+      <p><strong>Expected work:</strong> persist every committed user turn and every assistant turn, including interrupted partial assistant turns if they are user-audible.</p>
+
+      <h3>5. Implement lifecycle event reporting</h3>
+      <p>The Go worker needs to report the same lifecycle timestamps that the Python worker reports: bot joined, user joined, first audio frame received, first user speech, first bot speech, user left, ended at, total user duration, and any end reason. For LiveKit, these events map to LiveKit room/participant callbacks and local pipeline events.</p>
+      <p><strong>Expected work:</strong> add idempotent cleanup and update calls to Disha Backend, including failure paths.</p>
+
+      <h3>6. Add talktime admission, monitoring, and deduction</h3>
+      <p>Sales calls are gated by <code>remaining_sales_call_talktime_seconds</code>. Go needs a pre-call check, a runtime monitor starting on first user speech, a final exhaustion utterance, call cancellation/cleanup, and post-call deduction through the existing backend operations.</p>
+      <p><strong>Expected work:</strong> implement a Go <code>TalktimeMonitorProcessor</code> or session-level monitor equivalent to Python's <code>TalktimeMonitor</code>.</p>
+
+      <h3>7. Align idle and turn-ending behavior</h3>
+      <p>Current Go interruption logic is close, but idle behavior and normal turn stopping differ. Make idle timeout, retry count, prompt text, and "end on exhausted idle retries" configurable. Decide whether Soniox endpointing alone is acceptable or whether Go needs a separate speech-timeout strategy equivalent to Pipecat's 0.05 s stop rule.</p>
+
+      <h3>8. Add phonetic filtering and TTS cleanup</h3>
+      <p>The Python TTS path applies <code>PhoneticTextFilter</code>, removes accidental function-update text, and drops non-speakable output. Go should apply the same text filter before sending text to Cartesia, ideally by loading a phonetics dictionary from the same source or receiving a preloaded dictionary/config from backend.</p>
+
+      <h3>9. Add LLM configuration, failover, and logging</h3>
+      <p>Parity needs Disha's model-selection behavior: model group, config key, deployment, provider credentials, slow-call polling, error blacklist/reselection, token usage, cached tokens, interrupted-call logs, prompt metadata, and status code capture. If that is too much for the first version, keep model switching in Disha Backend and expose an OpenAI-compatible proxy endpoint to Go.</p>
+
+      <h3>10. Define LiveKit replacements for Daily-specific features</h3>
+      <p>Disha-Backend currently has <code>livekit_room_name</code>, <code>livekit_recording_url</code>, and <code>transport_type</code> fields, but the active sales-call path is Daily. If the product is moving to LiveKit, build the missing LiveKit equivalents for room creation, client token generation, recording, metrics, client join failures, client hangup/end reason, and worker assignment.</p>
+    </section>
+
+    <section class="section">
+      <h2>Recommended Migration Shape</h2>
+      <div class="callout">
+        <strong>Recommended approach:</strong> keep Disha Backend as the orchestrator and make <code>talk-go</code> a production voice worker behind it. Do not port scheduling, DB models, SQS jobs, document storage, or post-call business logic into Go unless there is a separate reason to split those systems.
+      </div>
+      <ol>
+        <li><strong>Backend owns call creation.</strong> Disha Backend creates or reuses the <code>CallConversation</code>, checks talktime, assigns a worker, creates the LiveKit room/token, and forwards a worker-start request to the Go service.</li>
+        <li><strong>Go owns realtime media.</strong> The Go worker joins LiveKit, runs STT/LLM/TTS/playback, detects turns and interruptions, and emits lifecycle/message/metric events.</li>
+        <li><strong>Backend owns durable side effects.</strong> Go sends structured events to backend APIs. Backend persists chunks, logs, prompt metadata, post-call operations, talktime deductions, scheduled-call outcomes, and analytics.</li>
+        <li><strong>Frontend gets a transport-specific connection payload.</strong> For LiveKit, the client needs LiveKit URL/token/room plus the same client-session semantics currently used by Daily.</li>
+      </ol>
+    </section>
+
+    <section class="section">
+      <h2>Suggested Implementation Phases</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Phase</th>
+            <th>Scope</th>
+            <th>Parity Unlocked</th>
+            <th>Rough Size</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Phase 1</td>
+            <td>Session identity, config structs, backend client, conversation bootstrap payload, pre-rendered prompt, production start endpoint.</td>
+            <td>Go can run a real sales-call conversation with correct user/prompt context.</td>
+            <td>Medium</td>
+          </tr>
+          <tr>
+            <td>Phase 2</td>
+            <td>Persistence processor, lifecycle updates, metrics payloads, idempotent cleanup, post-call API call.</td>
+            <td>Calls become visible and durable in Disha Backend.</td>
+            <td>Medium/Large</td>
+          </tr>
+          <tr>
+            <td>Phase 3</td>
+            <td>LiveKit call creation path in Disha Backend, client integration, join failure/end data, worker assignment, readiness/active-session checks.</td>
+            <td>Go worker can replace the Daily sales-call worker in the product flow.</td>
+            <td>Large</td>
+          </tr>
+          <tr>
+            <td>Phase 4</td>
+            <td>Talktime monitor, idle-end parity, phonetic filter, LLM config/failover/logging parity, recording/metrics replacement.</td>
+            <td>Behavioral and operational parity with current Python sales-call flow.</td>
+            <td>Large</td>
+          </tr>
+          <tr>
+            <td>Phase 5</td>
+            <td>Production soak tests, noisy-call tests, interruption tests, reconnect tests, concurrent sessions, failure injection, dashboards.</td>
+            <td>Confidence to migrate real sales traffic.</td>
+            <td>Medium</td>
+          </tr>
+        </tbody>
+      </table>
+      <p class="footnote">If Disha Backend exposes clean APIs for bootstrap, persistence, lifecycle, and post-call operations, this is plausibly a focused multi-week migration. If the Go service directly reimplements Disha's persistence/orchestration internals, the scope becomes much larger and riskier.</p>
+    </section>
+
+    <section class="section">
+      <h2>Highest-Risk Gaps</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Risk</th>
+            <th>Why It Matters</th>
+            <th>Mitigation</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Transport migration from Daily to LiveKit</td>
+            <td>Daily is not just audio transport in the current flow; it also carries RTVI messages, participant events, metrics, and recording assumptions.</td>
+            <td>Write an explicit LiveKit feature map before replacing Daily. Include recording, client failure reporting, app messages, participant lifecycle, and metrics.</td>
+          </tr>
+          <tr>
+            <td>Durability during interruptions and disconnects</td>
+            <td>The current Go app can lose in-memory messages if the process dies or cleanup races. Sales calls need durable user/assistant chunks and post-call metadata.</td>
+            <td>Persist turn commits immediately and make cleanup/post-call operations idempotent.</td>
+          </tr>
+          <tr>
+            <td>Prompt/context mismatch</td>
+            <td>Even perfect audio behavior will not be sales-call parity if the prompt, previous context, resume instruction, and pricing variant differ.</td>
+            <td>Have Disha Backend render the exact prompt and pass prompt metadata to Go.</td>
+          </tr>
+          <tr>
+            <td>LLM provider behavior</td>
+            <td>The Python path uses model switching, specific model group semantics, and detailed LLM logging. A hard-coded OpenAI model changes both behavior and observability.</td>
+            <td>Initially call a backend LLM proxy or port the config-selection subset required for live sales calls.</td>
+          </tr>
+          <tr>
+            <td>Talktime and call outcomes</td>
+            <td>Sales calls are business-gated. Missing talktime enforcement can overrun paid/free limits and produce inconsistent user state.</td>
+            <td>Add both pre-call admission and in-call runtime enforcement before production traffic.</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="section">
+      <h2>Near-Term Task List</h2>
+      <ol>
+        <li>Choose the production contract: <code>Disha Backend → Go LiveKit worker</code>, with backend as source of truth.</li>
+        <li>Add a Go <code>BackendClient</code> and typed bootstrap response. Keep secrets and DB access in backend where possible.</li>
+        <li>Change session creation so a production session starts from <code>conversation_id</code>, not a random room-only session.</li>
+        <li>Move system prompt setup out of <code>ContextAggregator</code> and into a bootstrapped initial message list.</li>
+        <li>Add a persistence processor or persistence callbacks for user/assistant commits and metrics.</li>
+        <li>Add lifecycle callbacks for LiveKit participant join/leave, first audio frame, first user speech, first bot speech, cleanup, and post-call operations.</li>
+        <li>Implement talktime monitor and idle-end behavior.</li>
+        <li>Add phonetic filtering before Cartesia.</li>
+        <li>Decide how to handle Disha LLM config: port model switching or call a backend proxy.</li>
+        <li>Build a product client path using LiveKit and preserve <code>client_session_id</code> join-failure/end-data semantics.</li>
+      </ol>
+    </section>
+
+    <section class="section">
+      <h2>Open Decisions</h2>
+      <ul>
+        <li><strong>LiveKit is assumed but not yet productized.</strong> The Go app is LiveKit-first, while the current Disha sales-call product is Daily-first. Confirm that replacing Daily is the intended migration, not just a Go rewrite.</li>
+        <li><strong>Backend API surface needs design.</strong> The cleanest path is to add backend endpoints for bootstrap, turn persistence, lifecycle updates, and post-call operations instead of giving Go direct DB/Redis/S3 responsibility.</li>
+        <li><strong>Prompt rendering ownership.</strong> Backend should probably render prompt documents and pass prompt metadata to Go so prompt rollout/versioning stays centralized.</li>
+        <li><strong>LLM routing ownership.</strong> Either port the Disha model-switching service to Go or expose an OpenAI-compatible internal endpoint that already applies Disha routing/logging policy.</li>
+        <li><strong>RTVI replacement.</strong> If the Disha clients depend on RTVI semantics, LiveKit data messages or a side websocket must carry equivalent status/debug/server messages.</li>
+      </ul>
+    </section>
+  </main>
+</body>
+</html>

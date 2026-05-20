@@ -344,6 +344,7 @@ func (t *TTSProcessor) Process(ch ProcessorChannels) {
 					drainChannel(t.audioFrames)
 					t.currentAggregation = ""
 					t.currentContextId = ""
+					t.activeContextId.Store("")
 					t.pcmBuffer = nil
 					t.pendingWords = nil
 					t.audioTimePushed = 0

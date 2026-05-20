@@ -12,7 +12,7 @@ Jaideep is an experienced Python backend engineer learning Go by building real p
 - **Keep responses concise.** He can read code — don't summarize what you just did.
 - **Don't over-engineer.** He will push back if something is unnecessarily complex. Prefer the simplest solution first.
 - **When debugging, check `app.log` first** — all `log.*` output goes there. `fmt.Print*` goes to stdout/terminal. Logs go to both `app.log` and terminal via `io.MultiWriter`.
-- **After major design decisions or discussions, always update AGENTS.md, CLAUDE.md, and memory.** Don't wait to be asked — if a design pattern, architecture choice, or strategy was decided in conversation, persist it immediately.
+- **After major design decisions or discussions, always update AGENTS.md.** Don't wait to be asked — if a design pattern, architecture choice, or strategy was decided in conversation, persist it immediately.
 
 ## Project Overview
 
@@ -43,9 +43,9 @@ The pipeline is **complete and working end-to-end** with barge-in (min-word dete
 | `livekit_room.go` | `joinRoom(roomName, audioSource)` — bot joins LiveKit room. `generateToken()` creates JWT tokens |
 | `livekit-client.html` | Browser client: Pico CSS + Alpine.js. Dark theme. Live transcript, committed turns, multiple metrics badges per turn, connect/disconnect/mute controls |
 | `audio_source_processor.go` | Source processor. `SetTrack(track)` starts reader goroutine. Decodes Opus→PCM (16kHz mono) |
-| `stt_processor.go` | Sends PCM to Soniox websocket, emits `TranscriptFrame`s. Builds live transcript for UI (finals accumulate, non-finals replace per response). Auto-reconnects |
+| `stt_processor.go` | Sends PCM to Soniox websocket, emits raw `TranscriptFrame`s with `ResponseID` and response-level `Finished` metadata. Logs each STT response and token. Auto-reconnects |
 | `user_idle_processor.go` | Sits between STT and ContextAggregator. Tracks user activity (TranscriptFrame) and bot completion (BotStoppedSpeakingFrame). Injects `TTSSpeakFrame` after 15s of silence. Max 2 idle prompts per silence period |
-| `context_aggregator.go` | Owns conversation context (messages, transcripts, barge-in, word tracking, commit). Sends `LLMMessagesFrame` to LLM on `<end>`. Min-word barge-in (3 words, uses interims + finals). Discards below-threshold speech during bot talking. Defers to `BotStoppedSpeakingFrame` for state tracking |
+| `context_aggregator.go` | Owns conversation context (messages, one shared interim transcript snapshot, final transcript, barge-in, word tracking, commit). Sends `LLMMessagesFrame` to LLM on final STT token `<end>`. Min-word barge-in and frontend live transcript both use the same latest non-final snapshot. Discards below-threshold speech during bot talking. Defers to `BotStoppedSpeakingFrame` for state tracking |
 | `llm_processor.go` | Lean: receives `LLMMessagesFrame` → calls OpenAI (gpt-4.1) → streams response. Handles `InterruptFrame` on system channel (cancels HTTP). Forwards all upstream frames to aggregator. Metrics (TTFB, processing) |
 | `tts_processor.go` | Aggregates sentences, sends to Cartesia. PCM→Opus encoding. Word timestamp interleaving. Handles `InterruptFrame` on system channel. Handles `TTSSpeakFrame` for standalone synthesis. Context-id validation via `atomic.Value` prevents stale audio from cancelled contexts. Auto-reconnects |
 | `playback_sink_processor.go` | Publishes LiveKit audio track. 20ms ticker pacing. Emits `BotStartedSpeakingFrame` (first audio) and `BotStoppedSpeakingFrame` (after TTSDoneFrame) upstream. Handles `TTSSpeakFrame` (resets interrupted state). Metrics (E2E latency) |
@@ -89,9 +89,9 @@ type ProcessorChannels struct {
 
 **System channel priority (nested select trick):** Processors that handle InterruptFrame use a nested select: outer select checks System channel first with a `default` fallback to an inner select that checks both System and Data. This ensures system frames (interrupts) bypass any buffered data frames.
 
-**ContextAggregator owns conversation state:** Separated from LLM processor. Owns messages array, transcript accumulation, barge-in detection, word tracking, and commit logic. LLM processor is lean — just receives `LLMMessagesFrame`, calls the API, streams responses, handles cancellation.
+**ContextAggregator owns conversation state:** Separated from LLM processor. Owns messages array, live transcript aggregation, final transcript accumulation, barge-in detection, word tracking, and commit logic. LLM processor is lean — just receives `LLMMessagesFrame`, calls the API, streams responses, handles cancellation.
 
-**Min-word barge-in (Pipecat-style):** ContextAggregator builds a live transcript snapshot (finals accumulate, interims replace — matching Soniox semantics). Checks `len(strings.Fields(finals + latestInterim)) >= 3`. Uses interims for faster detection without double-counting. Below-threshold speech during bot talking is discarded (not deferred) — matches Pipecat's `reset_aggregation()` behavior.
+**Min-word barge-in (Pipecat-style):** STT stays dumb and forwards raw Soniox token frames with response-level metadata. Soniox interim responses are transcript snapshots, not deltas: each non-final response repeats the current hypothesis, so ContextAggregator replaces the previous non-final transcript with the latest response's non-final tokens. One shared `interimTranscript` drives both frontend live transcript updates and barge-in checks. Barge-in can fire on non-final interim frames once `len(strings.Fields(interimTranscript)) >= 3`, but turn-taking starts only on final tokens ending with `<end>`. Do not use Soniox `finished` for turn-taking; it is stream/connection lifecycle metadata, not an utterance boundary. Below-threshold speech during bot talking is discarded (not deferred) — matches Pipecat's `reset_aggregation()` behavior.
 
 **BotStartedSpeakingFrame / BotStoppedSpeakingFrame:** Emitted by PlaybackSinkProcessor upstream. BotStartedSpeaking on first audio frame played, BotStoppedSpeaking after TTSDoneFrame. Flow upstream through TTS → LLM → ContextAggregator → UserIdleProcessor. Used for barge-in state tracking and idle detection.
 
@@ -180,5 +180,5 @@ go build ./...
 - Audio can sound choppy if Opus frames aren't paced at 20ms intervals — use `time.Ticker`, not `time.Sleep`
 - The go.mod module name is still `awesomeProject` (from the original learning project)
 - Upstream frames (WordTimestampFrame, TTSDoneFrame, BotStarted/StoppedSpeakingFrame) pass through TTS and LLM as forwarding hops to reach ContextAggregator and UserIdleProcessor
-- Soniox sends individual tokens as TranscriptFrames, not accumulated text. Barge-in builds a live transcript snapshot (finals accumulate, interims replace) to count words correctly
+- Soniox sends transcript snapshots: individual responses duplicate prior non-final tokens and add/refine the current hypothesis. STT should forward token text plus response metadata (`ResponseID`, `Finished`) without owning transcript semantics. ContextAggregator replaces non-final text per response, updates the UI from that latest snapshot, and starts turns only from final tokens ending in `<end>`; `Finished` is logged for debugging but is not the turn boundary
 - Cartesia may send late audio/done messages after context cancellation — `activeContextId` atomic check in TTS reader goroutine drops them

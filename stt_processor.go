@@ -23,7 +23,6 @@ type STTProcessor struct {
 	websocketConn    *websocket.Conn
 	transcriptFrames chan TranscriptFrame
 	audioFrames      chan AudioFrame
-	finalText        string // accumulated final tokens for live display
 }
 
 func (s *STTProcessor) connect() {
@@ -67,6 +66,7 @@ func NewSTTProcessor(sessionCtx *SessionContext) *STTProcessor {
 }
 
 func (s *STTProcessor) readSTTWebsocket() {
+	responseID := 0
 	for {
 		if s.sessionCtx.Ctx.Err() != nil {
 			s.sessionCtx.Logger.Println("STT reader exiting: session closed")
@@ -87,28 +87,12 @@ func (s *STTProcessor) readSTTWebsocket() {
 			s.sessionCtx.Logger.Println("STT json unmarshal error:", err)
 			continue
 		}
+		responseID++
+		s.sessionCtx.Logger.Printf("STT response received: response_id=%d finished=%v tokens=%d\n", responseID, resp.Finished, len(resp.Tokens))
 
-		// Build live transcript: finals accumulate, non-finals replace each response
-		var nonFinalText string
-		var hasEnd bool
 		for _, token := range resp.Tokens {
-			if token.IsFinal {
-				if token.Text == "<end>" {
-					hasEnd = true
-				} else {
-					s.finalText += token.Text
-				}
-			} else {
-				nonFinalText += token.Text
-			}
-			s.transcriptFrames <- TranscriptFrame{Text: token.Text, IsFinal: token.IsFinal}
-		}
-
-		if hasEnd {
-			s.sessionCtx.UIEvents.Send(UIEvent{Type: LiveTranscript, Data: map[string]interface{}{"text": ""}})
-			s.finalText = ""
-		} else if s.finalText != "" || nonFinalText != "" {
-			s.sessionCtx.UIEvents.Send(UIEvent{Type: LiveTranscript, Data: map[string]interface{}{"text": s.finalText + nonFinalText}})
+			s.sessionCtx.Logger.Printf("STT token received: response_id=%d finished=%v is_final=%v text=%q\n", responseID, resp.Finished, token.IsFinal, token.Text)
+			s.transcriptFrames <- TranscriptFrame{Text: token.Text, IsFinal: token.IsFinal, ResponseID: responseID, Finished: resp.Finished}
 		}
 	}
 }

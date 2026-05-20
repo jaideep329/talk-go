@@ -8,9 +8,10 @@ type ContextAggregator struct {
 	sessionCtx        *SessionContext
 	messages          []map[string]string
 	currentTranscript string
+	finalResponseID   int
 	spokenWords       []string
-	bargeInFinals     string // accumulated final tokens for barge-in word count
-	bargeInInterim    string // latest non-final text (replaces, not accumulates)
+	interimTranscript string
+	interimResponseID int
 	interruptSent     bool
 	botSpeaking       bool
 }
@@ -39,6 +40,60 @@ func (a *ContextAggregator) spokenSoFar() string {
 	}
 	a.spokenWords = nil
 	return spoken
+}
+
+func (a *ContextAggregator) resetFinalTranscript() {
+	a.currentTranscript = ""
+	a.finalResponseID = 0
+}
+
+func (a *ContextAggregator) resetInterimTranscript() {
+	a.interimTranscript = ""
+	a.interimResponseID = 0
+}
+
+func (a *ContextAggregator) sendLiveTranscript(text string) {
+	a.sessionCtx.UIEvents.Send(UIEvent{Type: LiveTranscript, Data: map[string]interface{}{"text": text}})
+}
+
+func (a *ContextAggregator) updateInterimTranscript(f TranscriptFrame) string {
+	if f.IsFinal && f.Text == "<end>" {
+		a.sendLiveTranscript("")
+		a.resetInterimTranscript()
+		return ""
+	}
+	if f.IsFinal {
+		return a.interimTranscript
+	}
+
+	if f.ResponseID != 0 && f.ResponseID != a.interimResponseID {
+		a.interimResponseID = f.ResponseID
+		a.interimTranscript = ""
+	}
+
+	a.interimTranscript += f.Text
+	if a.interimTranscript != "" {
+		a.sendLiveTranscript(a.interimTranscript)
+	}
+	return a.interimTranscript
+}
+
+func (a *ContextAggregator) updateFinalTranscript(f TranscriptFrame) (string, bool) {
+	if !f.IsFinal {
+		return "", false
+	}
+	if f.ResponseID != 0 && f.ResponseID != a.finalResponseID {
+		a.finalResponseID = f.ResponseID
+		a.currentTranscript = ""
+	}
+	if f.Text == "<end>" {
+		text := a.currentTranscript
+		a.resetFinalTranscript()
+		return text, true
+	}
+
+	a.currentTranscript += f.Text
+	return "", false
 }
 
 func (a *ContextAggregator) commitSpokenText(interrupted bool) {
@@ -80,8 +135,8 @@ You are conducting your first telephonic consultation with a new client. You are
 	a.addUserMessage(text)
 	a.interruptSent = false
 	a.spokenWords = nil
-	a.bargeInFinals = ""
-	a.bargeInInterim = ""
+	a.resetInterimTranscript()
+	a.resetFinalTranscript()
 	ch.Send(LLMMessagesFrame{Messages: a.messages}, Downstream)
 }
 
@@ -102,49 +157,33 @@ func (a *ContextAggregator) Process(ch ProcessorChannels) {
 			}
 			switch f := frame.(type) {
 			case TranscriptFrame:
-				// Barge-in: build a live transcript snapshot (finals accumulate,
-				// interims replace) and check word count — matches Pipecat's
-				// per-frame full-text check. Uses interims for faster detection
-				// without double-counting.
-				if a.botSpeaking && !a.interruptSent {
-					if f.IsFinal && f.Text != "<end>" {
-						a.bargeInFinals += f.Text
-						a.bargeInInterim = "" // final replaces interim
-					} else if !f.IsFinal {
-						a.bargeInInterim = f.Text // latest interim snapshot
-					}
-					liveText := a.bargeInFinals + a.bargeInInterim
-					if len(strings.Fields(liveText)) >= minBargeInWords {
+				interimTranscript := a.updateInterimTranscript(f)
+
+				// Barge-in uses the latest non-final response snapshot only.
+				// Turn-taking waits for final tokens ending with <end>.
+				if a.botSpeaking && !a.interruptSent && !f.IsFinal {
+					if len(strings.Fields(interimTranscript)) >= minBargeInWords {
 						a.sessionCtx.Logger.Println("Barge-in detected")
 						ch.Send(InterruptFrame{}, Downstream)
 						a.interruptSent = true
-						a.bargeInFinals = ""
-						a.bargeInInterim = ""
+						a.botSpeaking = false
 						a.commitSpokenText(true)
 					}
 				}
-				// Accumulate final transcripts, trigger LLM on <end>
-				if f.IsFinal {
-					if f.Text == "<end>" {
-						if a.currentTranscript != "" {
-							if a.botSpeaking && !a.interruptSent {
-								// Bot speaking, below barge-in threshold — discard.
-								// Matches Pipecat: short utterances during bot speech
-								// are acknowledgments, not intentional turns.
-								a.sessionCtx.Logger.Printf("Discarding below-threshold transcript (bot speaking): %s\n", a.currentTranscript)
-								a.currentTranscript = ""
-								a.bargeInFinals = ""
-								a.bargeInInterim = ""
-							} else {
-								a.submitUserMessage(a.currentTranscript, ch)
-								a.currentTranscript = ""
-							}
+				if text, finished := a.updateFinalTranscript(f); finished {
+					if text != "" {
+						if a.botSpeaking && !a.interruptSent {
+							// Bot speaking, below barge-in threshold — discard.
+							// Matches Pipecat: short utterances during bot speech
+							// are acknowledgments, not intentional turns.
+							a.sessionCtx.Logger.Printf("Discarding below-threshold transcript (bot speaking): %s\n", text)
+							a.resetInterimTranscript()
+						} else {
+							a.submitUserMessage(text, ch)
 						}
-					} else {
-						a.currentTranscript += f.Text
 					}
 				}
-			// Upstream frames from LLM (originally from PlaybackSink via TTS)
+				// Upstream frames from LLM (originally from PlaybackSink via TTS)
 			case WordTimestampFrame:
 				a.appendWords(f.Words)
 			case TTSDoneFrame:

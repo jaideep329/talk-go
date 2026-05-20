@@ -17,6 +17,7 @@ const (
 	CommittedAssistant UIEventType = "committed_assistant"
 	AssistantSpeaking  UIEventType = "assistant_speaking"
 	Metrics            UIEventType = "metrics"
+	CallEnded          UIEventType = "call_ended"
 )
 
 // UIEvent is a typed message sent to the frontend over WebSocket.
@@ -50,7 +51,6 @@ func (s *UIEventSender) RemoveClient(conn *websocket.Conn) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.clients, conn)
-	conn.Close()
 }
 
 // Send broadcasts a UIEvent to all connected clients.

@@ -45,10 +45,11 @@ func (p *UserIdleProcessor) Process(ch ProcessorChannels) {
 	for {
 		select {
 		case frame := <-ch.System:
-			switch frame.(type) {
+			switch f := frame.(type) {
 			case EndFrame:
+				p.sessionCtx.Logger.Printf("EndFrame at UserIdleProcessor system path, forwarding downstream: reason=%q\n", f.Reason)
 				p.cancelIdleTimer()
-				ch.Send(frame, Downstream)
+				ch.Send(f, Downstream)
 				return
 			default:
 				ch.Send(frame, Downstream)
@@ -57,7 +58,12 @@ func (p *UserIdleProcessor) Process(ch ProcessorChannels) {
 			if !ok {
 				return
 			}
-			switch frame.(type) {
+			switch f := frame.(type) {
+			case EndFrame:
+				p.sessionCtx.Logger.Printf("EndFrame at UserIdleProcessor data path, forwarding downstream: reason=%q\n", f.Reason)
+				p.cancelIdleTimer()
+				ch.Send(f, Downstream)
+				return
 			case TranscriptFrame:
 				p.cancelIdleTimer()
 				p.idlePromptCount = 0

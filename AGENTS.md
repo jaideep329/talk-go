@@ -13,6 +13,7 @@ Jaideep is an experienced Python backend engineer learning Go by building real p
 - **Don't over-engineer.** He will push back if something is unnecessarily complex. Prefer the simplest solution first.
 - **When debugging, check `app.log` first** — all `log.*` output goes there. `fmt.Print*` goes to stdout/terminal. Logs go to both `app.log` and terminal via `io.MultiWriter`.
 - **After major design decisions or discussions, always update AGENTS.md.** Don't wait to be asked — if a design pattern, architecture choice, or strategy was decided in conversation, persist it immediately.
+- **Use Pipecat as the reference for core calling-system details before implementing.** For call lifecycle, turn-taking, interruption, transport events, idle handling, frame semantics, or shutdown behavior, inspect the local Pipecat source first, mention the relevant Pipecat file/pattern in the reasoning, then implement the simplest equivalent in this Go codebase. Prefer `/Users/jaideepsingh/Projects/disha-backend/.venv/lib/python3.11/site-packages/pipecat` (`pipecat-ai==0.0.108`) and Disha's existing bot code in `/Users/jaideepsingh/Projects/disha-backend/bots` before falling back to public docs.
 
 ## Project Overview
 
@@ -35,8 +36,9 @@ The pipeline is **complete and working end-to-end** with barge-in (min-word dete
 | File | Purpose |
 |------|---------|
 | `main.go` | Entry point. Loads `.env`, configures logging (both terminal + `app.log`), silences LiveKit/pion logs, serves HTTP (`:3000`). `/connect` creates sessions, `/ws` streams UI events. Imports `net/http/pprof` for profiling |
-| `pipeline.go` | `Pipeline` struct with `Run()` — creates per-processor data/system channels, injects `Send` function for routing. Intercepts `MetricsFrame` in Send and routes to metrics handler. `SessionContext` (single dependency for all processors: Logger, Room, UIEvents, Ctx). `Session` struct for cleanup. `createSession()` wires everything |
-| `frame.go` | Frame types: `Frame` interface with `IsSystem()` for routing priority. Data frames: `AudioFrame`, `TextFrame`, `TranscriptFrame`, `LLMResponseStartFrame` (carries `StartedAt`), `LLMResponseEndFrame`, `WordTimestampFrame`, `TTSDoneFrame`, `TTSSpeakFrame`, `BotStartedSpeakingFrame`, `BotStoppedSpeakingFrame`, `LLMMessagesFrame`, `MetricsFrame`. System frames: `InterruptFrame`, `EndFrame` |
+| `pipeline.go` | `Pipeline` struct with `Run()` — creates per-processor data/system channels, injects `Send` function for routing. Intercepts `MetricsFrame` in Send and routes to metrics handler. `SessionContext` (single dependency for all processors: Logger, Room, UIEvents, Ctx). `Session` struct for EndFrame-driven cleanup. `createSession()` wires everything |
+| `pipeline_edges.go` | Pipecat-style edge processors: `PipelineSourceProcessor` queues external lifecycle frames into the pipeline; `PipelineSinkProcessor` handles terminal frames reaching the end of the pipeline |
+| `frame.go` | Frame types: `Frame` interface with `IsSystem()` for routing priority. Data/control frames: `AudioFrame`, `TextFrame`, `TranscriptFrame`, `EndFrame`, `LLMResponseStartFrame` (carries `StartedAt`), `LLMResponseEndFrame`, `WordTimestampFrame`, `TTSDoneFrame`, `TTSSpeakFrame`, `BotStartedSpeakingFrame`, `BotStoppedSpeakingFrame`, `LLMMessagesFrame`. System frames: `InterruptFrame`; `MetricsFrame` is system but intercepted by pipeline routing |
 | `frame_processor.go` | `Direction` (Downstream/Upstream), `ProcessorChannels` (Data, System channels + Send function), `FrameProcessor` interface: `Process(ch ProcessorChannels)` |
 | `metrics.go` | `MetricLabel` constants, `MetricsData` struct, `MetricsFrame` (system frame, intercepted by pipeline), `ProcessorMetrics` helper with `Start`/`StartAt`/`Stop`/`Reset` (thread-safe timer map) |
 | `ui_events.go` | `UIEventType` enum, `UIEvent` struct (`Type` + `Data map[string]interface{}`), `UIEventSender` — per-session WebSocket broadcaster to frontend |
@@ -45,14 +47,15 @@ The pipeline is **complete and working end-to-end** with barge-in (min-word dete
 | `audio_source_processor.go` | Source processor. `SetTrack(track)` starts reader goroutine. Decodes Opus→PCM (16kHz mono) |
 | `stt_processor.go` | Sends PCM to Soniox websocket, emits raw `TranscriptFrame`s with `ResponseID` and response-level `Finished` metadata. Logs each STT response and token. Auto-reconnects |
 | `user_idle_processor.go` | Sits between STT and ContextAggregator. Tracks user activity (TranscriptFrame) and bot completion (BotStoppedSpeakingFrame). Injects `TTSSpeakFrame` after 15s of silence. Max 2 idle prompts per silence period |
-| `context_aggregator.go` | Owns conversation context (messages, one shared interim transcript snapshot, final transcript, barge-in, word tracking, commit). Sends `LLMMessagesFrame` to LLM on final STT token `<end>`. Min-word barge-in and frontend live transcript both use the same latest non-final snapshot. Discards below-threshold speech during bot talking. Defers to `BotStoppedSpeakingFrame` for state tracking |
+| `context_aggregator.go` | Owns conversation context (messages, one shared interim transcript snapshot, final transcript, barge-in, word tracking, commit). Accumulates final STT tokens across final response chunks until `<end>`, then sends `LLMMessagesFrame` to LLM. Min-word barge-in and frontend live transcript both use the same latest non-final snapshot. Discards below-threshold speech during bot talking. Defers to `BotStoppedSpeakingFrame` for state tracking |
+| `talktime_monitoring_processor.go` | Sits between ContextAggregator and LLM. Starts max talk-time timer, interrupts active bot work on timeout, then sends final `TTSSpeakFrame` followed by graceful `EndFrame` |
 | `llm_processor.go` | Lean: receives `LLMMessagesFrame` → calls OpenAI (gpt-4.1) → streams response. Handles `InterruptFrame` on system channel (cancels HTTP). Forwards all upstream frames to aggregator. Metrics (TTFB, processing) |
-| `tts_processor.go` | Aggregates sentences, sends to Cartesia. PCM→Opus encoding. Word timestamp interleaving. Handles `InterruptFrame` on system channel. Handles `TTSSpeakFrame` for standalone synthesis. Context-id validation via `atomic.Value` prevents stale audio from cancelled contexts. Auto-reconnects |
-| `playback_sink_processor.go` | Publishes LiveKit audio track. 20ms ticker pacing. Emits `BotStartedSpeakingFrame` (first audio) and `BotStoppedSpeakingFrame` (after TTSDoneFrame) upstream. Handles `TTSSpeakFrame` (resets interrupted state). Metrics (E2E latency) |
+| `tts_processor.go` | Aggregates sentences, sends to Cartesia. PCM→Opus encoding. Word timestamp interleaving. Handles `InterruptFrame` on system channel. Handles `TTSSpeakFrame` for standalone synthesis. Defers `EndFrame` while synthesis is in progress so generated audio and `TTSDoneFrame` stay ordered before shutdown. Context-id validation via `atomic.Value` prevents stale audio from cancelled contexts. Auto-reconnects |
+| `playback_sink_processor.go` | Publishes LiveKit audio track. 20ms ticker pacing. Emits `BotStartedSpeakingFrame` (first audio) and `BotStoppedSpeakingFrame` (after TTSDoneFrame) upstream. Handles `TTSSpeakFrame` (resets interrupted state). When queued playback reaches `EndFrame`, writes a short silence tail before forwarding it, matching Pipecat's output transport end-silence pattern. Metrics (E2E latency) |
 
 #### Pipeline wiring:
 ```go
-AudioSourceProcessor → STTProcessor → UserIdleProcessor → ContextAggregator → LLMProcessor → TTSProcessor → PlaybackSinkProcessor
+PipelineSourceProcessor → AudioSourceProcessor → STTProcessor → UserIdleProcessor → ContextAggregator → TalkTimeMonitoringProcessor → LLMProcessor → TTSProcessor → PlaybackSinkProcessor → PipelineSinkProcessor
 ```
 
 ### Processor Initialization Pattern
@@ -64,6 +67,7 @@ NewAudioSourceProcessor(sessionCtx)
 NewSTTProcessor(sessionCtx)
 NewUserIdleProcessor(sessionCtx)
 NewContextAggregator(sessionCtx)
+NewTalkTimeMonitoringProcessor(sessionCtx)
 NewLLMProcessor(sessionCtx)
 NewTTSProcessor(sessionCtx)
 NewPlaybackSinkProcessor(sessionCtx)
@@ -75,11 +79,13 @@ NewPlaybackSinkProcessor(sessionCtx)
 
 **Pipecat-style frame-only communication (no shared state):** All cross-processor communication happens via frames flowing through channels. No shared mutable objects between processors. Each processor is self-contained — receives frames on its channels, sends frames via its `Send` function.
 
+**Pipecat-style pipeline edges:** External lifecycle frames enter through `PipelineSourceProcessor`, not by writing directly to another processor's channel and not through ad-hoc channels on `Pipeline`. Terminal lifecycle frames are observed by `PipelineSinkProcessor`. This mirrors Pipecat's source/sink boundary while keeping the Go implementation small.
+
 **ProcessorChannels pattern:** Every processor receives a `ProcessorChannels` struct with two input channels (Data, System) and a `Send` function. The pipeline creates these and injects routing logic:
 ```go
 type ProcessorChannels struct {
     Data   <-chan Frame    // normal priority input (from both upstream and downstream neighbors)
-    System <-chan Frame    // high priority input (InterruptFrame, EndFrame) — checked first
+    System <-chan Frame    // high priority input (InterruptFrame) — checked first
     Send   func(frame Frame, dir Direction)  // routes to next/previous processor
 }
 ```
@@ -89,13 +95,17 @@ type ProcessorChannels struct {
 
 **System channel priority (nested select trick):** Processors that handle InterruptFrame use a nested select: outer select checks System channel first with a `default` fallback to an inner select that checks both System and Data. This ensures system frames (interrupts) bypass any buffered data frames.
 
+**EndFrame-driven call shutdown:** Call end follows Pipecat's graceful `EndFrame` pattern. External handlers (UI WebSocket disconnects, frontend "end_call" messages, future transport lifecycle events) should call `Session.End(reason)` only; they must not directly cancel the session, disconnect LiveKit, or remove the session. `EndFrame` is not a system frame: it travels through the normal data path so processors see shutdown in pipeline order. `Session.End()` queues the frame on `PipelineSourceProcessor`; TTS defers `EndFrame` while it is still generating the current utterance; `PlaybackSinkProcessor` drains queued playback, then writes a short silence tail before forwarding `EndFrame`, matching Pipecat's `BaseOutputTransport.MediaSender` pattern where `EndFrame` is queued behind audio and final silence is sent before stopping; `PipelineSinkProcessor` invokes session cleanup, which sends `call_ended`, cancels session context, disconnects the LiveKit bot room, and removes the session. Resource closures inside processors are allowed only as part of handling `EndFrame`.
+
 **ContextAggregator owns conversation state:** Separated from LLM processor. Owns messages array, live transcript aggregation, final transcript accumulation, barge-in detection, word tracking, and commit logic. LLM processor is lean — just receives `LLMMessagesFrame`, calls the API, streams responses, handles cancellation.
 
-**Min-word barge-in (Pipecat-style):** STT stays dumb and forwards raw Soniox token frames with response-level metadata. Soniox interim responses are transcript snapshots, not deltas: each non-final response repeats the current hypothesis, so ContextAggregator replaces the previous non-final transcript with the latest response's non-final tokens. One shared `interimTranscript` drives both frontend live transcript updates and barge-in checks. Barge-in can fire on non-final interim frames once `len(strings.Fields(interimTranscript)) >= 3`, but turn-taking starts only on final tokens ending with `<end>`. Do not use Soniox `finished` for turn-taking; it is stream/connection lifecycle metadata, not an utterance boundary. Below-threshold speech during bot talking is discarded (not deferred) — matches Pipecat's `reset_aggregation()` behavior.
+**Min-word barge-in (Pipecat-style):** STT stays dumb and forwards raw Soniox token frames with response-level metadata. Soniox interim responses are transcript snapshots, not deltas: each non-final response repeats the current hypothesis, so ContextAggregator replaces the previous non-final transcript with the latest response's non-final tokens. Final tokens are deltas and may arrive across multiple final response chunks before `<end>`, so ContextAggregator accumulates final tokens until the end token instead of resetting by response ID. One shared `interimTranscript` drives both frontend live transcript updates and barge-in checks. Barge-in can fire on non-final interim frames once `len(strings.Fields(interimTranscript)) >= 3`, but turn-taking starts only on final tokens ending with `<end>`. Do not use Soniox `finished` for turn-taking; it is stream/connection lifecycle metadata, not an utterance boundary. Below-threshold speech during bot talking is discarded (not deferred) — matches Pipecat's `reset_aggregation()` behavior.
 
 **BotStartedSpeakingFrame / BotStoppedSpeakingFrame:** Emitted by PlaybackSinkProcessor upstream. BotStartedSpeaking on first audio frame played, BotStoppedSpeaking after TTSDoneFrame. Flow upstream through TTS → LLM → ContextAggregator → UserIdleProcessor. Used for barge-in state tracking and idle detection.
 
 **User idle detection:** UserIdleProcessor sits between STT and ContextAggregator. Starts 15s timer on BotStoppedSpeakingFrame, cancels on TranscriptFrame. On timeout, injects `TTSSpeakFrame{Text: "Hello? Are you still there?"}` downstream. Max 2 idle prompts, resets on user speech.
+
+**Talk-time limit:** TalkTimeMonitoringProcessor starts a max talk-time timer when the pipeline starts. On timeout, it sends `InterruptFrame` downstream to cancel active LLM/TTS/playback, then sends `TTSSpeakFrame{Text: "Your talk time is exhausted now. Ending the call."}` followed immediately by `EndFrame{Reason: "talk time exhausted"}`. The monitor does not wait for bot-speaking events; TTS and PlaybackSink preserve frame ordering by treating `EndFrame` as a graceful drain marker, so the closing TTS is generated and played before cleanup.
 
 **TTSSpeakFrame for canned utterances:** Bypasses LLM — goes directly to TTS for standalone synthesis. TTS creates a new Cartesia context, synthesizes the text, and forwards TTSSpeakFrame to PlaybackSink (which resets its interrupted state). Audio flows normally through word tracking and commit.
 
@@ -115,7 +125,7 @@ type ProcessorChannels struct {
 
 **Generic UIEvents:** `UIEvent` has typed `Type` (enum) + generic `Data map[string]interface{}`. Any processor can send any payload without struct changes.
 
-**Session cleanup:** When UI WebSocket disconnects, session context is cancelled (stops STT/TTS background goroutines), LiveKit room is disconnected, session is removed from map.
+**Session cleanup:** UI WebSocket disconnects and frontend disconnect button presses queue an `EndFrame`; cleanup happens only when that `EndFrame` reaches PlaybackSink. The frontend disconnect button sends `{type:"end_call"}` on the UI WebSocket and waits for `call_ended` before locally disconnecting LiveKit/WebSocket.
 
 **Cartesia TTS context strategy:** Single `context_id` per LLM turn. All sentences sent with `"continue": true` and `"add_timestamps": true`. Final flush with `"continue": false`. On interrupt, sends `{"cancel": true}`.
 

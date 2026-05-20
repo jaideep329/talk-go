@@ -104,7 +104,7 @@ func (p *LLMProcessor) Process(ch ProcessorChannels) {
 	for {
 		select {
 		case frame := <-ch.System:
-			switch frame.(type) {
+			switch f := frame.(type) {
 			case InterruptFrame:
 				if p.cancelLLM != nil {
 					p.cancelLLM()
@@ -113,13 +113,14 @@ func (p *LLMProcessor) Process(ch ProcessorChannels) {
 				p.isStreaming = false
 				ch.Send(frame, Downstream) // propagate to TTS/PlaybackSink
 			case EndFrame:
-				ch.Send(frame, Downstream)
+				p.sessionCtx.Logger.Printf("EndFrame at LLMProcessor outer system path, forwarding downstream: reason=%q\n", f.Reason)
+				ch.Send(f, Downstream)
 				return
 			}
 		default:
 			select {
 			case frame := <-ch.System:
-				switch frame.(type) {
+				switch f := frame.(type) {
 				case InterruptFrame:
 					if p.cancelLLM != nil {
 						p.cancelLLM()
@@ -128,7 +129,8 @@ func (p *LLMProcessor) Process(ch ProcessorChannels) {
 					p.isStreaming = false
 					ch.Send(frame, Downstream)
 				case EndFrame:
-					ch.Send(frame, Downstream)
+					p.sessionCtx.Logger.Printf("EndFrame at LLMProcessor inner system path, forwarding downstream: reason=%q\n", f.Reason)
+					ch.Send(f, Downstream)
 					return
 				}
 			case frame, ok := <-ch.Data:
@@ -136,6 +138,15 @@ func (p *LLMProcessor) Process(ch ProcessorChannels) {
 					return
 				}
 				switch f := frame.(type) {
+				case EndFrame:
+					p.sessionCtx.Logger.Printf("EndFrame at LLMProcessor data path, cancelling LLM and forwarding downstream: reason=%q\n", f.Reason)
+					if p.cancelLLM != nil {
+						p.cancelLLM()
+					}
+					p.metrics.Reset()
+					p.isStreaming = false
+					ch.Send(f, Downstream)
+					return
 				case LLMMessagesFrame:
 					ctx, cancel := context.WithCancel(context.Background())
 					p.cancelLLM = cancel

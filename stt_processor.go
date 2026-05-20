@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -23,10 +24,19 @@ type STTProcessor struct {
 	websocketConn    *websocket.Conn
 	transcriptFrames chan TranscriptFrame
 	audioFrames      chan AudioFrame
+	done             chan struct{}
+	stopOnce         sync.Once
 }
 
-func (s *STTProcessor) connect() {
+func (s *STTProcessor) connect() bool {
 	for {
+		select {
+		case <-s.done:
+			return false
+		case <-s.sessionCtx.Ctx.Done():
+			return false
+		default:
+		}
 		conn, _, err := websocket.DefaultDialer.Dial("wss://stt-rt.soniox.com/transcribe-websocket", nil)
 		if err != nil {
 			s.sessionCtx.Logger.Printf("STT websocket connect failed: %v, retrying in 1s...", err)
@@ -51,7 +61,7 @@ func (s *STTProcessor) connect() {
 		}
 		s.websocketConn = conn
 		s.sessionCtx.Logger.Println("STT websocket connected")
-		return
+		return true
 	}
 }
 
@@ -60,26 +70,51 @@ func NewSTTProcessor(sessionCtx *SessionContext) *STTProcessor {
 		sessionCtx:       sessionCtx,
 		transcriptFrames: make(chan TranscriptFrame, 100),
 		audioFrames:      make(chan AudioFrame, 100),
+		done:             make(chan struct{}),
 	}
 	p.connect()
 	return p
 }
 
+func (s *STTProcessor) stop() {
+	s.stopOnce.Do(func() {
+		s.sessionCtx.Logger.Println("STTProcessor stopping websocket reader/writer")
+		close(s.done)
+		if s.websocketConn != nil {
+			s.websocketConn.Close()
+		}
+	})
+}
+
 func (s *STTProcessor) readSTTWebsocket() {
 	responseID := 0
 	for {
+		select {
+		case <-s.done:
+			s.sessionCtx.Logger.Println("STT reader exiting: processor ended")
+			return
+		default:
+		}
 		if s.sessionCtx.Ctx.Err() != nil {
 			s.sessionCtx.Logger.Println("STT reader exiting: session closed")
 			return
 		}
 		_, msg, err := s.websocketConn.ReadMessage()
 		if err != nil {
+			select {
+			case <-s.done:
+				s.sessionCtx.Logger.Println("STT reader exiting: processor ended")
+				return
+			default:
+			}
 			if s.sessionCtx.Ctx.Err() != nil {
 				s.sessionCtx.Logger.Println("STT reader exiting: session closed")
 				return
 			}
 			s.sessionCtx.Logger.Println("STT read error, reconnecting:", err)
-			s.connect()
+			if !s.connect() {
+				return
+			}
 			continue
 		}
 		var resp SonioxResponseMessage
@@ -92,7 +127,12 @@ func (s *STTProcessor) readSTTWebsocket() {
 
 		for _, token := range resp.Tokens {
 			s.sessionCtx.Logger.Printf("STT token received: response_id=%d finished=%v is_final=%v text=%q\n", responseID, resp.Finished, token.IsFinal, token.Text)
-			s.transcriptFrames <- TranscriptFrame{Text: token.Text, IsFinal: token.IsFinal, ResponseID: responseID, Finished: resp.Finished}
+			select {
+			case <-s.done:
+				s.sessionCtx.Logger.Println("STT reader exiting: processor ended")
+				return
+			case s.transcriptFrames <- TranscriptFrame{Text: token.Text, IsFinal: token.IsFinal, ResponseID: responseID, Finished: resp.Finished}:
+			}
 		}
 	}
 }
@@ -100,6 +140,9 @@ func (s *STTProcessor) readSTTWebsocket() {
 func (s *STTProcessor) writeAudioWebsocket() {
 	for {
 		select {
+		case <-s.done:
+			s.sessionCtx.Logger.Println("STT writer exiting: processor ended")
+			return
 		case <-s.sessionCtx.Ctx.Done():
 			s.sessionCtx.Logger.Println("STT writer exiting: session closed")
 			s.websocketConn.Close()
@@ -122,9 +165,11 @@ func (p *STTProcessor) Process(ch ProcessorChannels) {
 	for {
 		select {
 		case frame := <-ch.System:
-			switch frame.(type) {
+			switch f := frame.(type) {
 			case EndFrame:
-				ch.Send(frame, Downstream)
+				p.sessionCtx.Logger.Printf("EndFrame at STTProcessor system path, forwarding downstream and stopping STT: reason=%q\n", f.Reason)
+				ch.Send(f, Downstream)
+				p.stop()
 				return
 			}
 		case frame, ok := <-ch.Data:
@@ -133,7 +178,16 @@ func (p *STTProcessor) Process(ch ProcessorChannels) {
 			}
 			switch f := frame.(type) {
 			case AudioFrame:
-				p.audioFrames <- f
+				select {
+				case <-p.done:
+					return
+				case p.audioFrames <- f:
+				}
+			case EndFrame:
+				p.sessionCtx.Logger.Printf("EndFrame at STTProcessor data path, forwarding downstream and stopping STT: reason=%q\n", f.Reason)
+				ch.Send(f, Downstream)
+				p.stop()
+				return
 			default:
 				p.sessionCtx.Logger.Printf("STT received unexpected frame: %T\n", f)
 			}

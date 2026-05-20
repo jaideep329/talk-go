@@ -14,9 +14,10 @@ import (
 )
 
 const (
-	bgVolume  = 0.5 // background audio volume
-	botVolume = 0.3 // bot speech volume when mixed
-	framePCM  = 480 // 20ms at 24kHz
+	bgVolume        = 0.5 // background audio volume
+	botVolume       = 0.3 // bot speech volume when mixed
+	framePCM        = 480 // 20ms at 24kHz
+	playbackEndTail = 1 * time.Second
 )
 
 type PlaybackSinkProcessor struct {
@@ -156,29 +157,57 @@ func (p *PlaybackSinkProcessor) decodeBotFrame(opusData []byte) []int16 {
 	return pcm
 }
 
+func (p *PlaybackSinkProcessor) writeSilenceTail() {
+	if !p.playbackStarted || playbackEndTail <= 0 {
+		return
+	}
+	p.sessionCtx.Logger.Printf("Writing %s playback silence before EndFrame\n", playbackEndTail)
+
+	silence := make([]int16, framePCM)
+	frames := int(playbackEndTail / (20 * time.Millisecond))
+	for i := 0; i < frames; i++ {
+		opusData := make([]byte, 1000)
+		n, err := p.opusEncoder.Encode(silence, opusData)
+		if err != nil {
+			p.sessionCtx.Logger.Println("playback silence encode error:", err)
+			return
+		}
+		p.botTrack.WriteSample(media.Sample{
+			Data:     opusData[:n],
+			Duration: 20 * time.Millisecond,
+		}, nil)
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 func (p *PlaybackSinkProcessor) Process(ch ProcessorChannels) {
 	ticker := time.NewTicker(20 * time.Millisecond)
 	defer ticker.Stop()
+
 	for {
 		select {
 		case frame := <-ch.System:
-			switch frame.(type) {
+			switch f := frame.(type) {
 			case InterruptFrame:
 				p.interrupted = true
 				p.playbackQueue = nil
 				p.sessionCtx.Logger.Println("Playback interrupted")
 			case EndFrame:
+				p.sessionCtx.Logger.Printf("EndFrame at PlaybackSinkProcessor outer system path, forwarding downstream immediately: reason=%q\n", f.Reason)
+				ch.Send(f, Downstream)
 				return
 			}
 		default:
 			select {
 			case frame := <-ch.System:
-				switch frame.(type) {
+				switch f := frame.(type) {
 				case InterruptFrame:
 					p.interrupted = true
 					p.playbackQueue = nil
 					p.sessionCtx.Logger.Println("Playback interrupted")
 				case EndFrame:
+					p.sessionCtx.Logger.Printf("EndFrame at PlaybackSinkProcessor inner system path, forwarding downstream immediately: reason=%q\n", f.Reason)
+					ch.Send(f, Downstream)
 					return
 				}
 			case frame, ok := <-ch.Data:
@@ -186,6 +215,9 @@ func (p *PlaybackSinkProcessor) Process(ch ProcessorChannels) {
 					return
 				}
 				switch f := frame.(type) {
+				case EndFrame:
+					p.sessionCtx.Logger.Printf("EndFrame queued in PlaybackSinkProcessor after %d pending playback frames: reason=%q\n", len(p.playbackQueue), f.Reason)
+					p.playbackQueue = append(p.playbackQueue, f)
 				case AudioFrame, WordTimestampFrame, TTSDoneFrame:
 					if !p.interrupted {
 						p.playbackQueue = append(p.playbackQueue, f)
@@ -229,6 +261,12 @@ func (p *PlaybackSinkProcessor) Process(ch ProcessorChannels) {
 						ch.Send(f, Upstream)
 						ch.Send(BotStoppedSpeakingFrame{}, Upstream)
 						p.playbackQueue = p.playbackQueue[1:]
+					case EndFrame:
+						p.playbackQueue = p.playbackQueue[1:]
+						p.writeSilenceTail()
+						p.sessionCtx.Logger.Printf("EndFrame leaving PlaybackSinkProcessor after playback drain: reason=%q\n", f.Reason)
+						ch.Send(f, Downstream)
+						return
 					default:
 						p.playbackQueue = p.playbackQueue[1:]
 					}

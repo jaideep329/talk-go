@@ -8,7 +8,6 @@ type ContextAggregator struct {
 	sessionCtx        *SessionContext
 	messages          []map[string]string
 	currentTranscript string
-	finalResponseID   int
 	spokenWords       []string
 	interimTranscript string
 	interimResponseID int
@@ -44,7 +43,6 @@ func (a *ContextAggregator) spokenSoFar() string {
 
 func (a *ContextAggregator) resetFinalTranscript() {
 	a.currentTranscript = ""
-	a.finalResponseID = 0
 }
 
 func (a *ContextAggregator) resetInterimTranscript() {
@@ -53,6 +51,9 @@ func (a *ContextAggregator) resetInterimTranscript() {
 }
 
 func (a *ContextAggregator) sendLiveTranscript(text string) {
+	if a.sessionCtx == nil || a.sessionCtx.UIEvents == nil {
+		return
+	}
 	a.sessionCtx.UIEvents.Send(UIEvent{Type: LiveTranscript, Data: map[string]interface{}{"text": text}})
 }
 
@@ -81,10 +82,6 @@ func (a *ContextAggregator) updateInterimTranscript(f TranscriptFrame) string {
 func (a *ContextAggregator) updateFinalTranscript(f TranscriptFrame) (string, bool) {
 	if !f.IsFinal {
 		return "", false
-	}
-	if f.ResponseID != 0 && f.ResponseID != a.finalResponseID {
-		a.finalResponseID = f.ResponseID
-		a.currentTranscript = ""
 	}
 	if f.Text == "<end>" {
 		text := a.currentTranscript
@@ -144,9 +141,10 @@ func (a *ContextAggregator) Process(ch ProcessorChannels) {
 	for {
 		select {
 		case frame := <-ch.System:
-			switch frame.(type) {
+			switch f := frame.(type) {
 			case EndFrame:
-				ch.Send(frame, Downstream)
+				a.sessionCtx.Logger.Printf("EndFrame at ContextAggregator system path, forwarding downstream: reason=%q\n", f.Reason)
+				ch.Send(f, Downstream)
 				return
 			default:
 				ch.Send(frame, Downstream)
@@ -156,6 +154,10 @@ func (a *ContextAggregator) Process(ch ProcessorChannels) {
 				return
 			}
 			switch f := frame.(type) {
+			case EndFrame:
+				a.sessionCtx.Logger.Printf("EndFrame at ContextAggregator data path, forwarding downstream: reason=%q\n", f.Reason)
+				ch.Send(f, Downstream)
+				return
 			case TranscriptFrame:
 				interimTranscript := a.updateInterimTranscript(f)
 

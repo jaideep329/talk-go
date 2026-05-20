@@ -22,7 +22,6 @@ func NewPipeline(processors []FrameProcessor, metricsHandler func(MetricsFrame))
 func (p *Pipeline) Run() {
 	n := len(p.processors)
 
-	// Create data and system channels for each processor.
 	dataChs := make([]chan Frame, n)
 	sysChs := make([]chan Frame, n)
 	for i := range n {
@@ -77,8 +76,12 @@ type SessionContext struct {
 }
 
 type Session struct {
-	SessionCtx *SessionContext
-	Cancel     context.CancelFunc
+	SessionCtx  *SessionContext
+	Cancel      context.CancelFunc
+	Source      *PipelineSourceProcessor
+	RoomName    string
+	endOnce     sync.Once
+	cleanupOnce sync.Once
 }
 
 var (
@@ -105,9 +108,10 @@ func createSession() (string, *Session) {
 	uiEvents := NewUIEventSender(logger)
 
 	sessionCtx := &SessionContext{Ctx: ctx, Logger: logger, UIEvents: uiEvents}
+	pipelineSource := NewPipelineSourceProcessor(logger)
 	audioSource := NewAudioSourceProcessor(sessionCtx)
 	sessionCtx.Room = joinRoom(roomName, audioSource)
-	session := &Session{SessionCtx: sessionCtx, Cancel: cancel}
+	session := &Session{SessionCtx: sessionCtx, Cancel: cancel, Source: pipelineSource, RoomName: roomName}
 	sessionsMu.Lock()
 	sessions[roomName] = session
 	sessionsMu.Unlock()
@@ -115,9 +119,11 @@ func createSession() (string, *Session) {
 	sttProcessor := NewSTTProcessor(sessionCtx)
 	userIdle := NewUserIdleProcessor(sessionCtx)
 	contextAggregator := NewContextAggregator(sessionCtx)
+	talkTimeMonitor := NewTalkTimeMonitoringProcessor(sessionCtx)
 	llmProcessor := NewLLMProcessor(sessionCtx)
 	ttsProcessor := NewTTSProcessor(sessionCtx)
 	playbackSink := NewPlaybackSinkProcessor(sessionCtx)
+	pipelineSink := NewPipelineSinkProcessor(logger, session.completeEnd)
 	metricsHandler := func(mf MetricsFrame) {
 		for _, d := range mf.Data {
 			logger.Printf("Metric [%s] %s: %.1fms\n", d.Processor, d.Label, d.ValueMs)
@@ -128,7 +134,34 @@ func createSession() (string, *Session) {
 			}})
 		}
 	}
-	pipeline := NewPipeline([]FrameProcessor{audioSource, sttProcessor, userIdle, contextAggregator, llmProcessor, ttsProcessor, playbackSink}, metricsHandler)
+	pipeline := NewPipeline([]FrameProcessor{pipelineSource, audioSource, sttProcessor, userIdle, contextAggregator, talkTimeMonitor, llmProcessor, ttsProcessor, playbackSink, pipelineSink}, metricsHandler)
 	go pipeline.Run()
 	return roomName, session
+}
+
+func (s *Session) End(reason string) {
+	s.endOnce.Do(func() {
+		if reason == "" {
+			reason = "unspecified"
+		}
+		s.SessionCtx.Logger.Printf("Queueing EndFrame: %s\n", reason)
+		s.Source.Queue(EndFrame{Reason: reason})
+	})
+}
+
+func (s *Session) completeEnd(frame EndFrame) {
+	s.cleanupOnce.Do(func() {
+		reason := frame.Reason
+		if reason == "" {
+			reason = "unspecified"
+		}
+		s.SessionCtx.Logger.Printf("EndFrame reached pipeline sink, cleaning up session: %s\n", reason)
+		s.SessionCtx.UIEvents.Send(UIEvent{Type: CallEnded, Data: map[string]interface{}{"reason": reason}})
+		s.Cancel()
+		if s.SessionCtx.Room != nil {
+			s.SessionCtx.Room.Disconnect()
+		}
+		removeSession(s.RoomName)
+		s.SessionCtx.Logger.Printf("Session cleanup complete after EndFrame: reason=%q\n", reason)
+	})
 }

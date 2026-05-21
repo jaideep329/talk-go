@@ -99,6 +99,8 @@ func (a *ContextAggregator) commitSpokenText(interrupted bool) {
 		a.sessionCtx.Logger.Printf("Committing to history (interrupted=%v): %s\n", interrupted, spoken)
 		a.messages = append(a.messages, map[string]string{"role": "assistant", "content": spoken})
 		a.sessionCtx.UIEvents.Send(UIEvent{Type: CommittedAssistant, Data: map[string]interface{}{"role": "assistant", "text": spoken}})
+	} else if interrupted {
+		a.sessionCtx.Logger.Println("Barge-in interrupted bot before any assistant words were committed")
 	}
 }
 

@@ -31,6 +31,23 @@ type pendingWord struct {
 	start float64 // seconds from context start
 }
 
+type ttsEventType int
+
+const (
+	ttsEventAudioChunk ttsEventType = iota
+	ttsEventWordTimestamps
+	ttsEventDone
+)
+
+const ttsPendingEndTimeout = 8 * time.Second
+
+type ttsEvent struct {
+	eventType ttsEventType
+	contextID string
+	audioData []byte
+	words     []pendingWord
+}
+
 type TTSProcessor struct {
 	sessionCtx         *SessionContext
 	metrics            *ProcessorMetrics
@@ -40,9 +57,9 @@ type TTSProcessor struct {
 	websocketConn      *websocket.Conn
 	pcmBuffer          []byte
 	opusEncoder        *opus.Encoder
-	audioFrames        chan Frame
+	ttsEvents          chan ttsEvent
 	pendingWords       []pendingWord
-	audioTimePushed    float64 // seconds of audio pushed to audioFrames
+	audioTimePushed    float64 // seconds of audio pushed downstream
 	firstTextReceived  bool
 	firstSentenceSent  bool
 	firstAudioReceived bool
@@ -89,11 +106,11 @@ func (t *TTSProcessor) isActiveContext(contextId string) bool {
 	return active != "" && active == contextId
 }
 
-func (t *TTSProcessor) pushAudioFrame(frame Frame) bool {
+func (t *TTSProcessor) pushTTSEvent(event ttsEvent) bool {
 	select {
 	case <-t.done:
 		return false
-	case t.audioFrames <- frame:
+	case t.ttsEvents <- event:
 		return true
 	}
 }
@@ -149,51 +166,44 @@ func (t *TTSProcessor) CancelTTSContext() bool {
 	return true
 }
 
-func (t *TTSProcessor) handleAudioChunkMessage(audioMsg *CartesiaTTSAudioChunkMessage) {
+func (t *TTSProcessor) isCurrentContext(contextID string) bool {
+	return t.currentContextId != "" && t.currentContextId == contextID
+}
+
+func (t *TTSProcessor) handleAudioChunkData(audioData []byte, ch ProcessorChannels) {
 	if t.currentContextId == "" {
 		return
 	}
 	if !t.firstAudioReceived {
 		t.firstAudioReceived = true
 		if mf := t.metrics.Stop(MetricTTFB); mf != nil {
-			if !t.pushAudioFrame(*mf) {
-				return
-			}
+			ch.Send(*mf, Downstream)
 		}
 	}
-	encodedBytes, err := base64.StdEncoding.DecodeString(audioMsg.Data)
-	if err != nil {
-		t.sessionCtx.Logger.Println("base64 decode error:", err)
-		return
-	}
-	t.pcmBuffer = append(t.pcmBuffer, encodedBytes...)
+	t.pcmBuffer = append(t.pcmBuffer, audioData...)
 
 	for len(t.pcmBuffer) >= 960 {
 		opusFrame := t.makeOpusData()
 		if opusFrame == nil {
 			break
 		}
-		if !t.pushAudioFrame(AudioFrame{Data: opusFrame}) {
-			return
-		}
+		ch.Send(AudioFrame{Data: opusFrame}, Downstream)
 		t.audioTimePushed += 0.02 // 20ms per opus frame
-		t.emitPendingWords()
+		t.emitPendingWords(ch)
 	}
 }
 
 // emitPendingWords sends WordTimestampFrames for words whose start time
 // has been reached by the audio pushed so far.
-func (t *TTSProcessor) emitPendingWords() {
+func (t *TTSProcessor) emitPendingWords(ch ProcessorChannels) {
 	for len(t.pendingWords) > 0 && t.pendingWords[0].start <= t.audioTimePushed {
 		w := t.pendingWords[0]
 		t.pendingWords = t.pendingWords[1:]
-		if !t.pushAudioFrame(WordTimestampFrame{Words: []string{w.word}}) {
-			return
-		}
+		ch.Send(WordTimestampFrame{Words: []string{w.word}}, Downstream)
 	}
 }
 
-func (t *TTSProcessor) pushRemainingAudioFrames() {
+func (t *TTSProcessor) pushRemainingAudioFrames(ch ProcessorChannels) {
 	if t.currentContextId == "" {
 		return
 	}
@@ -203,19 +213,38 @@ func (t *TTSProcessor) pushRemainingAudioFrames() {
 		}
 		opusFrame := t.makeOpusData()
 		if opusFrame != nil {
-			if !t.pushAudioFrame(AudioFrame{Data: opusFrame}) {
-				return
-			}
+			ch.Send(AudioFrame{Data: opusFrame}, Downstream)
 			t.audioTimePushed += 0.02
 		}
 	}
 	// Flush any remaining pending words
 	for _, w := range t.pendingWords {
-		if !t.pushAudioFrame(WordTimestampFrame{Words: []string{w.word}}) {
-			return
-		}
+		ch.Send(WordTimestampFrame{Words: []string{w.word}}, Downstream)
 	}
 	t.pendingWords = nil
+}
+
+func (t *TTSProcessor) handleTTSEvent(event ttsEvent, ch ProcessorChannels) bool {
+	if !t.isCurrentContext(event.contextID) {
+		if event.eventType == ttsEventDone {
+			t.sessionCtx.Logger.Printf("TTS ignoring stale done: context_id=%s\n", event.contextID)
+		}
+		return false
+	}
+
+	switch event.eventType {
+	case ttsEventAudioChunk:
+		t.handleAudioChunkData(event.audioData, ch)
+	case ttsEventWordTimestamps:
+		t.pendingWords = append(t.pendingWords, event.words...)
+		t.emitPendingWords(ch)
+	case ttsEventDone:
+		t.sessionCtx.Logger.Printf("TTS synthesis done: context_id=%s\n", event.contextID)
+		t.pushRemainingAudioFrames(ch)
+		ch.Send(TTSDoneFrame{}, Downstream)
+		return true
+	}
+	return false
 }
 
 func (t *TTSProcessor) makeOpusData() []byte {
@@ -320,7 +349,18 @@ func (t *TTSProcessor) readTTSConnectionData() {
 			if !t.isActiveContext(audioMsg.ContextId) {
 				continue
 			}
-			t.handleAudioChunkMessage(&audioMsg)
+			audioData, err := base64.StdEncoding.DecodeString(audioMsg.Data)
+			if err != nil {
+				t.sessionCtx.Logger.Println("base64 decode error:", err)
+				continue
+			}
+			if !t.pushTTSEvent(ttsEvent{
+				eventType: ttsEventAudioChunk,
+				contextID: audioMsg.ContextId,
+				audioData: audioData,
+			}) {
+				return
+			}
 		case "timestamps":
 			var tsMsg CartesiaTTSWordTimestampMessage
 			if err := json.Unmarshal(msg, &tsMsg); err != nil {
@@ -330,9 +370,19 @@ func (t *TTSProcessor) readTTSConnectionData() {
 			if !t.isActiveContext(tsMsg.ContextId) {
 				continue
 			}
+			words := make([]pendingWord, 0, len(tsMsg.WordTimestamps.Words))
 			for i, w := range tsMsg.WordTimestamps.Words {
 				if i < len(tsMsg.WordTimestamps.Start) {
-					t.pendingWords = append(t.pendingWords, pendingWord{word: w, start: tsMsg.WordTimestamps.Start[i]})
+					words = append(words, pendingWord{word: w, start: tsMsg.WordTimestamps.Start[i]})
+				}
+			}
+			if len(words) > 0 {
+				if !t.pushTTSEvent(ttsEvent{
+					eventType: ttsEventWordTimestamps,
+					contextID: tsMsg.ContextId,
+					words:     words,
+				}) {
+					return
 				}
 			}
 		case "done":
@@ -345,9 +395,12 @@ func (t *TTSProcessor) readTTSConnectionData() {
 				t.sessionCtx.Logger.Printf("TTS ignoring stale done: context_id=%s\n", doneMsg.ContextId)
 				continue
 			}
-			t.sessionCtx.Logger.Printf("TTS synthesis done: context_id=%s\n", doneMsg.ContextId)
-			t.pushRemainingAudioFrames()
-			t.pushAudioFrame(TTSDoneFrame{})
+			if !t.pushTTSEvent(ttsEvent{
+				eventType: ttsEventDone,
+				contextID: doneMsg.ContextId,
+			}) {
+				return
+			}
 		}
 	}
 }
@@ -361,7 +414,7 @@ func NewTTSProcessor(sessionCtx *SessionContext) *TTSProcessor {
 		sessionCtx:  sessionCtx,
 		metrics:     NewProcessorMetrics("tts"),
 		opusEncoder: opusEncoder,
-		audioFrames: make(chan Frame, 100),
+		ttsEvents:   make(chan ttsEvent, 100),
 		done:        make(chan struct{}),
 	}
 	t.connect()
@@ -374,11 +427,13 @@ func (t *TTSProcessor) Process(ch ProcessorChannels) {
 	var pendingEnd *EndFrame
 	awaitingTTSDone := false
 	ttsFlushSent := false
+	var pendingEndTimer *time.Timer
+	var pendingEndTimerC <-chan time.Time
 
 	clearTTSState := func() {
+		t.activeContextId.Store("")
 		t.currentAggregation = ""
 		t.currentContextId = ""
-		t.activeContextId.Store("")
 		t.pcmBuffer = nil
 		t.pendingWords = nil
 		t.audioTimePushed = 0
@@ -389,7 +444,43 @@ func (t *TTSProcessor) Process(ch ProcessorChannels) {
 		ttsFlushSent = false
 	}
 
+	stopPendingEndTimer := func() {
+		if pendingEndTimer == nil {
+			return
+		}
+		if !pendingEndTimer.Stop() {
+			select {
+			case <-pendingEndTimer.C:
+			default:
+			}
+		}
+		pendingEndTimer = nil
+		pendingEndTimerC = nil
+	}
+	defer stopPendingEndTimer()
+
+	startPendingEndTimer := func() {
+		stopPendingEndTimer()
+		pendingEndTimer = time.NewTimer(ttsPendingEndTimeout)
+		pendingEndTimerC = pendingEndTimer.C
+	}
+
+	forwardPendingEnd := func(reason string) bool {
+		if pendingEnd == nil {
+			return false
+		}
+		stopPendingEndTimer()
+		t.sessionCtx.Logger.Printf("TTS forwarding pending EndFrame %s: reason=%q\n", reason, pendingEnd.Reason)
+		ch.Send(*pendingEnd, Downstream)
+		pendingEnd = nil
+		t.stop()
+		return true
+	}
+
 	flushForEnd := func() {
+		// currentContextId remains the active turn context until the next
+		// LLMResponseStartFrame/TTSSpeakFrame, so a shutdown flush can still send
+		// any aggregated assistant text waiting for punctuation.
 		if strings.TrimSpace(t.currentAggregation) != "" {
 			if t.sendTextToTTS(t.currentAggregation) {
 				awaitingTTSDone = true
@@ -415,6 +506,7 @@ func (t *TTSProcessor) Process(ch ProcessorChannels) {
 		if awaitingTTSDone {
 			pending := frame
 			pendingEnd = &pending
+			startPendingEndTimer()
 			t.sessionCtx.Logger.Printf("EndFrame at TTSProcessor %s deferred until TTS done: reason=%q\n", path, frame.Reason)
 			return false
 		}
@@ -435,8 +527,8 @@ func (t *TTSProcessor) Process(ch ProcessorChannels) {
 					continue
 				}
 				t.CancelTTSContext()
-				drainChannel(t.audioFrames)
 				clearTTSState()
+				drainTTSEvents(t.ttsEvents)
 				t.metrics.Reset()
 				t.sessionCtx.Logger.Println("TTS interrupted, cleared state")
 				ch.Send(frame, Downstream) // propagate to PlaybackSink
@@ -451,8 +543,8 @@ func (t *TTSProcessor) Process(ch ProcessorChannels) {
 						continue
 					}
 					t.CancelTTSContext()
-					drainChannel(t.audioFrames)
 					clearTTSState()
+					drainTTSEvents(t.ttsEvents)
 					t.metrics.Reset()
 					t.sessionCtx.Logger.Println("TTS interrupted, cleared state")
 					ch.Send(frame, Downstream)
@@ -484,16 +576,8 @@ func (t *TTSProcessor) Process(ch ProcessorChannels) {
 						return
 					}
 				case LLMResponseStartFrame:
-					drainChannel(t.audioFrames) // flush stale frames from previous context
-					t.currentAggregation = ""
-					t.pcmBuffer = nil
-					t.pendingWords = nil
-					t.audioTimePushed = 0
-					t.firstTextReceived = false
-					t.firstSentenceSent = false
-					t.firstAudioReceived = false
-					awaitingTTSDone = false
-					ttsFlushSent = false
+					clearTTSState()
+					drainTTSEvents(t.ttsEvents) // flush stale events from previous context
 					t.metrics.Reset()
 					t.currentContextId = fmt.Sprintf("ctx-%d", rand.IntN(9000000))
 					t.activeContextId.Store(t.currentContextId)
@@ -539,13 +623,9 @@ func (t *TTSProcessor) Process(ch ProcessorChannels) {
 					ch.Send(f, Downstream)
 				case TTSSpeakFrame:
 					// Standalone synthesis — send full text immediately
-					t.currentAggregation = ""
-					t.pcmBuffer = nil
-					t.pendingWords = nil
-					t.audioTimePushed = 0
-					t.firstTextReceived = false
+					clearTTSState()
+					drainTTSEvents(t.ttsEvents)
 					t.firstSentenceSent = true // skip aggregation metrics for idle prompts
-					t.firstAudioReceived = false
 					t.metrics.Reset()
 					t.currentContextId = fmt.Sprintf("ctx-%d", rand.IntN(9000000))
 					t.activeContextId.Store(t.currentContextId)
@@ -573,18 +653,18 @@ func (t *TTSProcessor) Process(ch ProcessorChannels) {
 				default:
 					t.sessionCtx.Logger.Printf("TTS received unexpected frame: %T\n", f)
 				}
-			case frame, ok := <-t.audioFrames:
-				if !ok {
-					return
-				}
-				ch.Send(frame, Downstream) // audio/word/done frames to PlaybackSink
-				if _, ok := frame.(TTSDoneFrame); ok {
+			case event := <-t.ttsEvents:
+				if t.handleTTSEvent(event, ch) {
 					awaitingTTSDone = false
 					ttsFlushSent = false
-					if pendingEnd != nil {
-						t.sessionCtx.Logger.Printf("TTS done reached pending EndFrame, forwarding downstream: reason=%q\n", pendingEnd.Reason)
-						ch.Send(*pendingEnd, Downstream)
-						t.stop()
+					if forwardPendingEnd("after TTS done") {
+						return
+					}
+				}
+			case <-pendingEndTimerC:
+				if pendingEnd != nil {
+					t.sessionCtx.Logger.Printf("Timed out waiting %s for TTS done before EndFrame: reason=%q\n", ttsPendingEndTimeout, pendingEnd.Reason)
+					if forwardPendingEnd("after TTS done timeout") {
 						return
 					}
 				}
@@ -593,7 +673,7 @@ func (t *TTSProcessor) Process(ch ProcessorChannels) {
 	}
 }
 
-func drainChannel(ch chan Frame) {
+func drainTTSEvents(ch chan ttsEvent) {
 	for {
 		select {
 		case <-ch:

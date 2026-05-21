@@ -125,7 +125,7 @@ type ProcessorChannels struct {
 
 **Generic UIEvents:** `UIEvent` has typed `Type` (enum) + generic `Data map[string]interface{}`. Any processor can send any payload without struct changes.
 
-**Session cleanup:** UI WebSocket disconnects and frontend disconnect button presses queue an `EndFrame`; cleanup happens only when that `EndFrame` reaches PlaybackSink. The frontend disconnect button sends `{type:"end_call"}` on the UI WebSocket and waits for `call_ended` before locally disconnecting LiveKit/WebSocket.
+**Session cleanup:** UI WebSocket disconnects and frontend disconnect button presses queue an `EndFrame`; cleanup happens only when that `EndFrame` reaches PlaybackSink. `Session.End()` is idempotent and ignores late requests once cleanup has started or the session context has been cancelled, so websocket close events caused by cleanup do not enqueue a second `EndFrame`. The frontend disconnect button sends `{type:"end_call"}` on the UI WebSocket and waits for `call_ended` before locally disconnecting LiveKit/WebSocket.
 
 **Cartesia TTS context strategy:** Single `context_id` per LLM turn. All sentences sent with `"continue": true` and `"add_timestamps": true`. Final flush with `"continue": false`. On interrupt, sends `{"cancel": true}`.
 

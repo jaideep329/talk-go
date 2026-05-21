@@ -6,6 +6,7 @@ import (
 	"log"
 	"math/rand/v2"
 	"sync"
+	"sync/atomic"
 
 	lksdk "github.com/livekit/server-sdk-go/v2"
 )
@@ -76,12 +77,13 @@ type SessionContext struct {
 }
 
 type Session struct {
-	SessionCtx  *SessionContext
-	Cancel      context.CancelFunc
-	Source      *PipelineSourceProcessor
-	RoomName    string
-	endOnce     sync.Once
-	cleanupOnce sync.Once
+	SessionCtx     *SessionContext
+	Cancel         context.CancelFunc
+	Source         *PipelineSourceProcessor
+	RoomName       string
+	endRequested   atomic.Bool
+	cleanupStarted atomic.Bool
+	cleanupOnce    sync.Once
 }
 
 var (
@@ -140,17 +142,29 @@ func createSession() (string, *Session) {
 }
 
 func (s *Session) End(reason string) {
-	s.endOnce.Do(func() {
-		if reason == "" {
-			reason = "unspecified"
-		}
-		s.SessionCtx.Logger.Printf("Queueing EndFrame: %s\n", reason)
-		s.Source.Queue(EndFrame{Reason: reason})
-	})
+	if reason == "" {
+		reason = "unspecified"
+	}
+	if s.cleanupStarted.Load() || s.SessionCtx.Ctx.Err() != nil {
+		s.SessionCtx.Logger.Printf("Ignoring EndFrame request after cleanup started: %s\n", reason)
+		return
+	}
+	if !s.endRequested.CompareAndSwap(false, true) {
+		s.SessionCtx.Logger.Printf("Ignoring duplicate EndFrame request: %s\n", reason)
+		return
+	}
+	if s.cleanupStarted.Load() || s.SessionCtx.Ctx.Err() != nil {
+		s.SessionCtx.Logger.Printf("Ignoring EndFrame request after cleanup started: %s\n", reason)
+		return
+	}
+	s.SessionCtx.Logger.Printf("Queueing EndFrame: %s\n", reason)
+	s.Source.Queue(EndFrame{Reason: reason})
 }
 
 func (s *Session) completeEnd(frame EndFrame) {
 	s.cleanupOnce.Do(func() {
+		s.endRequested.Store(true)
+		s.cleanupStarted.Store(true)
 		reason := frame.Reason
 		if reason == "" {
 			reason = "unspecified"

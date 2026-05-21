@@ -28,8 +28,9 @@ type MetricsFrame struct {
 	Data []MetricsData
 }
 
-func (f MetricsFrame) FrameType() FrameType { return MetricsType }
-func (f MetricsFrame) IsSystem() bool       { return true }
+func (f MetricsFrame) FrameType() FrameType  { return MetricsType }
+func (f MetricsFrame) IsSystem() bool        { return true }
+func (f MetricsFrame) IsInterruptible() bool { return false }
 
 // ProcessorMetrics is a lightweight helper for timing measurements.
 // Embed in any processor that needs to emit metrics. Thread-safe.

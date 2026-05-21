@@ -55,11 +55,7 @@ func NewPipelineSinkProcessor(logger *log.Logger, onEnd func(EndFrame)) *Pipelin
 func (p *PipelineSinkProcessor) Process(ch ProcessorChannels) {
 	for {
 		select {
-		case frame := <-ch.System:
-			if f, ok := frame.(EndFrame); ok {
-				p.handleEnd(f)
-				return
-			}
+		case <-ch.System:
 		case frame, ok := <-ch.Data:
 			if !ok {
 				return

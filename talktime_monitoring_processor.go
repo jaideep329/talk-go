@@ -37,10 +37,6 @@ func (p *TalkTimeMonitoringProcessor) Process(ch ProcessorChannels) {
 		select {
 		case frame := <-ch.System:
 			switch f := frame.(type) {
-			case EndFrame:
-				p.sessionCtx.Logger.Printf("EndFrame at TalkTimeMonitoringProcessor system path, forwarding downstream: reason=%q\n", f.Reason)
-				ch.Send(f, Downstream)
-				return
 			case InterruptFrame:
 				if ending {
 					p.sessionCtx.Logger.Println("Talk time shutdown in progress, dropping interrupt")

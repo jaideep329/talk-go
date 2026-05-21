@@ -45,15 +45,7 @@ func (p *UserIdleProcessor) Process(ch ProcessorChannels) {
 	for {
 		select {
 		case frame := <-ch.System:
-			switch f := frame.(type) {
-			case EndFrame:
-				p.sessionCtx.Logger.Printf("EndFrame at UserIdleProcessor system path, forwarding downstream: reason=%q\n", f.Reason)
-				p.cancelIdleTimer()
-				ch.Send(f, Downstream)
-				return
-			default:
-				ch.Send(frame, Downstream)
-			}
+			ch.Send(frame, Downstream)
 		case frame, ok := <-ch.Data:
 			if !ok {
 				return

@@ -187,28 +187,20 @@ func (p *PlaybackSinkProcessor) Process(ch ProcessorChannels) {
 	for {
 		select {
 		case frame := <-ch.System:
-			switch f := frame.(type) {
+			switch frame.(type) {
 			case InterruptFrame:
 				p.interrupted = true
 				p.playbackQueue = nil
 				p.sessionCtx.Logger.Println("Playback interrupted")
-			case EndFrame:
-				p.sessionCtx.Logger.Printf("EndFrame at PlaybackSinkProcessor outer system path, forwarding downstream immediately: reason=%q\n", f.Reason)
-				ch.Send(f, Downstream)
-				return
 			}
 		default:
 			select {
 			case frame := <-ch.System:
-				switch f := frame.(type) {
+				switch frame.(type) {
 				case InterruptFrame:
 					p.interrupted = true
 					p.playbackQueue = nil
 					p.sessionCtx.Logger.Println("Playback interrupted")
-				case EndFrame:
-					p.sessionCtx.Logger.Printf("EndFrame at PlaybackSinkProcessor inner system path, forwarding downstream immediately: reason=%q\n", f.Reason)
-					ch.Send(f, Downstream)
-					return
 				}
 			case frame, ok := <-ch.Data:
 				if !ok {

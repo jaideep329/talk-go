@@ -428,7 +428,7 @@ func (t *TTSProcessor) Process(ch ProcessorChannels) {
 		// Priority: check system channel first.
 		select {
 		case frame := <-ch.System:
-			switch f := frame.(type) {
+			switch frame.(type) {
 			case InterruptFrame:
 				if pendingEnd != nil {
 					t.sessionCtx.Logger.Println("TTS shutdown is pending, dropping interrupt")
@@ -440,15 +440,11 @@ func (t *TTSProcessor) Process(ch ProcessorChannels) {
 				t.metrics.Reset()
 				t.sessionCtx.Logger.Println("TTS interrupted, cleared state")
 				ch.Send(frame, Downstream) // propagate to PlaybackSink
-			case EndFrame:
-				if handleEnd(f, "outer system path") {
-					return
-				}
 			}
 		default:
 			select {
 			case frame := <-ch.System:
-				switch f := frame.(type) {
+				switch frame.(type) {
 				case InterruptFrame:
 					if pendingEnd != nil {
 						t.sessionCtx.Logger.Println("TTS shutdown is pending, dropping interrupt")
@@ -460,10 +456,6 @@ func (t *TTSProcessor) Process(ch ProcessorChannels) {
 					t.metrics.Reset()
 					t.sessionCtx.Logger.Println("TTS interrupted, cleared state")
 					ch.Send(frame, Downstream)
-				case EndFrame:
-					if handleEnd(f, "inner system path") {
-						return
-					}
 				}
 			case frame, ok := <-ch.Data:
 				if !ok {

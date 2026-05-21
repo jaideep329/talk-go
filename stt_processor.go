@@ -165,13 +165,7 @@ func (p *STTProcessor) Process(ch ProcessorChannels) {
 	for {
 		select {
 		case frame := <-ch.System:
-			switch f := frame.(type) {
-			case EndFrame:
-				p.sessionCtx.Logger.Printf("EndFrame at STTProcessor system path, forwarding downstream and stopping STT: reason=%q\n", f.Reason)
-				ch.Send(f, Downstream)
-				p.stop()
-				return
-			}
+			ch.Send(frame, Downstream)
 		case frame, ok := <-ch.Data:
 			if !ok {
 				return

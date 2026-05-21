@@ -141,14 +141,7 @@ func (a *ContextAggregator) Process(ch ProcessorChannels) {
 	for {
 		select {
 		case frame := <-ch.System:
-			switch f := frame.(type) {
-			case EndFrame:
-				a.sessionCtx.Logger.Printf("EndFrame at ContextAggregator system path, forwarding downstream: reason=%q\n", f.Reason)
-				ch.Send(f, Downstream)
-				return
-			default:
-				ch.Send(frame, Downstream)
-			}
+			ch.Send(frame, Downstream)
 		case frame, ok := <-ch.Data:
 			if !ok {
 				return

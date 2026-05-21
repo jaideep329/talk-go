@@ -8,7 +8,6 @@ type ContextAggregator struct {
 	sessionCtx        *SessionContext
 	messages          []map[string]string
 	currentTranscript string
-	finalResponseID   int
 	spokenWords       []string
 	interimTranscript string
 	interimResponseID int
@@ -44,7 +43,6 @@ func (a *ContextAggregator) spokenSoFar() string {
 
 func (a *ContextAggregator) resetFinalTranscript() {
 	a.currentTranscript = ""
-	a.finalResponseID = 0
 }
 
 func (a *ContextAggregator) resetInterimTranscript() {
@@ -53,6 +51,9 @@ func (a *ContextAggregator) resetInterimTranscript() {
 }
 
 func (a *ContextAggregator) sendLiveTranscript(text string) {
+	if a.sessionCtx == nil || a.sessionCtx.UIEvents == nil {
+		return
+	}
 	a.sessionCtx.UIEvents.Send(UIEvent{Type: LiveTranscript, Data: map[string]interface{}{"text": text}})
 }
 
@@ -82,10 +83,6 @@ func (a *ContextAggregator) updateFinalTranscript(f TranscriptFrame) (string, bo
 	if !f.IsFinal {
 		return "", false
 	}
-	if f.ResponseID != 0 && f.ResponseID != a.finalResponseID {
-		a.finalResponseID = f.ResponseID
-		a.currentTranscript = ""
-	}
 	if f.Text == "<end>" {
 		text := a.currentTranscript
 		a.resetFinalTranscript()
@@ -102,6 +99,8 @@ func (a *ContextAggregator) commitSpokenText(interrupted bool) {
 		a.sessionCtx.Logger.Printf("Committing to history (interrupted=%v): %s\n", interrupted, spoken)
 		a.messages = append(a.messages, map[string]string{"role": "assistant", "content": spoken})
 		a.sessionCtx.UIEvents.Send(UIEvent{Type: CommittedAssistant, Data: map[string]interface{}{"role": "assistant", "text": spoken}})
+	} else if interrupted {
+		a.sessionCtx.Logger.Println("Barge-in interrupted bot before any assistant words were committed")
 	}
 }
 
@@ -144,18 +143,16 @@ func (a *ContextAggregator) Process(ch ProcessorChannels) {
 	for {
 		select {
 		case frame := <-ch.System:
-			switch frame.(type) {
-			case EndFrame:
-				ch.Send(frame, Downstream)
-				return
-			default:
-				ch.Send(frame, Downstream)
-			}
+			ch.Send(frame, Downstream)
 		case frame, ok := <-ch.Data:
 			if !ok {
 				return
 			}
 			switch f := frame.(type) {
+			case EndFrame:
+				a.sessionCtx.Logger.Printf("EndFrame at ContextAggregator data path, forwarding downstream: reason=%q\n", f.Reason)
+				ch.Send(f, Downstream)
+				return
 			case TranscriptFrame:
 				interimTranscript := a.updateInterimTranscript(f)
 

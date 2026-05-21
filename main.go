@@ -65,13 +65,23 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	session.SessionCtx.UIEvents.AddClient(conn)
 	// Keep connection alive — read until client disconnects
 	for {
-		if _, _, err := conn.ReadMessage(); err != nil {
+		_, msg, err := conn.ReadMessage()
+		if err != nil {
+			session.SessionCtx.Logger.Printf("UI websocket disconnected, requesting EndFrame: %v\n", err)
 			session.SessionCtx.UIEvents.RemoveClient(conn)
-			session.Cancel()
-			session.SessionCtx.Room.Disconnect()
-			session.SessionCtx.Logger.Println("Session cleaned up: LiveKit disconnected, goroutines cancelled")
-			removeSession(roomName)
+			session.End("ui websocket disconnected")
 			return
+		}
+		var event struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal(msg, &event); err != nil {
+			session.SessionCtx.Logger.Printf("Ignoring malformed websocket message: %v\n", err)
+			continue
+		}
+		if event.Type == "end_call" {
+			session.SessionCtx.Logger.Println("UI requested end_call, requesting EndFrame")
+			session.End("ui requested end call")
 		}
 	}
 }

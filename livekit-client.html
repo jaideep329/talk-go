@@ -282,6 +282,14 @@
         },
 
         disconnect() {
+          if (_ws && _ws.readyState === WebSocket.OPEN) {
+            _ws.send(JSON.stringify({ type: "end_call" }));
+            return;
+          }
+          this.finishDisconnect();
+        },
+
+        finishDisconnect() {
           if (_room) {
             _room.disconnect();
             _room = null;
@@ -328,6 +336,10 @@
 
             case "metrics":
               this.pendingMetrics.push(d);
+              break;
+
+            case "call_ended":
+              this.finishDisconnect();
               break;
           }
         },

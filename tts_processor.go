@@ -42,6 +42,25 @@ const (
 
 const ttsPendingEndTimeout = 8 * time.Second
 
+// ttsSynth represents the synthesis lifecycle for the current Cartesia
+// context. It replaces the (awaitingTTSDone, ttsFlushSent) boolean pair
+// the original Process loop carried — same semantics, named states.
+//
+// Transitions:
+//
+//	idle      → streaming  : sendTextToTTS succeeded
+//	streaming → closing    : ResetTTSContext succeeded (Cartesia knows no more text)
+//	streaming → idle       : ResetTTSContext write failed (treat as done)
+//	closing   → idle       : ttsEventDone arrived from Cartesia
+//	any       → idle       : InterruptFrame (state cleared)
+type ttsSynth int
+
+const (
+	ttsSynthIdle      ttsSynth = iota // no synthesis in flight
+	ttsSynthStreaming                 // text sent, audio chunks coming back
+	ttsSynthClosing                   // ResetTTSContext sent, waiting for done
+)
+
 type ttsEvent struct {
 	eventType ttsEventType
 	contextID string
@@ -244,8 +263,7 @@ func (t *TTSProcessor) orchestrator() {
 	var pendingEnd *EndFrame
 	var pendingEndDir Direction
 	var pendingEndDone chan struct{}
-	awaitingTTSDone := false
-	ttsFlushSent := false
+	synth := ttsSynthIdle
 	var pendingEndTimer *time.Timer
 	var pendingEndTimerC <-chan time.Time
 
@@ -259,8 +277,7 @@ func (t *TTSProcessor) orchestrator() {
 		t.firstTextReceived = false
 		t.firstSentenceSent = false
 		t.firstAudioReceived = false
-		awaitingTTSDone = false
-		ttsFlushSent = false
+		synth = ttsSynthIdle
 	}
 
 	stopPendingEndTimer := func() {
@@ -303,16 +320,15 @@ func (t *TTSProcessor) orchestrator() {
 	flushForEnd := func() {
 		if strings.TrimSpace(t.currentAggregation) != "" {
 			if t.sendTextToTTS(t.currentAggregation) {
-				awaitingTTSDone = true
-				ttsFlushSent = false
+				synth = ttsSynthStreaming
 			}
 			t.currentAggregation = ""
 		}
-		if awaitingTTSDone && !ttsFlushSent {
+		if synth == ttsSynthStreaming {
 			if t.ResetTTSContext() {
-				ttsFlushSent = true
+				synth = ttsSynthClosing
 			} else {
-				awaitingTTSDone = false
+				synth = ttsSynthIdle
 			}
 		}
 	}
@@ -326,7 +342,7 @@ func (t *TTSProcessor) orchestrator() {
 			return false
 		}
 		flushForEnd()
-		if awaitingTTSDone {
+		if synth != ttsSynthIdle {
 			pending := frame
 			pendingEnd = &pending
 			pendingEndDir = dir
@@ -393,8 +409,7 @@ func (t *TTSProcessor) orchestrator() {
 					t.metrics.Start(MetricTTFB)
 				}
 				if t.sendTextToTTS(t.currentAggregation) {
-					awaitingTTSDone = true
-					ttsFlushSent = false
+					synth = ttsSynthStreaming
 				}
 				t.currentAggregation = ""
 			}
@@ -406,15 +421,14 @@ func (t *TTSProcessor) orchestrator() {
 			}
 			if strings.TrimSpace(t.currentAggregation) != "" {
 				if t.sendTextToTTS(t.currentAggregation) {
-					awaitingTTSDone = true
-					ttsFlushSent = false
+					synth = ttsSynthStreaming
 				}
 			}
-			if awaitingTTSDone {
+			if synth == ttsSynthStreaming {
 				if t.ResetTTSContext() {
-					ttsFlushSent = true
+					synth = ttsSynthClosing
 				} else {
-					awaitingTTSDone = false
+					synth = ttsSynthIdle
 				}
 			}
 			t.currentAggregation = ""
@@ -434,14 +448,12 @@ func (t *TTSProcessor) orchestrator() {
 			t.currentContextId = fmt.Sprintf("ctx-%d", rand.IntN(9000000))
 			t.activeContextId.Store(t.currentContextId)
 			t.metrics.Start(MetricTTFB)
-			awaitingTTSDone = false
-			ttsFlushSent = false
 			if t.sendTextToTTS(f.Text) {
-				awaitingTTSDone = true
+				synth = ttsSynthStreaming
 				if t.ResetTTSContext() {
-					ttsFlushSent = true
+					synth = ttsSynthClosing
 				} else {
-					awaitingTTSDone = false
+					synth = ttsSynthIdle
 				}
 			}
 			t.PushFrame(f, cmd.dir)
@@ -467,8 +479,7 @@ func (t *TTSProcessor) orchestrator() {
 			}
 		case event := <-t.ttsEvents:
 			if t.handleTTSEvent(event) {
-				awaitingTTSDone = false
-				ttsFlushSent = false
+				synth = ttsSynthIdle
 				if forwardPendingEnd("after TTS done") {
 					return
 				}

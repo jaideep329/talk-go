@@ -292,6 +292,22 @@ loop:
 	return out
 }
 
+// waitForSeen blocks until `want` is sent on ch or timeout elapses.
+// Items not matching `want` are discarded.
+func waitForSeen(ch chan string, want string, timeout time.Duration) bool {
+	deadline := time.After(timeout)
+	for {
+		select {
+		case got := <-ch:
+			if got == want {
+				return true
+			}
+		case <-deadline:
+			return false
+		}
+	}
+}
+
 // TestBaseProcessor_InterruptPurgesProcCh verifies that data frames
 // queued in procCh during an interrupt are purged (except !IsInterruptible
 // frames like EndFrame).
@@ -316,7 +332,7 @@ func TestBaseProcessor_InterruptPurgesProcCh(t *testing.T) {
 
 	// Block ProcessFrame on the first frame
 	bp.QueueFrame(TextFrame{Text: "blocked"}, Downstream)
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(150 * time.Millisecond)
 
 	// Pile up interruptible frames; they sit in bp.procCh
 	for i := 0; i < 5; i++ {
@@ -324,12 +340,24 @@ func TestBaseProcessor_InterruptPurgesProcCh(t *testing.T) {
 	}
 	// EndFrame is !IsInterruptible and must survive the purge
 	bp.QueueFrame(EndFrame{}, Downstream)
-	// Settle window is generous to accommodate the race detector slowing
-	// down inputLoop's move of frames from inputDataCh into procCh.
-	time.Sleep(200 * time.Millisecond)
+	// Generous settle to accommodate -race slowdown of inputLoop moving
+	// frames from inputDataCh into procCh. Without this, some queued
+	// frames remain in inputDataCh when InterruptFrame arrives and are
+	// moved into procCh by the new processLoop after the purge — slipping
+	// through.
+	time.Sleep(500 * time.Millisecond)
 
-	// Trigger interrupt → cancel procCtx → blocked ProcessFrame returns
+	// Trigger interrupt → cancel procCtx → blocked ProcessFrame returns.
+	// We then wait for "interrupt" to appear in the seen channel before
+	// closing release. Otherwise, close(release) can win the race
+	// against the inputLoop dispatching the InterruptFrame: the blocked
+	// ProcessFrame unblocks via release instead of ctx.Done, processLoop
+	// continues reading from procCh, and the queued TextFrames slip
+	// through before the interrupt is ever processed.
 	bp.QueueFrame(InterruptFrame{}, Downstream)
+	if !waitForSeen(bp.seen, "interrupt", 2*time.Second) {
+		t.Fatal("InterruptFrame was not processed within 2s")
+	}
 	close(bp.release)
 
 	if err := waitForWG(fix.WG, 3*time.Second); err != nil {

@@ -7,6 +7,16 @@ import (
 	"time"
 )
 
+// Direction indicates which way a frame is travelling through the
+// pipeline. It is carried alongside each frame in an Envelope so
+// processors don't have to infer direction from frame type.
+type Direction int
+
+const (
+	Downstream Direction = iota
+	Upstream
+)
+
 // Envelope wraps a frame with its travel direction. The pipeline uses
 // envelopes inside channels so processors do not need to infer direction
 // from frame type; instead they receive (frame, direction) as arguments

@@ -7,71 +7,48 @@ import (
 	"math/rand/v2"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	lksdk "github.com/livekit/server-sdk-go/v2"
 )
 
+// Pipeline is a thin wrapper that links processors into a chain and
+// starts each one. Routing is distributed — each processor knows its
+// prev/next pointer (set by Link). There is no central Send closure.
 type Pipeline struct {
-	processors     []FrameProcessor
-	metricsHandler func(MetricsFrame)
+	processors []Processor
 }
 
-func NewPipeline(processors []FrameProcessor, metricsHandler func(MetricsFrame)) *Pipeline {
-	return &Pipeline{processors: processors, metricsHandler: metricsHandler}
+func NewPipeline(processors []Processor) *Pipeline {
+	return &Pipeline{processors: processors}
 }
 
-func (p *Pipeline) Run() {
-	n := len(p.processors)
-
-	dataChs := make([]chan Frame, n)
-	sysChs := make([]chan Frame, n)
-	for i := range n {
-		dataChs[i] = make(chan Frame, 100)
-		sysChs[i] = make(chan Frame, 100)
+// Start links neighbors and starts every processor with the given
+// parent context. Each processor derives its own b.ctx from this
+// parent, so cancelling parent cascades to all processors.
+func (p *Pipeline) Start(parent context.Context) {
+	for i := 0; i+1 < len(p.processors); i++ {
+		p.processors[i].Link(p.processors[i+1])
 	}
-
-	// Build a Send function for each processor.
-	// Downstream: route to next processor's data or system channel based on IsSystem().
-	// Upstream: route to previous processor's data channel.
-	sendFn := func(i int) func(Frame, Direction) {
-		return func(frame Frame, dir Direction) {
-			// Intercept MetricsFrames — route to handler, don't forward.
-			if mf, ok := frame.(MetricsFrame); ok {
-				if p.metricsHandler != nil {
-					p.metricsHandler(mf)
-				}
-				return
-			}
-			switch dir {
-			case Downstream:
-				if i+1 < n {
-					if frame.IsSystem() {
-						sysChs[i+1] <- frame
-					} else {
-						dataChs[i+1] <- frame
-					}
-				}
-			case Upstream:
-				if i-1 >= 0 {
-					dataChs[i-1] <- frame
-				}
-			}
-		}
-	}
-
-	for i, processor := range p.processors {
-		go processor.Process(ProcessorChannels{
-			Data:   dataChs[i],
-			System: sysChs[i],
-			Send:   sendFn(i),
-		})
+	for _, proc := range p.processors {
+		proc.Start(parent)
 	}
 }
 
-// TaskContext is the single dependency passed to all processors in a PipelineTask.
-// Ctx is the root cancellation context for the task.
-// Metrics is the handler invoked when a MetricsFrame is emitted by any processor.
-// wg is the shared WaitGroup used by BaseProcessor.Go() to track goroutines.
+// Stop signals cancellation to every processor. The actual wait for
+// their goroutines happens at the PipelineTask level via the shared
+// WaitGroup; Stop itself returns immediately.
+func (p *Pipeline) Stop() {
+	for _, proc := range p.processors {
+		proc.Stop()
+	}
+}
+
+// TaskContext is the single dependency passed to all processors in a
+// PipelineTask. Ctx is the root cancellation context for the task.
+// Metrics is the handler invoked when a MetricsFrame is emitted by any
+// processor (intercepted in BaseProcessor.PushFrame). wg is the shared
+// WaitGroup used by BaseProcessor.Go() to track goroutines.
 type TaskContext struct {
 	Ctx      context.Context
 	Logger   *log.Logger
@@ -82,13 +59,13 @@ type TaskContext struct {
 }
 
 // PipelineTask is the lifecycle owner of a single voice-call pipeline.
-// It is the Go equivalent of Pipecat's PipelineTask: it manages the chain,
-// queues lifecycle frames at the source, and runs cleanup when EndFrame
-// reaches the sink.
+// It manages the chain, queues lifecycle frames at the source, and
+// runs cleanup when EndFrame reaches the sink.
 type PipelineTask struct {
 	TaskCtx        *TaskContext
 	Cancel         context.CancelFunc
 	Source         *PipelineSourceProcessor
+	Pipeline       *Pipeline
 	RoomName       string
 	wg             sync.WaitGroup
 	endRequested   atomic.Bool
@@ -119,7 +96,8 @@ func createSession() (string, *PipelineTask) {
 	ctx, cancel := context.WithCancel(context.Background())
 	uiEvents := NewUIEventSender(logger)
 
-	// task is created first (with a zero-value WaitGroup) so taskCtx can hold a pointer to it.
+	// task is created first (with zero-value WaitGroup) so taskCtx can
+	// hold a pointer to it.
 	task := &PipelineTask{Cancel: cancel, RoomName: roomName}
 
 	metricsHandler := func(mf MetricsFrame) {
@@ -142,7 +120,7 @@ func createSession() (string, *PipelineTask) {
 	}
 	task.TaskCtx = taskCtx
 
-	pipelineSource := NewPipelineSourceProcessor(logger)
+	pipelineSource := NewPipelineSourceProcessor(taskCtx)
 	audioSource := NewAudioSourceProcessor(taskCtx)
 	taskCtx.Room = joinRoom(roomName, audioSource)
 	task.Source = pipelineSource
@@ -158,10 +136,21 @@ func createSession() (string, *PipelineTask) {
 	llmProcessor := NewLLMProcessor(taskCtx)
 	ttsProcessor := NewTTSProcessor(taskCtx)
 	playbackSink := NewPlaybackSinkProcessor(taskCtx)
-	pipelineSink := NewPipelineSinkProcessor(logger, task.completeEnd)
+	pipelineSink := NewPipelineSinkProcessor(taskCtx, task.completeEnd)
 
-	pipeline := NewPipeline([]FrameProcessor{pipelineSource, audioSource, sttProcessor, userIdle, contextAggregator, talkTimeMonitor, llmProcessor, ttsProcessor, playbackSink, pipelineSink}, metricsHandler)
-	go pipeline.Run()
+	task.Pipeline = NewPipeline([]Processor{
+		pipelineSource,
+		audioSource,
+		sttProcessor,
+		userIdle,
+		contextAggregator,
+		talkTimeMonitor,
+		llmProcessor,
+		ttsProcessor,
+		playbackSink,
+		pipelineSink,
+	})
+	task.Pipeline.Start(ctx)
 	return roomName, task
 }
 
@@ -195,10 +184,31 @@ func (t *PipelineTask) completeEnd(frame EndFrame) {
 		}
 		t.TaskCtx.Logger.Printf("EndFrame reached pipeline sink, cleaning up task: %s\n", reason)
 		t.TaskCtx.UIEvents.Send(UIEvent{Type: CallEnded, Data: map[string]interface{}{"reason": reason}})
-		t.Cancel()
+
+		// Stop signals cancellation to all processors; the actual wait happens
+		// via the shared WaitGroup below.
+		t.Pipeline.Stop()
+
+		// Disconnect the LiveKit room before waiting. AudioSource's
+		// ReadRTP doesn't respect context, so its reader only exits when
+		// the room is closed — disconnecting here unblocks it so the
+		// WaitGroup can drain.
 		if t.TaskCtx.Room != nil {
 			t.TaskCtx.Room.Disconnect()
 		}
+
+		// Bounded wait for stragglers — 10s gives TTS's 8s pending-end timeout
+		// room to fire before we hard-cancel.
+		done := make(chan struct{})
+		go func() { t.wg.Wait(); close(done) }()
+		select {
+		case <-done:
+			t.TaskCtx.Logger.Println("All processor goroutines exited cleanly")
+		case <-time.After(10 * time.Second):
+			t.TaskCtx.Logger.Println("Timed out waiting 10s for processor goroutines")
+		}
+
+		t.Cancel()
 		removeSession(t.RoomName)
 		t.TaskCtx.Logger.Printf("PipelineTask cleanup complete after EndFrame: reason=%q\n", reason)
 	})

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"sync"
@@ -20,12 +21,23 @@ type SonioxResponseMessage struct {
 }
 
 type STTProcessor struct {
+	*BaseProcessor
 	taskCtx       *TaskContext
-	websocketConn    *websocket.Conn
-	transcriptFrames chan TranscriptFrame
-	audioFrames      chan AudioFrame
-	done             chan struct{}
-	stopOnce         sync.Once
+	websocketConn *websocket.Conn
+	audioFrames   chan AudioFrame // ProcessFrame → writer goroutine
+	done          chan struct{}
+	stopOnce      sync.Once
+}
+
+func NewSTTProcessor(taskCtx *TaskContext) *STTProcessor {
+	p := &STTProcessor{
+		taskCtx:     taskCtx,
+		audioFrames: make(chan AudioFrame, 100),
+		done:        make(chan struct{}),
+	}
+	p.BaseProcessor = NewBaseProcessor("STT", p, taskCtx)
+	p.connect()
+	return p
 }
 
 func (s *STTProcessor) connect() bool {
@@ -65,15 +77,10 @@ func (s *STTProcessor) connect() bool {
 	}
 }
 
-func NewSTTProcessor(taskCtx *TaskContext) *STTProcessor {
-	p := &STTProcessor{
-		taskCtx:       taskCtx,
-		transcriptFrames: make(chan TranscriptFrame, 100),
-		audioFrames:      make(chan AudioFrame, 100),
-		done:             make(chan struct{}),
-	}
-	p.connect()
-	return p
+func (s *STTProcessor) Start(ctx context.Context) {
+	s.BaseProcessor.Start(ctx)
+	s.Go(s.readSTTWebsocket)
+	s.Go(s.writeAudioWebsocket)
 }
 
 func (s *STTProcessor) stop() {
@@ -127,12 +134,7 @@ func (s *STTProcessor) readSTTWebsocket() {
 
 		for _, token := range resp.Tokens {
 			s.taskCtx.Logger.Printf("STT token received: response_id=%d finished=%v is_final=%v text=%q\n", responseID, resp.Finished, token.IsFinal, token.Text)
-			select {
-			case <-s.done:
-				s.taskCtx.Logger.Println("STT reader exiting: processor ended")
-				return
-			case s.transcriptFrames <- TranscriptFrame{Text: token.Text, IsFinal: token.IsFinal, ResponseID: responseID, Finished: resp.Finished}:
-			}
+			s.PushFrame(TranscriptFrame{Text: token.Text, IsFinal: token.IsFinal, ResponseID: responseID, Finished: resp.Finished}, Downstream)
 		}
 	}
 }
@@ -159,34 +161,18 @@ func (s *STTProcessor) writeAudioWebsocket() {
 	}
 }
 
-func (p *STTProcessor) Process(ch ProcessorChannels) {
-	go p.readSTTWebsocket()
-	go p.writeAudioWebsocket()
-	for {
+func (s *STTProcessor) ProcessFrame(ctx context.Context, frame Frame, dir Direction) {
+	switch f := frame.(type) {
+	case AudioFrame:
 		select {
-		case frame := <-ch.System:
-			ch.Send(frame, Downstream)
-		case frame, ok := <-ch.Data:
-			if !ok {
-				return
-			}
-			switch f := frame.(type) {
-			case AudioFrame:
-				select {
-				case <-p.done:
-					return
-				case p.audioFrames <- f:
-				}
-			case EndFrame:
-				p.taskCtx.Logger.Printf("EndFrame at STTProcessor data path, forwarding downstream and stopping STT: reason=%q\n", f.Reason)
-				ch.Send(f, Downstream)
-				p.stop()
-				return
-			default:
-				p.taskCtx.Logger.Printf("STT received unexpected frame: %T\n", f)
-			}
-		case frame := <-p.transcriptFrames:
-			ch.Send(frame, Downstream)
+		case <-s.done:
+		case s.audioFrames <- f:
 		}
+	case EndFrame:
+		s.taskCtx.Logger.Printf("EndFrame at STTProcessor, forwarding downstream and stopping STT: reason=%q\n", f.Reason)
+		s.PushFrame(f, dir)
+		s.stop()
+	default:
+		s.PushFrame(frame, dir)
 	}
 }

@@ -1,11 +1,15 @@
 package main
 
-import "strings"
+import (
+	"context"
+	"strings"
+)
 
 const minBargeInWords = 3
 
 type ContextAggregator struct {
-	taskCtx        *TaskContext
+	*BaseProcessor
+	taskCtx           *TaskContext
 	messages          []map[string]string
 	currentTranscript string
 	spokenWords       []string
@@ -16,10 +20,12 @@ type ContextAggregator struct {
 }
 
 func NewContextAggregator(taskCtx *TaskContext) *ContextAggregator {
-	return &ContextAggregator{
-		taskCtx: taskCtx,
-		messages:   []map[string]string{},
+	a := &ContextAggregator{
+		taskCtx:  taskCtx,
+		messages: []map[string]string{},
 	}
+	a.BaseProcessor = NewBaseProcessor("ContextAggregator", a, taskCtx)
+	return a
 }
 
 func (a *ContextAggregator) appendWords(words []string) {
@@ -123,7 +129,7 @@ func (a *ContextAggregator) addUserMessage(text string) {
 	}
 }
 
-func (a *ContextAggregator) submitUserMessage(text string, ch ProcessorChannels) {
+func (a *ContextAggregator) submitUserMessage(text string) {
 	a.taskCtx.Logger.Printf("Final transcript received: %s\n", text)
 	if len(a.messages) == 0 {
 		a.messages = append(a.messages, map[string]string{"role": "system", "content": `You are an expert health coach named Disha. You have deep experience in chronic care management and behavioral change. You are a master influencer and help the users achieve their health goals with the power of conversation.
@@ -136,68 +142,55 @@ You are conducting your first telephonic consultation with a new client. You are
 	a.spokenWords = nil
 	a.resetInterimTranscript()
 	a.resetFinalTranscript()
-	ch.Send(LLMMessagesFrame{Messages: a.messages}, Downstream)
+	a.PushFrame(LLMMessagesFrame{Messages: a.messages}, Downstream)
 }
 
-func (a *ContextAggregator) Process(ch ProcessorChannels) {
-	for {
-		select {
-		case frame := <-ch.System:
-			ch.Send(frame, Downstream)
-		case frame, ok := <-ch.Data:
-			if !ok {
-				return
-			}
-			switch f := frame.(type) {
-			case EndFrame:
-				a.taskCtx.Logger.Printf("EndFrame at ContextAggregator data path, forwarding downstream: reason=%q\n", f.Reason)
-				ch.Send(f, Downstream)
-				return
-			case TranscriptFrame:
-				interimTranscript := a.updateInterimTranscript(f)
+func (a *ContextAggregator) ProcessFrame(ctx context.Context, frame Frame, dir Direction) {
+	switch f := frame.(type) {
+	case EndFrame:
+		a.taskCtx.Logger.Printf("EndFrame at ContextAggregator: reason=%q\n", f.Reason)
+		a.PushFrame(f, dir)
+	case TranscriptFrame:
+		interimTranscript := a.updateInterimTranscript(f)
 
-				// Barge-in uses the latest non-final response snapshot only.
-				// Turn-taking waits for final tokens ending with <end>.
-				if a.botSpeaking && !a.interruptSent && !f.IsFinal {
-					if len(strings.Fields(interimTranscript)) >= minBargeInWords {
-						a.taskCtx.Logger.Println("Barge-in detected")
-						ch.Send(InterruptFrame{}, Downstream)
-						a.interruptSent = true
-						a.botSpeaking = false
-						a.commitSpokenText(true)
-					}
-				}
-				if text, finished := a.updateFinalTranscript(f); finished {
-					if text != "" {
-						if a.botSpeaking && !a.interruptSent {
-							// Bot speaking, below barge-in threshold — discard.
-							// Matches Pipecat: short utterances during bot speech
-							// are acknowledgments, not intentional turns.
-							a.taskCtx.Logger.Printf("Discarding below-threshold transcript (bot speaking): %s\n", text)
-							a.resetInterimTranscript()
-						} else {
-							a.submitUserMessage(text, ch)
-						}
-					}
-				}
-				// Upstream frames from LLM (originally from PlaybackSink via TTS)
-			case WordTimestampFrame:
-				a.appendWords(f.Words)
-			case TTSDoneFrame:
-				a.commitSpokenText(false)
+		// Barge-in uses the latest non-final response snapshot only.
+		// Turn-taking waits for final tokens ending with <end>.
+		if a.botSpeaking && !a.interruptSent && !f.IsFinal {
+			if len(strings.Fields(interimTranscript)) >= minBargeInWords {
+				a.taskCtx.Logger.Println("Barge-in detected")
+				a.PushFrame(InterruptFrame{}, Downstream)
+				a.interruptSent = true
 				a.botSpeaking = false
-			case BotStartedSpeakingFrame:
-				a.botSpeaking = true
-				ch.Send(f, Upstream) // to UserIdleProcessor
-			case BotStoppedSpeakingFrame:
-				a.botSpeaking = false
-				ch.Send(f, Upstream) // to UserIdleProcessor
-			// Pass-through
-			case TTSSpeakFrame:
-				ch.Send(f, Downstream)
-			default:
-				ch.Send(f, Downstream)
+				a.commitSpokenText(true)
 			}
 		}
+		if text, finished := a.updateFinalTranscript(f); finished {
+			if text != "" {
+				if a.botSpeaking && !a.interruptSent {
+					// Bot speaking, below barge-in threshold — discard.
+					// Matches Pipecat: short utterances during bot speech are
+					// acknowledgments, not intentional turns.
+					a.taskCtx.Logger.Printf("Discarding below-threshold transcript (bot speaking): %s\n", text)
+					a.resetInterimTranscript()
+				} else {
+					a.submitUserMessage(text)
+				}
+			}
+		}
+	case WordTimestampFrame:
+		// Upstream — record what the bot has actually spoken.
+		a.appendWords(f.Words)
+	case TTSDoneFrame:
+		// Upstream — turn finished cleanly, commit assistant message.
+		a.commitSpokenText(false)
+		a.botSpeaking = false
+	case BotStartedSpeakingFrame:
+		a.botSpeaking = true
+		a.PushFrame(f, dir) // continue upstream to UserIdle
+	case BotStoppedSpeakingFrame:
+		a.botSpeaking = false
+		a.PushFrame(f, dir) // continue upstream to UserIdle
+	default:
+		a.PushFrame(frame, dir)
 	}
 }

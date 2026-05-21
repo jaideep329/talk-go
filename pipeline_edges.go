@@ -50,6 +50,13 @@ func (p *PipelineSourceProcessor) drainExternalFrames() {
 			}
 			p.PushFrame(f, Downstream)
 			if _, isEnd := f.(EndFrame); isEnd {
+				// EndFrame is the last frame this processor will emit.
+				// Cancel b.ctx so the base's inputLoop and processLoop
+				// exit too (they have no other shutdown signal because
+				// EndFrame doesn't reach them via neighbors here).
+				if p.cancel != nil {
+					p.cancel()
+				}
 				return
 			}
 		}

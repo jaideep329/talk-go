@@ -20,11 +20,17 @@ type SonioxResponseMessage struct {
 	Finished bool          `json:"finished"`
 }
 
+// sttDialURL is the Soniox websocket endpoint. Exposed as a package
+// variable so tests can override it to point at an unreachable URL
+// and avoid actually dialing Soniox.
+var sttDialURL = "wss://stt-rt.soniox.com/transcribe-websocket"
+
 type STTProcessor struct {
 	*BaseProcessor
 	taskCtx       *TaskContext
 	websocketConn *websocket.Conn
 	audioFrames   chan AudioFrame // ProcessFrame → writer goroutine
+	connected     chan struct{}   // closed when websocketConn is established
 	done          chan struct{}
 	stopOnce      sync.Once
 }
@@ -33,13 +39,16 @@ func NewSTTProcessor(taskCtx *TaskContext) *STTProcessor {
 	p := &STTProcessor{
 		taskCtx:     taskCtx,
 		audioFrames: make(chan AudioFrame, 100),
+		connected:   make(chan struct{}),
 		done:        make(chan struct{}),
 	}
 	p.BaseProcessor = NewBaseProcessor("STT", p, taskCtx)
-	p.connect()
 	return p
 }
 
+// connect dials Soniox in a retry loop and writes the initial config
+// message. Returns true once a usable connection is established, false
+// if shutdown was requested first.
 func (s *STTProcessor) connect() bool {
 	for {
 		select {
@@ -47,12 +56,16 @@ func (s *STTProcessor) connect() bool {
 			return false
 		case <-s.taskCtx.Ctx.Done():
 			return false
+		case <-s.ctx.Done():
+			return false
 		default:
 		}
-		conn, _, err := websocket.DefaultDialer.Dial("wss://stt-rt.soniox.com/transcribe-websocket", nil)
+		conn, _, err := websocket.DefaultDialer.Dial(sttDialURL, nil)
 		if err != nil {
 			s.taskCtx.Logger.Printf("STT websocket connect failed: %v, retrying in 1s...", err)
-			time.Sleep(time.Second)
+			if !s.sleepOrExit(time.Second) {
+				return false
+			}
 			continue
 		}
 		config := map[string]interface{}{
@@ -68,7 +81,9 @@ func (s *STTProcessor) connect() bool {
 		if err := conn.WriteJSON(config); err != nil {
 			s.taskCtx.Logger.Printf("STT config send failed: %v, retrying in 1s...", err)
 			conn.Close()
-			time.Sleep(time.Second)
+			if !s.sleepOrExit(time.Second) {
+				return false
+			}
 			continue
 		}
 		s.websocketConn = conn
@@ -77,10 +92,35 @@ func (s *STTProcessor) connect() bool {
 	}
 }
 
+// sleepOrExit sleeps for d, returning false if shutdown was requested
+// before the sleep completed.
+func (s *STTProcessor) sleepOrExit(d time.Duration) bool {
+	select {
+	case <-s.done:
+		return false
+	case <-s.taskCtx.Ctx.Done():
+		return false
+	case <-s.ctx.Done():
+		return false
+	case <-time.After(d):
+		return true
+	}
+}
+
 func (s *STTProcessor) Start(ctx context.Context) {
 	s.BaseProcessor.Start(ctx)
-	s.Go(s.readSTTWebsocket)
+	s.Go(s.runReader)
 	s.Go(s.writeAudioWebsocket)
+}
+
+// runReader connects to Soniox, signals readiness, and then reads
+// transcripts until shutdown. Spawned in a Go-tracked goroutine.
+func (s *STTProcessor) runReader() {
+	if !s.connect() {
+		return
+	}
+	close(s.connected)
+	s.readSTTWebsocket()
 }
 
 func (s *STTProcessor) stop() {
@@ -140,6 +180,14 @@ func (s *STTProcessor) readSTTWebsocket() {
 }
 
 func (s *STTProcessor) writeAudioWebsocket() {
+	// Wait for the reader's connect() to succeed before sending audio.
+	select {
+	case <-s.connected:
+	case <-s.done:
+		return
+	case <-s.taskCtx.Ctx.Done():
+		return
+	}
 	for {
 		select {
 		case <-s.done:

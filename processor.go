@@ -120,11 +120,23 @@ type BaseProcessor struct {
 // NewBaseProcessor constructs a BaseProcessor. The self parameter must
 // be the outer struct that embeds *BaseProcessor; it is used to dispatch
 // ProcessFrame and to set bidirectional prev/next links.
+//
+// The per-processor ctx is derived from taskCtx.Ctx at construction
+// time (not in Start) so that QueueFrame, PushFrame, and Stop can read
+// b.ctx safely from other goroutines without a data race against Start.
+// b.cancel is also wired now, so Stop is safe to call before Start.
 func NewBaseProcessor(name string, self Processor, taskCtx *TaskContext) *BaseProcessor {
+	parent := context.Background()
+	if taskCtx != nil && taskCtx.Ctx != nil {
+		parent = taskCtx.Ctx
+	}
+	ctx, cancel := context.WithCancel(parent)
 	return &BaseProcessor{
 		name:        name,
 		self:        self,
 		taskCtx:     taskCtx,
+		ctx:         ctx,
+		cancel:      cancel,
 		inputSysCh:  make(chan Envelope, inputSysChCapacity),
 		inputDataCh: make(chan Envelope, inputDataChCapacity),
 		procCh:      make(chan Envelope, procChCapacity),
@@ -177,12 +189,6 @@ func (b *BaseProcessor) QueueFrame(frame Frame, dir Direction) {
 	if frame.IsSystem() {
 		target = b.inputSysCh
 	}
-	if b.ctx == nil {
-		// Start has not run yet (typical only in tests). Block on the
-		// channel without ctx; capacity is bounded so this cannot leak.
-		target <- Envelope{Frame: frame, Direction: dir}
-		return
-	}
 	select {
 	case target <- Envelope{Frame: frame, Direction: dir}:
 	case <-b.ctx.Done():
@@ -224,11 +230,15 @@ func (b *BaseProcessor) Broadcast(frame BroadcastableFrame) {
 // Start begins the input and process loops. Concrete processors that
 // need their own background goroutines should call BaseProcessor.Start
 // first, then b.Go(...) to register them.
-func (b *BaseProcessor) Start(parent context.Context) {
+//
+// b.ctx and b.cancel were initialised in NewBaseProcessor from
+// taskCtx.Ctx, so the parent passed here is currently unused. Keeping
+// the parameter preserves API symmetry with PipelineTask.Start, where
+// a future per-task overriding context might be useful.
+func (b *BaseProcessor) Start(_ context.Context) {
 	if !b.started.CompareAndSwap(false, true) {
 		return
 	}
-	b.ctx, b.cancel = context.WithCancel(parent)
 	b.startProcessLoop()
 	b.Go(b.inputLoop)
 }
@@ -236,14 +246,12 @@ func (b *BaseProcessor) Start(parent context.Context) {
 // Stop signals cancellation to every goroutine in this processor's
 // tree. The actual wait for goroutines to exit happens at the
 // PipelineTask level via the shared WaitGroup; Stop itself returns
-// immediately.
+// immediately. Stop is idempotent and safe to call before Start.
 func (b *BaseProcessor) Stop() {
 	if !b.cancelling.CompareAndSwap(false, true) {
 		return
 	}
-	if b.cancel != nil {
-		b.cancel()
-	}
+	b.cancel()
 }
 
 // inputLoop drains inputSysCh + inputDataCh with system-frame priority.
@@ -300,8 +308,20 @@ func (b *BaseProcessor) startProcessLoop() {
 // after the user's ProcessFrame handler for an EndFrame returns; on
 // EndFrame the base cancels the per-processor ctx so the input loop
 // and any user-spawned goroutines also unwind.
+//
+// The non-blocking ctx.Done check at the top of each iteration matters
+// for correctness during cancel-and-recreate: after an in-flight
+// ProcessFrame returns due to ctx cancellation, Go's `select` would
+// pick randomly between ctx.Done and a non-empty procCh. The priority
+// check guarantees we exit instead of consuming more frames that
+// interruptProcessLoop is about to purge.
 func (b *BaseProcessor) processLoop(ctx context.Context) {
 	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
 		select {
 		case <-ctx.Done():
 			return

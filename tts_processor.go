@@ -59,6 +59,11 @@ type ttsCommand struct {
 	done  chan struct{}
 }
 
+// ttsDialURL is the Cartesia websocket endpoint base. The API key is
+// appended at dial time. Exposed as a package variable so tests can
+// override it.
+var ttsDialURL = "wss://api.cartesia.ai/tts/websocket?cartesia_version=2025-04-16&api_key="
+
 // TTSProcessor wraps Cartesia. After migration its shape is:
 //
 //   - readTTSConnectionData goroutine: reads from the websocket, parses
@@ -99,6 +104,7 @@ type TTSProcessor struct {
 	// Channels
 	commands  chan ttsCommand
 	ttsEvents chan ttsEvent
+	connected chan struct{} // closed when websocketConn is established
 	done      chan struct{}
 
 	websocketConn *websocket.Conn
@@ -151,17 +157,27 @@ func NewTTSProcessor(taskCtx *TaskContext) *TTSProcessor {
 		opusEncoder: opusEncoder,
 		commands:    make(chan ttsCommand, 100),
 		ttsEvents:   make(chan ttsEvent, 100),
+		connected:   make(chan struct{}),
 		done:        make(chan struct{}),
 	}
 	t.BaseProcessor = NewBaseProcessor("TTS", t, taskCtx)
-	t.connect()
 	return t
 }
 
 func (t *TTSProcessor) Start(ctx context.Context) {
 	t.BaseProcessor.Start(ctx)
-	t.Go(t.readTTSConnectionData)
+	t.Go(t.runReader)
 	t.Go(t.orchestrator)
+}
+
+// runReader connects to Cartesia, signals readiness, and then reads
+// messages until shutdown. Spawned in a Go-tracked goroutine.
+func (t *TTSProcessor) runReader() {
+	if !t.connect() {
+		return
+	}
+	close(t.connected)
+	t.readTTSConnectionData()
 }
 
 // ProcessFrame relays frames to the orchestrator. EndFrame blocks until
@@ -207,7 +223,24 @@ func (t *TTSProcessor) ProcessFrame(ctx context.Context, frame Frame, dir Direct
 // original Process loop's switch structure, but reads commands from a
 // dedicated channel (relayed by ProcessFrame) instead of from
 // ProcessorChannels.
+//
+// The orchestrator waits for runReader to establish the Cartesia
+// connection before processing any command. This avoids racing on
+// t.websocketConn (the reader goroutine writes it; orchestrator
+// methods like sendTextToTTS read it). Commands queued during the
+// pre-connect window sit in t.commands (capacity 100). If shutdown is
+// requested before connect succeeds, orchestrator exits via ctx.Done
+// and any ProcessFrame caller blocked on a command's done channel
+// unblocks via its own per-frame ctx (procCtx, derived from b.ctx).
 func (t *TTSProcessor) orchestrator() {
+	select {
+	case <-t.connected:
+	case <-t.ctx.Done():
+		return
+	case <-t.done:
+		return
+	}
+
 	var pendingEnd *EndFrame
 	var pendingEndDir Direction
 	var pendingEndDone chan struct{}
@@ -619,16 +652,35 @@ func (t *TTSProcessor) connect() bool {
 			return false
 		case <-t.taskCtx.Ctx.Done():
 			return false
+		case <-t.ctx.Done():
+			return false
 		default:
 		}
-		conn, _, err := websocket.DefaultDialer.Dial("wss://api.cartesia.ai/tts/websocket?cartesia_version=2025-04-16&api_key="+os.Getenv("CARTESIA_API_KEY"), nil)
+		conn, _, err := websocket.DefaultDialer.Dial(ttsDialURL+os.Getenv("CARTESIA_API_KEY"), nil)
 		if err != nil {
 			t.taskCtx.Logger.Printf("TTS websocket connect failed: %v, retrying in 1s...", err)
-			time.Sleep(time.Second)
+			if !t.sleepOrExit(time.Second) {
+				return false
+			}
 			continue
 		}
 		t.websocketConn = conn
 		t.taskCtx.Logger.Println("TTS websocket connected")
+		return true
+	}
+}
+
+// sleepOrExit sleeps for d, returning false if shutdown was requested
+// before the sleep completed.
+func (t *TTSProcessor) sleepOrExit(d time.Duration) bool {
+	select {
+	case <-t.done:
+		return false
+	case <-t.taskCtx.Ctx.Done():
+		return false
+	case <-t.ctx.Done():
+		return false
+	case <-time.After(d):
 		return true
 	}
 }

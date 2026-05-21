@@ -12,6 +12,10 @@ import (
 	"time"
 )
 
+// llmEndpoint is the OpenAI Chat Completions URL. Exposed as a package
+// variable so tests can override it to point at an httptest server.
+var llmEndpoint = "https://api.openai.com/v1/chat/completions"
+
 type LLMProcessor struct {
 	*BaseProcessor
 	taskCtx   *TaskContext
@@ -78,7 +82,7 @@ func (p *LLMProcessor) runLLM(ctx context.Context, messages []map[string]string)
 		return
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", "https://api.openai.com/v1/chat/completions", bytes.NewReader(jsonBody))
+	req, err := http.NewRequestWithContext(ctx, "POST", llmEndpoint, bytes.NewReader(jsonBody))
 	if err != nil {
 		p.taskCtx.Logger.Println("request error:", err)
 		return

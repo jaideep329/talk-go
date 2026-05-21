@@ -69,10 +69,12 @@ type TranscriptFrame struct {
 func (f TranscriptFrame) FrameType() FrameType { return Transcript }
 func (f TranscriptFrame) IsSystem() bool       { return false }
 
-type EndFrame struct{}
+type EndFrame struct {
+	Reason string
+}
 
 func (f EndFrame) FrameType() FrameType { return End }
-func (f EndFrame) IsSystem() bool       { return true }
+func (f EndFrame) IsSystem() bool       { return false }
 
 type WordTimestampFrame struct {
 	Words []string

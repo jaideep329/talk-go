@@ -112,9 +112,6 @@ func (p *LLMProcessor) Process(ch ProcessorChannels) {
 				p.metrics.Reset()
 				p.isStreaming = false
 				ch.Send(frame, Downstream) // propagate to TTS/PlaybackSink
-			case EndFrame:
-				ch.Send(frame, Downstream)
-				return
 			}
 		default:
 			select {
@@ -127,15 +124,21 @@ func (p *LLMProcessor) Process(ch ProcessorChannels) {
 					p.metrics.Reset()
 					p.isStreaming = false
 					ch.Send(frame, Downstream)
-				case EndFrame:
-					ch.Send(frame, Downstream)
-					return
 				}
 			case frame, ok := <-ch.Data:
 				if !ok {
 					return
 				}
 				switch f := frame.(type) {
+				case EndFrame:
+					p.sessionCtx.Logger.Printf("EndFrame at LLMProcessor data path, cancelling LLM and forwarding downstream: reason=%q\n", f.Reason)
+					if p.cancelLLM != nil {
+						p.cancelLLM()
+					}
+					p.metrics.Reset()
+					p.isStreaming = false
+					ch.Send(f, Downstream)
+					return
 				case LLMMessagesFrame:
 					ctx, cancel := context.WithCancel(context.Background())
 					p.cancelLLM = cancel

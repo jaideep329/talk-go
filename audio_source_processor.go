@@ -45,7 +45,12 @@ func (a *AudioSourceProcessor) readAudioTrack(track *webrtc.TrackRemote) {
 			binary.LittleEndian.PutUint16(pcmBytes[i*2:], uint16(pcmBuf[i]))
 		}
 
-		a.audioFrames <- AudioFrame{Data: pcmBytes}
+		select {
+		case <-a.sessionCtx.Ctx.Done():
+			a.sessionCtx.Logger.Println("audio source reader exiting: session closed")
+			return
+		case a.audioFrames <- AudioFrame{Data: pcmBytes}:
+		}
 	}
 }
 
@@ -54,7 +59,24 @@ func (a *AudioSourceProcessor) SetTrack(track *webrtc.TrackRemote) {
 }
 
 func (a *AudioSourceProcessor) Process(ch ProcessorChannels) {
-	for frame := range a.audioFrames {
-		ch.Send(frame, Downstream)
+	for {
+		select {
+		case frame := <-ch.System:
+			ch.Send(frame, Downstream)
+		case frame, ok := <-ch.Data:
+			if !ok {
+				return
+			}
+			switch f := frame.(type) {
+			case EndFrame:
+				a.sessionCtx.Logger.Printf("EndFrame at AudioSourceProcessor, forwarding downstream: reason=%q\n", f.Reason)
+				ch.Send(f, Downstream)
+				return
+			default:
+				a.sessionCtx.Logger.Printf("AudioSource received unexpected frame: %T\n", f)
+			}
+		case frame := <-a.audioFrames:
+			ch.Send(frame, Downstream)
+		}
 	}
 }

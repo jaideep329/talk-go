@@ -12,16 +12,16 @@ import (
 )
 
 type LLMProcessor struct {
-	sessionCtx     *SessionContext
+	taskCtx     *TaskContext
 	metrics        *ProcessorMetrics
 	isStreaming    bool
 	cancelLLM      context.CancelFunc
 	responseFrames chan Frame
 }
 
-func NewLLMProcessor(sessionCtx *SessionContext) *LLMProcessor {
+func NewLLMProcessor(taskCtx *TaskContext) *LLMProcessor {
 	return &LLMProcessor{
-		sessionCtx:     sessionCtx,
+		taskCtx:     taskCtx,
 		metrics:        NewProcessorMetrics("llm"),
 		responseFrames: make(chan Frame, 100),
 	}
@@ -35,13 +35,13 @@ func (p *LLMProcessor) runLLM(ctx context.Context, messages []map[string]string)
 	}
 	jsonBody, err := json.Marshal(body)
 	if err != nil {
-		p.sessionCtx.Logger.Println("json marshal error:", err)
+		p.taskCtx.Logger.Println("json marshal error:", err)
 		return
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST", "https://api.openai.com/v1/chat/completions", bytes.NewReader(jsonBody))
 	if err != nil {
-		p.sessionCtx.Logger.Println("request error:", err)
+		p.taskCtx.Logger.Println("request error:", err)
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
@@ -51,7 +51,7 @@ func (p *LLMProcessor) runLLM(ctx context.Context, messages []map[string]string)
 	p.responseFrames <- LLMResponseStartFrame{StartedAt: time.Now()}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		p.sessionCtx.Logger.Println("LLM request failed:", err)
+		p.taskCtx.Logger.Println("LLM request failed:", err)
 		return
 	}
 	defer resp.Body.Close()
@@ -131,7 +131,7 @@ func (p *LLMProcessor) Process(ch ProcessorChannels) {
 				}
 				switch f := frame.(type) {
 				case EndFrame:
-					p.sessionCtx.Logger.Printf("EndFrame at LLMProcessor data path, cancelling LLM and forwarding downstream: reason=%q\n", f.Reason)
+					p.taskCtx.Logger.Printf("EndFrame at LLMProcessor data path, cancelling LLM and forwarding downstream: reason=%q\n", f.Reason)
 					if p.cancelLLM != nil {
 						p.cancelLLM()
 					}
@@ -157,7 +157,7 @@ func (p *LLMProcessor) Process(ch ProcessorChannels) {
 				case BotStoppedSpeakingFrame:
 					ch.Send(f, Upstream)
 				default:
-					p.sessionCtx.Logger.Printf("LLM received unexpected frame: %T\n", f)
+					p.taskCtx.Logger.Printf("LLM received unexpected frame: %T\n", f)
 				}
 			case responseFrame := <-p.responseFrames:
 				switch responseFrame.(type) {

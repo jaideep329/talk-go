@@ -5,7 +5,7 @@ import "strings"
 const minBargeInWords = 3
 
 type ContextAggregator struct {
-	sessionCtx        *SessionContext
+	taskCtx        *TaskContext
 	messages          []map[string]string
 	currentTranscript string
 	spokenWords       []string
@@ -15,9 +15,9 @@ type ContextAggregator struct {
 	botSpeaking       bool
 }
 
-func NewContextAggregator(sessionCtx *SessionContext) *ContextAggregator {
+func NewContextAggregator(taskCtx *TaskContext) *ContextAggregator {
 	return &ContextAggregator{
-		sessionCtx: sessionCtx,
+		taskCtx: taskCtx,
 		messages:   []map[string]string{},
 	}
 }
@@ -51,10 +51,10 @@ func (a *ContextAggregator) resetInterimTranscript() {
 }
 
 func (a *ContextAggregator) sendLiveTranscript(text string) {
-	if a.sessionCtx == nil || a.sessionCtx.UIEvents == nil {
+	if a.taskCtx == nil || a.taskCtx.UIEvents == nil {
 		return
 	}
-	a.sessionCtx.UIEvents.Send(UIEvent{Type: LiveTranscript, Data: map[string]interface{}{"text": text}})
+	a.taskCtx.UIEvents.Send(UIEvent{Type: LiveTranscript, Data: map[string]interface{}{"text": text}})
 }
 
 func (a *ContextAggregator) updateInterimTranscript(f TranscriptFrame) string {
@@ -96,11 +96,11 @@ func (a *ContextAggregator) updateFinalTranscript(f TranscriptFrame) (string, bo
 func (a *ContextAggregator) commitSpokenText(interrupted bool) {
 	spoken := a.spokenSoFar()
 	if spoken != "" {
-		a.sessionCtx.Logger.Printf("Committing to history (interrupted=%v): %s\n", interrupted, spoken)
+		a.taskCtx.Logger.Printf("Committing to history (interrupted=%v): %s\n", interrupted, spoken)
 		a.messages = append(a.messages, map[string]string{"role": "assistant", "content": spoken})
-		a.sessionCtx.UIEvents.Send(UIEvent{Type: CommittedAssistant, Data: map[string]interface{}{"role": "assistant", "text": spoken}})
+		a.taskCtx.UIEvents.Send(UIEvent{Type: CommittedAssistant, Data: map[string]interface{}{"role": "assistant", "text": spoken}})
 	} else if interrupted {
-		a.sessionCtx.Logger.Println("Barge-in interrupted bot before any assistant words were committed")
+		a.taskCtx.Logger.Println("Barge-in interrupted bot before any assistant words were committed")
 	}
 }
 
@@ -115,16 +115,16 @@ func (a *ContextAggregator) addUserMessage(text string) {
 	if a.lastMessageRole() == "user" {
 		last := a.messages[len(a.messages)-1]
 		last["content"] += " " + text
-		a.sessionCtx.Logger.Printf("Concatenated user message: %s\n", last["content"])
-		a.sessionCtx.UIEvents.Send(UIEvent{Type: UserTranscript, Data: map[string]interface{}{"role": "user", "text": last["content"], "is_final": true}})
+		a.taskCtx.Logger.Printf("Concatenated user message: %s\n", last["content"])
+		a.taskCtx.UIEvents.Send(UIEvent{Type: UserTranscript, Data: map[string]interface{}{"role": "user", "text": last["content"], "is_final": true}})
 	} else {
 		a.messages = append(a.messages, map[string]string{"role": "user", "content": text})
-		a.sessionCtx.UIEvents.Send(UIEvent{Type: UserTranscript, Data: map[string]interface{}{"role": "user", "text": text, "is_final": true}})
+		a.taskCtx.UIEvents.Send(UIEvent{Type: UserTranscript, Data: map[string]interface{}{"role": "user", "text": text, "is_final": true}})
 	}
 }
 
 func (a *ContextAggregator) submitUserMessage(text string, ch ProcessorChannels) {
-	a.sessionCtx.Logger.Printf("Final transcript received: %s\n", text)
+	a.taskCtx.Logger.Printf("Final transcript received: %s\n", text)
 	if len(a.messages) == 0 {
 		a.messages = append(a.messages, map[string]string{"role": "system", "content": `You are an expert health coach named Disha. You have deep experience in chronic care management and behavioral change. You are a master influencer and help the users achieve their health goals with the power of conversation.
 You have been trained by master clinicians at a company called Curelink.
@@ -150,7 +150,7 @@ func (a *ContextAggregator) Process(ch ProcessorChannels) {
 			}
 			switch f := frame.(type) {
 			case EndFrame:
-				a.sessionCtx.Logger.Printf("EndFrame at ContextAggregator data path, forwarding downstream: reason=%q\n", f.Reason)
+				a.taskCtx.Logger.Printf("EndFrame at ContextAggregator data path, forwarding downstream: reason=%q\n", f.Reason)
 				ch.Send(f, Downstream)
 				return
 			case TranscriptFrame:
@@ -160,7 +160,7 @@ func (a *ContextAggregator) Process(ch ProcessorChannels) {
 				// Turn-taking waits for final tokens ending with <end>.
 				if a.botSpeaking && !a.interruptSent && !f.IsFinal {
 					if len(strings.Fields(interimTranscript)) >= minBargeInWords {
-						a.sessionCtx.Logger.Println("Barge-in detected")
+						a.taskCtx.Logger.Println("Barge-in detected")
 						ch.Send(InterruptFrame{}, Downstream)
 						a.interruptSent = true
 						a.botSpeaking = false
@@ -173,7 +173,7 @@ func (a *ContextAggregator) Process(ch ProcessorChannels) {
 							// Bot speaking, below barge-in threshold — discard.
 							// Matches Pipecat: short utterances during bot speech
 							// are acknowledgments, not intentional turns.
-							a.sessionCtx.Logger.Printf("Discarding below-threshold transcript (bot speaking): %s\n", text)
+							a.taskCtx.Logger.Printf("Discarding below-threshold transcript (bot speaking): %s\n", text)
 							a.resetInterimTranscript()
 						} else {
 							a.submitUserMessage(text, ch)

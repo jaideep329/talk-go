@@ -21,7 +21,7 @@ const (
 )
 
 type PlaybackSinkProcessor struct {
-	sessionCtx      *SessionContext
+	taskCtx      *TaskContext
 	botTrack        *lksdk.LocalSampleTrack
 	metrics         *ProcessorMetrics
 	interrupted     bool
@@ -65,36 +65,36 @@ func loadBackgroundPCM(path string, logger interface{ Printf(string, ...interfac
 	return mono
 }
 
-func NewPlaybackSinkProcessor(sessionCtx *SessionContext) *PlaybackSinkProcessor {
+func NewPlaybackSinkProcessor(taskCtx *TaskContext) *PlaybackSinkProcessor {
 	botTrack, err := lksdk.NewLocalSampleTrack(webrtc.RTPCodecCapability{
 		MimeType:  webrtc.MimeTypeOpus,
 		ClockRate: 48000,
 		Channels:  2,
 	})
 	if err != nil {
-		sessionCtx.Logger.Fatal("failed to create local track:", err)
+		taskCtx.Logger.Fatal("failed to create local track:", err)
 	}
-	_, err = sessionCtx.Room.LocalParticipant.PublishTrack(botTrack, &lksdk.TrackPublicationOptions{
+	_, err = taskCtx.Room.LocalParticipant.PublishTrack(botTrack, &lksdk.TrackPublicationOptions{
 		Name: "bot-audio",
 	})
 	if err != nil {
-		sessionCtx.Logger.Fatal("failed to publish track:", err)
+		taskCtx.Logger.Fatal("failed to publish track:", err)
 	}
-	sessionCtx.Logger.Println("Published bot audio track")
+	taskCtx.Logger.Println("Published bot audio track")
 
 	opusDec, err := opus.NewDecoder(24000, 1)
 	if err != nil {
-		sessionCtx.Logger.Fatal("failed to create opus decoder:", err)
+		taskCtx.Logger.Fatal("failed to create opus decoder:", err)
 	}
 	opusEnc, err := opus.NewEncoder(24000, 1, opus.AppVoIP)
 	if err != nil {
-		sessionCtx.Logger.Fatal("failed to create opus encoder:", err)
+		taskCtx.Logger.Fatal("failed to create opus encoder:", err)
 	}
 
-	bgPCM := loadBackgroundPCM("background-office-sound.mp3", sessionCtx.Logger)
+	bgPCM := loadBackgroundPCM("background-office-sound.mp3", taskCtx.Logger)
 
 	return &PlaybackSinkProcessor{
-		sessionCtx:  sessionCtx,
+		taskCtx:  taskCtx,
 		botTrack:    botTrack,
 		metrics:     NewProcessorMetrics("playback"),
 		opusDecoder: opusDec,
@@ -141,7 +141,7 @@ func (p *PlaybackSinkProcessor) mixAndEncode(botPCM []int16) []byte {
 	opusData := make([]byte, 1000)
 	n, err := p.opusEncoder.Encode(mixed, opusData)
 	if err != nil {
-		p.sessionCtx.Logger.Println("playback opus encode error:", err)
+		p.taskCtx.Logger.Println("playback opus encode error:", err)
 		return nil
 	}
 	return opusData[:n]
@@ -151,7 +151,7 @@ func (p *PlaybackSinkProcessor) decodeBotFrame(opusData []byte) []int16 {
 	pcm := make([]int16, framePCM)
 	_, err := p.opusDecoder.Decode(opusData, pcm)
 	if err != nil {
-		p.sessionCtx.Logger.Println("playback opus decode error:", err)
+		p.taskCtx.Logger.Println("playback opus decode error:", err)
 		return nil
 	}
 	return pcm
@@ -161,7 +161,7 @@ func (p *PlaybackSinkProcessor) writeSilenceTail() {
 	if !p.playbackStarted || playbackEndTail <= 0 {
 		return
 	}
-	p.sessionCtx.Logger.Printf("Writing %s playback silence before EndFrame\n", playbackEndTail)
+	p.taskCtx.Logger.Printf("Writing %s playback silence before EndFrame\n", playbackEndTail)
 
 	silence := make([]int16, framePCM)
 	frames := int(playbackEndTail / (20 * time.Millisecond))
@@ -169,7 +169,7 @@ func (p *PlaybackSinkProcessor) writeSilenceTail() {
 		opusData := make([]byte, 1000)
 		n, err := p.opusEncoder.Encode(silence, opusData)
 		if err != nil {
-			p.sessionCtx.Logger.Println("playback silence encode error:", err)
+			p.taskCtx.Logger.Println("playback silence encode error:", err)
 			return
 		}
 		p.botTrack.WriteSample(media.Sample{
@@ -191,7 +191,7 @@ func (p *PlaybackSinkProcessor) Process(ch ProcessorChannels) {
 			case InterruptFrame:
 				p.interrupted = true
 				p.playbackQueue = nil
-				p.sessionCtx.Logger.Println("Playback interrupted")
+				p.taskCtx.Logger.Println("Playback interrupted")
 			}
 		default:
 			select {
@@ -200,7 +200,7 @@ func (p *PlaybackSinkProcessor) Process(ch ProcessorChannels) {
 				case InterruptFrame:
 					p.interrupted = true
 					p.playbackQueue = nil
-					p.sessionCtx.Logger.Println("Playback interrupted")
+					p.taskCtx.Logger.Println("Playback interrupted")
 				}
 			case frame, ok := <-ch.Data:
 				if !ok {
@@ -208,7 +208,7 @@ func (p *PlaybackSinkProcessor) Process(ch ProcessorChannels) {
 				}
 				switch f := frame.(type) {
 				case EndFrame:
-					p.sessionCtx.Logger.Printf("EndFrame queued in PlaybackSinkProcessor after %d pending playback frames: reason=%q\n", len(p.playbackQueue), f.Reason)
+					p.taskCtx.Logger.Printf("EndFrame queued in PlaybackSinkProcessor after %d pending playback frames: reason=%q\n", len(p.playbackQueue), f.Reason)
 					p.playbackQueue = append(p.playbackQueue, f)
 				case AudioFrame, WordTimestampFrame, TTSDoneFrame:
 					if !p.interrupted {
@@ -226,7 +226,7 @@ func (p *PlaybackSinkProcessor) Process(ch ProcessorChannels) {
 				case LLMResponseEndFrame:
 					// ignore
 				default:
-					p.sessionCtx.Logger.Printf("PlaybackSink received frame of type %T\n", f)
+					p.taskCtx.Logger.Printf("PlaybackSink received frame of type %T\n", f)
 				}
 			case <-ticker.C:
 				// Drain non-audio frames from front of queue, then play one audio frame.
@@ -245,18 +245,18 @@ func (p *PlaybackSinkProcessor) Process(ch ProcessorChannels) {
 						p.playbackQueue = p.playbackQueue[1:]
 						goto mix // one audio frame per tick
 					case WordTimestampFrame:
-						p.sessionCtx.UIEvents.Send(UIEvent{Type: AssistantSpeaking, Data: map[string]interface{}{"text": f.Words[0]}})
+						p.taskCtx.UIEvents.Send(UIEvent{Type: AssistantSpeaking, Data: map[string]interface{}{"text": f.Words[0]}})
 						ch.Send(f, Upstream)
 						p.playbackQueue = p.playbackQueue[1:]
 					case TTSDoneFrame:
-						p.sessionCtx.Logger.Println("Playback complete")
+						p.taskCtx.Logger.Println("Playback complete")
 						ch.Send(f, Upstream)
 						ch.Send(BotStoppedSpeakingFrame{}, Upstream)
 						p.playbackQueue = p.playbackQueue[1:]
 					case EndFrame:
 						p.playbackQueue = p.playbackQueue[1:]
 						p.writeSilenceTail()
-						p.sessionCtx.Logger.Printf("EndFrame leaving PlaybackSinkProcessor after playback drain: reason=%q\n", f.Reason)
+						p.taskCtx.Logger.Printf("EndFrame leaving PlaybackSinkProcessor after playback drain: reason=%q\n", f.Reason)
 						ch.Send(f, Downstream)
 						return
 					default:

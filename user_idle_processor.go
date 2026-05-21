@@ -9,15 +9,15 @@ const (
 )
 
 type UserIdleProcessor struct {
-	sessionCtx      *SessionContext
+	taskCtx      *TaskContext
 	idleTimer       *time.Timer
 	idlePromptCount int
 	idleFrames      chan Frame // idle timer pushes TTSSpeakFrame here
 }
 
-func NewUserIdleProcessor(sessionCtx *SessionContext) *UserIdleProcessor {
+func NewUserIdleProcessor(taskCtx *TaskContext) *UserIdleProcessor {
 	return &UserIdleProcessor{
-		sessionCtx: sessionCtx,
+		taskCtx: taskCtx,
 		idleFrames: make(chan Frame, 10),
 	}
 }
@@ -36,7 +36,7 @@ func (p *UserIdleProcessor) startIdleTimer() {
 	}
 	p.idleTimer = time.AfterFunc(idleTimeout, func() {
 		p.idlePromptCount++
-		p.sessionCtx.Logger.Printf("User idle (%d/%d), injecting prompt\n", p.idlePromptCount, maxIdlePrompts)
+		p.taskCtx.Logger.Printf("User idle (%d/%d), injecting prompt\n", p.idlePromptCount, maxIdlePrompts)
 		p.idleFrames <- TTSSpeakFrame{Text: idlePromptText}
 	})
 }
@@ -52,7 +52,7 @@ func (p *UserIdleProcessor) Process(ch ProcessorChannels) {
 			}
 			switch f := frame.(type) {
 			case EndFrame:
-				p.sessionCtx.Logger.Printf("EndFrame at UserIdleProcessor data path, forwarding downstream: reason=%q\n", f.Reason)
+				p.taskCtx.Logger.Printf("EndFrame at UserIdleProcessor data path, forwarding downstream: reason=%q\n", f.Reason)
 				p.cancelIdleTimer()
 				ch.Send(f, Downstream)
 				return

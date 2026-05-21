@@ -68,30 +68,40 @@ func (p *Pipeline) Run() {
 	}
 }
 
-// SessionContext is the single dependency passed to all processors.
-type SessionContext struct {
+// TaskContext is the single dependency passed to all processors in a PipelineTask.
+// Ctx is the root cancellation context for the task.
+// Metrics is the handler invoked when a MetricsFrame is emitted by any processor.
+// wg is the shared WaitGroup used by BaseProcessor.Go() to track goroutines.
+type TaskContext struct {
 	Ctx      context.Context
 	Logger   *log.Logger
 	Room     *lksdk.Room
 	UIEvents *UIEventSender
+	Metrics  func(MetricsFrame)
+	wg       *sync.WaitGroup
 }
 
-type Session struct {
-	SessionCtx     *SessionContext
+// PipelineTask is the lifecycle owner of a single voice-call pipeline.
+// It is the Go equivalent of Pipecat's PipelineTask: it manages the chain,
+// queues lifecycle frames at the source, and runs cleanup when EndFrame
+// reaches the sink.
+type PipelineTask struct {
+	TaskCtx        *TaskContext
 	Cancel         context.CancelFunc
 	Source         *PipelineSourceProcessor
 	RoomName       string
+	wg             sync.WaitGroup
 	endRequested   atomic.Bool
 	cleanupStarted atomic.Bool
 	cleanupOnce    sync.Once
 }
 
 var (
-	sessions   = map[string]*Session{}
+	sessions   = map[string]*PipelineTask{}
 	sessionsMu sync.Mutex
 )
 
-func getSession(roomName string) *Session {
+func getSession(roomName string) *PipelineTask {
 	sessionsMu.Lock()
 	defer sessionsMu.Unlock()
 	return sessions[roomName]
@@ -103,29 +113,15 @@ func removeSession(roomName string) {
 	delete(sessions, roomName)
 }
 
-func createSession() (string, *Session) {
+func createSession() (string, *PipelineTask) {
 	roomName := fmt.Sprintf("room-%d", rand.IntN(9000000)+1000000)
 	logger := log.New(log.Writer(), fmt.Sprintf("[%s] ", roomName), log.Flags())
 	ctx, cancel := context.WithCancel(context.Background())
 	uiEvents := NewUIEventSender(logger)
 
-	sessionCtx := &SessionContext{Ctx: ctx, Logger: logger, UIEvents: uiEvents}
-	pipelineSource := NewPipelineSourceProcessor(logger)
-	audioSource := NewAudioSourceProcessor(sessionCtx)
-	sessionCtx.Room = joinRoom(roomName, audioSource)
-	session := &Session{SessionCtx: sessionCtx, Cancel: cancel, Source: pipelineSource, RoomName: roomName}
-	sessionsMu.Lock()
-	sessions[roomName] = session
-	sessionsMu.Unlock()
+	// task is created first (with a zero-value WaitGroup) so taskCtx can hold a pointer to it.
+	task := &PipelineTask{Cancel: cancel, RoomName: roomName}
 
-	sttProcessor := NewSTTProcessor(sessionCtx)
-	userIdle := NewUserIdleProcessor(sessionCtx)
-	contextAggregator := NewContextAggregator(sessionCtx)
-	talkTimeMonitor := NewTalkTimeMonitoringProcessor(sessionCtx)
-	llmProcessor := NewLLMProcessor(sessionCtx)
-	ttsProcessor := NewTTSProcessor(sessionCtx)
-	playbackSink := NewPlaybackSinkProcessor(sessionCtx)
-	pipelineSink := NewPipelineSinkProcessor(logger, session.completeEnd)
 	metricsHandler := func(mf MetricsFrame) {
 		for _, d := range mf.Data {
 			logger.Printf("Metric [%s] %s: %.1fms\n", d.Processor, d.Label, d.ValueMs)
@@ -136,46 +132,74 @@ func createSession() (string, *Session) {
 			}})
 		}
 	}
+
+	taskCtx := &TaskContext{
+		Ctx:      ctx,
+		Logger:   logger,
+		UIEvents: uiEvents,
+		Metrics:  metricsHandler,
+		wg:       &task.wg,
+	}
+	task.TaskCtx = taskCtx
+
+	pipelineSource := NewPipelineSourceProcessor(logger)
+	audioSource := NewAudioSourceProcessor(taskCtx)
+	taskCtx.Room = joinRoom(roomName, audioSource)
+	task.Source = pipelineSource
+
+	sessionsMu.Lock()
+	sessions[roomName] = task
+	sessionsMu.Unlock()
+
+	sttProcessor := NewSTTProcessor(taskCtx)
+	userIdle := NewUserIdleProcessor(taskCtx)
+	contextAggregator := NewContextAggregator(taskCtx)
+	talkTimeMonitor := NewTalkTimeMonitoringProcessor(taskCtx)
+	llmProcessor := NewLLMProcessor(taskCtx)
+	ttsProcessor := NewTTSProcessor(taskCtx)
+	playbackSink := NewPlaybackSinkProcessor(taskCtx)
+	pipelineSink := NewPipelineSinkProcessor(logger, task.completeEnd)
+
 	pipeline := NewPipeline([]FrameProcessor{pipelineSource, audioSource, sttProcessor, userIdle, contextAggregator, talkTimeMonitor, llmProcessor, ttsProcessor, playbackSink, pipelineSink}, metricsHandler)
 	go pipeline.Run()
-	return roomName, session
+	return roomName, task
 }
 
-func (s *Session) End(reason string) {
+func (t *PipelineTask) End(reason string) {
 	if reason == "" {
 		reason = "unspecified"
 	}
-	if s.cleanupStarted.Load() || s.SessionCtx.Ctx.Err() != nil {
-		s.SessionCtx.Logger.Printf("Ignoring EndFrame request after cleanup started: %s\n", reason)
+	if t.cleanupStarted.Load() || t.TaskCtx.Ctx.Err() != nil {
+		t.TaskCtx.Logger.Printf("Ignoring EndFrame request after cleanup started: %s\n", reason)
 		return
 	}
-	if !s.endRequested.CompareAndSwap(false, true) {
-		s.SessionCtx.Logger.Printf("Ignoring duplicate EndFrame request: %s\n", reason)
+	if !t.endRequested.CompareAndSwap(false, true) {
+		t.TaskCtx.Logger.Printf("Ignoring duplicate EndFrame request: %s\n", reason)
 		return
 	}
-	if s.cleanupStarted.Load() || s.SessionCtx.Ctx.Err() != nil {
-		s.SessionCtx.Logger.Printf("Ignoring EndFrame request after cleanup started: %s\n", reason)
+	if t.cleanupStarted.Load() || t.TaskCtx.Ctx.Err() != nil {
+		t.TaskCtx.Logger.Printf("Ignoring EndFrame request after cleanup started: %s\n", reason)
 		return
 	}
-	s.SessionCtx.Logger.Printf("Queueing EndFrame: %s\n", reason)
-	s.Source.Queue(EndFrame{Reason: reason})
+	t.TaskCtx.Logger.Printf("Queueing EndFrame: %s\n", reason)
+	t.Source.Queue(EndFrame{Reason: reason})
 }
 
-func (s *Session) completeEnd(frame EndFrame) {
-	s.cleanupOnce.Do(func() {
-		s.endRequested.Store(true)
-		s.cleanupStarted.Store(true)
+func (t *PipelineTask) completeEnd(frame EndFrame) {
+	t.cleanupOnce.Do(func() {
+		t.endRequested.Store(true)
+		t.cleanupStarted.Store(true)
 		reason := frame.Reason
 		if reason == "" {
 			reason = "unspecified"
 		}
-		s.SessionCtx.Logger.Printf("EndFrame reached pipeline sink, cleaning up session: %s\n", reason)
-		s.SessionCtx.UIEvents.Send(UIEvent{Type: CallEnded, Data: map[string]interface{}{"reason": reason}})
-		s.Cancel()
-		if s.SessionCtx.Room != nil {
-			s.SessionCtx.Room.Disconnect()
+		t.TaskCtx.Logger.Printf("EndFrame reached pipeline sink, cleaning up task: %s\n", reason)
+		t.TaskCtx.UIEvents.Send(UIEvent{Type: CallEnded, Data: map[string]interface{}{"reason": reason}})
+		t.Cancel()
+		if t.TaskCtx.Room != nil {
+			t.TaskCtx.Room.Disconnect()
 		}
-		removeSession(s.RoomName)
-		s.SessionCtx.Logger.Printf("Session cleanup complete after EndFrame: reason=%q\n", reason)
+		removeSession(t.RoomName)
+		t.TaskCtx.Logger.Printf("PipelineTask cleanup complete after EndFrame: reason=%q\n", reason)
 	})
 }

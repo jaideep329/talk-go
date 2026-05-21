@@ -8,13 +8,13 @@ import (
 )
 
 type AudioSourceProcessor struct {
-	sessionCtx  *SessionContext
+	taskCtx  *TaskContext
 	audioFrames chan Frame
 }
 
-func NewAudioSourceProcessor(sessionCtx *SessionContext) *AudioSourceProcessor {
+func NewAudioSourceProcessor(taskCtx *TaskContext) *AudioSourceProcessor {
 	return &AudioSourceProcessor{
-		sessionCtx:  sessionCtx,
+		taskCtx:  taskCtx,
 		audioFrames: make(chan Frame, 100),
 	}
 }
@@ -22,7 +22,7 @@ func NewAudioSourceProcessor(sessionCtx *SessionContext) *AudioSourceProcessor {
 func (a *AudioSourceProcessor) readAudioTrack(track *webrtc.TrackRemote) {
 	decoder, err := opus.NewDecoder(16000, 1)
 	if err != nil {
-		a.sessionCtx.Logger.Fatal("failed to create opus decoder:", err)
+		a.taskCtx.Logger.Fatal("failed to create opus decoder:", err)
 	}
 
 	pcmBuf := make([]int16, 960)
@@ -30,13 +30,13 @@ func (a *AudioSourceProcessor) readAudioTrack(track *webrtc.TrackRemote) {
 	for {
 		rtpPacket, _, err := track.ReadRTP()
 		if err != nil {
-			a.sessionCtx.Logger.Println("track read error:", err)
+			a.taskCtx.Logger.Println("track read error:", err)
 			return
 		}
 
 		n, err := decoder.Decode(rtpPacket.Payload, pcmBuf)
 		if err != nil {
-			a.sessionCtx.Logger.Println("opus decode error:", err)
+			a.taskCtx.Logger.Println("opus decode error:", err)
 			continue
 		}
 
@@ -46,8 +46,8 @@ func (a *AudioSourceProcessor) readAudioTrack(track *webrtc.TrackRemote) {
 		}
 
 		select {
-		case <-a.sessionCtx.Ctx.Done():
-			a.sessionCtx.Logger.Println("audio source reader exiting: session closed")
+		case <-a.taskCtx.Ctx.Done():
+			a.taskCtx.Logger.Println("audio source reader exiting: session closed")
 			return
 		case a.audioFrames <- AudioFrame{Data: pcmBytes}:
 		}
@@ -69,11 +69,11 @@ func (a *AudioSourceProcessor) Process(ch ProcessorChannels) {
 			}
 			switch f := frame.(type) {
 			case EndFrame:
-				a.sessionCtx.Logger.Printf("EndFrame at AudioSourceProcessor, forwarding downstream: reason=%q\n", f.Reason)
+				a.taskCtx.Logger.Printf("EndFrame at AudioSourceProcessor, forwarding downstream: reason=%q\n", f.Reason)
 				ch.Send(f, Downstream)
 				return
 			default:
-				a.sessionCtx.Logger.Printf("AudioSource received unexpected frame: %T\n", f)
+				a.taskCtx.Logger.Printf("AudioSource received unexpected frame: %T\n", f)
 			}
 		case frame := <-a.audioFrames:
 			ch.Send(frame, Downstream)

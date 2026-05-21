@@ -3,7 +3,7 @@ package main
 import "time"
 
 const (
-	defaultMaxTalkTime     = 60 * time.Second
+	defaultMaxTalkTime     = 120 * time.Second
 	talkTimeExceededPrompt = "Your talk time is exhausted now. Ending the call."
 	talkTimeExceededReason = "talk time exhausted"
 )

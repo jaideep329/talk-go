@@ -184,6 +184,24 @@ func (a *ContextAggregator) ProcessFrame(ctx context.Context, frame Frame, dir D
 		// Upstream — turn finished cleanly, commit assistant message.
 		a.commitSpokenText(false)
 		a.botSpeaking = false
+		// Mirror Pipecat's reset_aggregation behavior at the bot-turn
+		// boundary: any user speech that didn't trigger barge-in
+		// during this turn was back-channeling and must not become a
+		// user message. Without this, a Soniox <end> arriving a few
+		// hundred ms AFTER TTSDone (bot already silent) would fall
+		// into the submitUserMessage branch — the LLM would then
+		// "acknowledge" 2 words of unrelated speech. The
+		// in-progress-discard branch on TranscriptFrame only catches
+		// the case where <end> arrives WHILE botSpeaking is still
+		// true; this handles the racing case after.
+		if !a.interruptSent {
+			if a.interimTranscript != "" || a.currentTranscript != "" {
+				a.taskCtx.Logger.Printf("Discarding back-channel speech after bot turn: interim=%q final=%q\n", a.interimTranscript, a.currentTranscript)
+				a.resetInterimTranscript()
+				a.resetFinalTranscript()
+				a.sendLiveTranscript("")
+			}
+		}
 	case BotStartedSpeakingFrame:
 		a.botSpeaking = true
 		a.PushFrame(f, dir) // continue upstream to UserIdle

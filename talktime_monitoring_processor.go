@@ -1,6 +1,10 @@
 package main
 
-import "time"
+import (
+	"context"
+	"sync/atomic"
+	"time"
+)
 
 const (
 	defaultMaxTalkTime     = 120 * time.Second
@@ -9,79 +13,68 @@ const (
 )
 
 type TalkTimeMonitoringProcessor struct {
-	sessionCtx  *SessionContext
+	*BaseProcessor
+	taskCtx     *TaskContext
 	maxTalkTime time.Duration
+	ending      atomic.Bool
 }
 
-func NewTalkTimeMonitoringProcessor(sessionCtx *SessionContext) *TalkTimeMonitoringProcessor {
-	return NewTalkTimeMonitoringProcessorWithMaxTalkTime(sessionCtx, defaultMaxTalkTime)
+func NewTalkTimeMonitoringProcessor(taskCtx *TaskContext) *TalkTimeMonitoringProcessor {
+	return NewTalkTimeMonitoringProcessorWithMaxTalkTime(taskCtx, defaultMaxTalkTime)
 }
 
-func NewTalkTimeMonitoringProcessorWithMaxTalkTime(sessionCtx *SessionContext, maxTalkTime time.Duration) *TalkTimeMonitoringProcessor {
-	return &TalkTimeMonitoringProcessor{
-		sessionCtx:  sessionCtx,
+func NewTalkTimeMonitoringProcessorWithMaxTalkTime(taskCtx *TaskContext, maxTalkTime time.Duration) *TalkTimeMonitoringProcessor {
+	p := &TalkTimeMonitoringProcessor{
+		taskCtx:     taskCtx,
 		maxTalkTime: maxTalkTime,
+	}
+	p.BaseProcessor = NewBaseProcessor("TalkTimeMonitor", p, taskCtx)
+	return p
+}
+
+func (p *TalkTimeMonitoringProcessor) Start(ctx context.Context) {
+	p.BaseProcessor.Start(ctx)
+	p.Go(p.runTimer)
+}
+
+func (p *TalkTimeMonitoringProcessor) runTimer() {
+	p.taskCtx.Logger.Printf("Talk time monitor started: max_talk_time=%s\n", p.maxTalkTime)
+	select {
+	case <-p.ctx.Done():
+		return
+	case <-time.After(p.maxTalkTime):
+	}
+	if !p.ending.CompareAndSwap(false, true) {
+		return
+	}
+	p.taskCtx.Logger.Printf("Talk time exceeded after %s, sending closing prompt then ending task\n", p.maxTalkTime)
+	p.PushFrame(NewInterruptFrame(), Downstream)
+	p.PushFrame(NewTTSSpeakFrame(talkTimeExceededPrompt), Downstream)
+	// Route EndFrame through the task source instead of pushing it
+	// downstream directly. This way upstream processors (STT,
+	// AudioSource, UserIdle, ContextAggregator) also see the EndFrame
+	// in pipeline order, matching Pipecat's source-driven lifecycle.
+	if p.taskCtx.EndTask != nil {
+		p.taskCtx.EndTask(talkTimeExceededReason)
 	}
 }
 
-func (p *TalkTimeMonitoringProcessor) Process(ch ProcessorChannels) {
-	timer := time.NewTimer(p.maxTalkTime)
-	defer timer.Stop()
-
-	p.sessionCtx.Logger.Printf("Talk time monitor started: max_talk_time=%s\n", p.maxTalkTime)
-
-	var timerC <-chan time.Time = timer.C
-	ending := false
-
-	for {
-		select {
-		case frame := <-ch.System:
-			switch f := frame.(type) {
-			case InterruptFrame:
-				if ending {
-					p.sessionCtx.Logger.Println("Talk time shutdown in progress, dropping interrupt")
-					continue
-				}
-				ch.Send(f, Downstream)
-			default:
-				ch.Send(frame, Downstream)
-			}
-
-		case frame, ok := <-ch.Data:
-			if !ok {
-				return
-			}
-			switch f := frame.(type) {
-			case EndFrame:
-				p.sessionCtx.Logger.Printf("EndFrame at TalkTimeMonitoringProcessor data path, forwarding downstream: reason=%q\n", f.Reason)
-				ch.Send(f, Downstream)
-				return
-			case WordTimestampFrame:
-				ch.Send(f, Upstream)
-			case TTSDoneFrame:
-				ch.Send(f, Upstream)
-			case BotStartedSpeakingFrame:
-				ch.Send(f, Upstream)
-			case BotStoppedSpeakingFrame:
-				ch.Send(f, Upstream)
-			default:
-				if ending {
-					p.sessionCtx.Logger.Printf("Talk time shutdown in progress, dropping downstream frame: %T\n", f)
-					continue
-				}
-				ch.Send(frame, Downstream)
-			}
-
-		case <-timerC:
-			timerC = nil
-			if ending {
-				continue
-			}
-			ending = true
-			p.sessionCtx.Logger.Printf("Talk time exceeded after %s, sending closing prompt then EndFrame\n", p.maxTalkTime)
-			ch.Send(InterruptFrame{}, Downstream)
-			ch.Send(TTSSpeakFrame{Text: talkTimeExceededPrompt}, Downstream)
-			ch.Send(EndFrame{Reason: talkTimeExceededReason}, Downstream)
+func (p *TalkTimeMonitoringProcessor) ProcessFrame(ctx context.Context, frame Frame, dir Direction) {
+	switch f := frame.(type) {
+	case EndFrame:
+		p.taskCtx.Logger.Printf("EndFrame at TalkTimeMonitoringProcessor: reason=%q\n", f.Reason)
+		p.PushFrame(f, dir)
+	case InterruptFrame:
+		if p.ending.Load() {
+			p.taskCtx.Logger.Println("Talk time shutdown in progress, dropping interrupt")
+			return
 		}
+		p.PushFrame(f, dir)
+	default:
+		if p.ending.Load() && dir == Downstream {
+			p.taskCtx.Logger.Printf("Talk time shutdown in progress, dropping downstream frame: %T\n", frame)
+			return
+		}
+		p.PushFrame(frame, dir)
 	}
 }

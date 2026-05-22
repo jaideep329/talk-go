@@ -1,6 +1,10 @@
 package main
 
-import "time"
+import (
+	"context"
+	"sync/atomic"
+	"time"
+)
 
 const (
 	idleTimeout    = 7 * time.Second
@@ -9,17 +13,16 @@ const (
 )
 
 type UserIdleProcessor struct {
-	sessionCtx      *SessionContext
+	*BaseProcessor
+	taskCtx         *TaskContext
 	idleTimer       *time.Timer
-	idlePromptCount int
-	idleFrames      chan Frame // idle timer pushes TTSSpeakFrame here
+	idlePromptCount atomic.Int32
 }
 
-func NewUserIdleProcessor(sessionCtx *SessionContext) *UserIdleProcessor {
-	return &UserIdleProcessor{
-		sessionCtx: sessionCtx,
-		idleFrames: make(chan Frame, 10),
-	}
+func NewUserIdleProcessor(taskCtx *TaskContext) *UserIdleProcessor {
+	p := &UserIdleProcessor{taskCtx: taskCtx}
+	p.BaseProcessor = NewBaseProcessor("UserIdle", p, taskCtx)
+	return p
 }
 
 func (p *UserIdleProcessor) cancelIdleTimer() {
@@ -31,49 +34,33 @@ func (p *UserIdleProcessor) cancelIdleTimer() {
 
 func (p *UserIdleProcessor) startIdleTimer() {
 	p.cancelIdleTimer()
-	if p.idlePromptCount >= maxIdlePrompts {
+	if p.idlePromptCount.Load() >= maxIdlePrompts {
 		return
 	}
 	p.idleTimer = time.AfterFunc(idleTimeout, func() {
-		p.idlePromptCount++
-		p.sessionCtx.Logger.Printf("User idle (%d/%d), injecting prompt\n", p.idlePromptCount, maxIdlePrompts)
-		p.idleFrames <- TTSSpeakFrame{Text: idlePromptText}
+		count := p.idlePromptCount.Add(1)
+		p.taskCtx.Logger.Printf("User idle (%d/%d), injecting prompt\n", count, maxIdlePrompts)
+		p.PushFrame(NewTTSSpeakFrame(idlePromptText), Downstream)
 	})
 }
 
-func (p *UserIdleProcessor) Process(ch ProcessorChannels) {
-	for {
-		select {
-		case frame := <-ch.System:
-			ch.Send(frame, Downstream)
-		case frame, ok := <-ch.Data:
-			if !ok {
-				return
-			}
-			switch f := frame.(type) {
-			case EndFrame:
-				p.sessionCtx.Logger.Printf("EndFrame at UserIdleProcessor data path, forwarding downstream: reason=%q\n", f.Reason)
-				p.cancelIdleTimer()
-				ch.Send(f, Downstream)
-				return
-			case TranscriptFrame:
-				p.cancelIdleTimer()
-				p.idlePromptCount = 0
-				ch.Send(frame, Downstream)
-			case BotStartedSpeakingFrame:
-				p.cancelIdleTimer()
-				// consumed here — no need to forward to STT
-			case BotStoppedSpeakingFrame:
-				p.startIdleTimer()
-				// consumed here — no need to forward to STT
-			default:
-				// Pass everything else through in its original direction.
-				// Downstream frames (from STT): forward downstream.
-				// Upstream frames (from LLM): forward upstream.
-				ch.Send(frame, Downstream)
-			}
-		case frame := <-p.idleFrames:
-			ch.Send(frame, Downstream)
-		}
+func (p *UserIdleProcessor) ProcessFrame(ctx context.Context, frame Frame, dir Direction) {
+	switch f := frame.(type) {
+	case EndFrame:
+		p.taskCtx.Logger.Printf("EndFrame at UserIdleProcessor: reason=%q\n", f.Reason)
+		p.cancelIdleTimer()
+		p.PushFrame(f, dir)
+	case TranscriptFrame:
+		p.cancelIdleTimer()
+		p.idlePromptCount.Store(0)
+		p.PushFrame(frame, dir)
+	case BotStartedSpeakingFrame:
+		p.cancelIdleTimer()
+		// consumed upstream here — UserIdle is the terminal upstream consumer
+	case BotStoppedSpeakingFrame:
+		p.startIdleTimer()
+		// consumed upstream here
+	default:
+		p.PushFrame(frame, dir)
 	}
 }

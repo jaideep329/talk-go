@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/binary"
 	"io"
 	"os"
@@ -20,17 +21,33 @@ const (
 	playbackEndTail = 1 * time.Second
 )
 
+// PlaybackSinkProcessor is the bottom of the chain. It owns the LiveKit
+// outbound audio track and a 20ms ticker that paces playback. Frame
+// ownership is split:
+//   - ProcessFrame (on processLoop / inputLoop) forwards incoming frames
+//     to runPlayback via queueCh.
+//   - runPlayback owns playbackQueue, interrupted, playbackStarted, and
+//     all interaction with botTrack.
+// On EndFrame, ProcessFrame blocks until runPlayback has drained the
+// queue, written the silence tail, and forwarded EndFrame downstream,
+// so the base's auto-shutdown does not cancel ctx mid-drain.
 type PlaybackSinkProcessor struct {
-	sessionCtx      *SessionContext
-	botTrack        *lksdk.LocalSampleTrack
-	metrics         *ProcessorMetrics
+	*BaseProcessor
+	taskCtx     *TaskContext
+	botTrack    *lksdk.LocalSampleTrack
+	metrics     *ProcessorMetrics
+	opusDecoder *opus.Decoder
+	opusEncoder *opus.Encoder
+	bgPCM       []int16 // background audio loop buffer (24kHz mono)
+
+	queueCh chan Frame    // ProcessFrame → runPlayback
+	endDone chan struct{} // closed by runPlayback after EndFrame is forwarded
+
+	// Owned by runPlayback only:
+	bgPos           int
 	interrupted     bool
 	playbackStarted bool
-	opusDecoder     *opus.Decoder
-	opusEncoder     *opus.Encoder
-	bgPCM           []int16 // background audio loop buffer (24kHz mono)
-	bgPos           int     // current position in background loop
-	playbackQueue   []Frame // ordered queue: AudioFrame, WordTimestampFrame, TTSDoneFrame
+	playbackQueue   []Frame
 }
 
 func loadBackgroundPCM(path string, logger interface{ Printf(string, ...interface{}) }) []int16 {
@@ -53,7 +70,6 @@ func loadBackgroundPCM(path string, logger interface{ Printf(string, ...interfac
 		return nil
 	}
 
-	// Convert stereo s16le bytes → mono int16
 	numSamples := len(raw) / 4
 	mono := make([]int16, numSamples)
 	for i := 0; i < numSamples; i++ {
@@ -65,42 +81,184 @@ func loadBackgroundPCM(path string, logger interface{ Printf(string, ...interfac
 	return mono
 }
 
-func NewPlaybackSinkProcessor(sessionCtx *SessionContext) *PlaybackSinkProcessor {
+func NewPlaybackSinkProcessor(taskCtx *TaskContext) *PlaybackSinkProcessor {
 	botTrack, err := lksdk.NewLocalSampleTrack(webrtc.RTPCodecCapability{
 		MimeType:  webrtc.MimeTypeOpus,
 		ClockRate: 48000,
 		Channels:  2,
 	})
 	if err != nil {
-		sessionCtx.Logger.Fatal("failed to create local track:", err)
+		taskCtx.Logger.Fatal("failed to create local track:", err)
 	}
-	_, err = sessionCtx.Room.LocalParticipant.PublishTrack(botTrack, &lksdk.TrackPublicationOptions{
+	_, err = taskCtx.Room.LocalParticipant.PublishTrack(botTrack, &lksdk.TrackPublicationOptions{
 		Name: "bot-audio",
 	})
 	if err != nil {
-		sessionCtx.Logger.Fatal("failed to publish track:", err)
+		taskCtx.Logger.Fatal("failed to publish track:", err)
 	}
-	sessionCtx.Logger.Println("Published bot audio track")
+	taskCtx.Logger.Println("Published bot audio track")
 
 	opusDec, err := opus.NewDecoder(24000, 1)
 	if err != nil {
-		sessionCtx.Logger.Fatal("failed to create opus decoder:", err)
+		taskCtx.Logger.Fatal("failed to create opus decoder:", err)
 	}
 	opusEnc, err := opus.NewEncoder(24000, 1, opus.AppVoIP)
 	if err != nil {
-		sessionCtx.Logger.Fatal("failed to create opus encoder:", err)
+		taskCtx.Logger.Fatal("failed to create opus encoder:", err)
 	}
 
-	bgPCM := loadBackgroundPCM("background-office-sound.mp3", sessionCtx.Logger)
+	bgPCM := loadBackgroundPCM("background-office-sound.mp3", taskCtx.Logger)
 
-	return &PlaybackSinkProcessor{
-		sessionCtx:  sessionCtx,
+	p := &PlaybackSinkProcessor{
+		taskCtx:     taskCtx,
 		botTrack:    botTrack,
 		metrics:     NewProcessorMetrics("playback"),
 		opusDecoder: opusDec,
 		opusEncoder: opusEnc,
 		bgPCM:       bgPCM,
+		queueCh:     make(chan Frame, 256),
+		endDone:     make(chan struct{}),
 	}
+	p.BaseProcessor = NewBaseProcessor("PlaybackSink", p, taskCtx)
+	return p
+}
+
+func (p *PlaybackSinkProcessor) Start(ctx context.Context) {
+	p.BaseProcessor.Start(ctx)
+	p.Go(p.runPlayback)
+}
+
+func (p *PlaybackSinkProcessor) ProcessFrame(ctx context.Context, frame Frame, dir Direction) {
+	switch frame.(type) {
+	case EndFrame:
+		// EndFrame must drain through runPlayback (audio tail + silence)
+		// before the base auto-cancels b.ctx.
+		select {
+		case p.queueCh <- frame:
+		case <-p.ctx.Done():
+			return
+		}
+		select {
+		case <-p.endDone:
+		case <-p.ctx.Done():
+		}
+	case AudioFrame, WordTimestampFrame, TTSDoneFrame,
+		LLMResponseStartFrame, TTSSpeakFrame, InterruptFrame:
+		select {
+		case p.queueCh <- frame:
+		case <-p.ctx.Done():
+		}
+	case LLMResponseEndFrame:
+		// ignore; playback doesn't care about LLM stream boundaries
+	default:
+		// Unknown frames terminate here.
+	}
+}
+
+func (p *PlaybackSinkProcessor) runPlayback() {
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-p.ctx.Done():
+			return
+		case f := <-p.queueCh:
+			p.handleQueueFrame(f)
+		case <-ticker.C:
+			if p.tick() {
+				close(p.endDone)
+				return
+			}
+		}
+	}
+}
+
+func (p *PlaybackSinkProcessor) handleQueueFrame(f Frame) {
+	switch v := f.(type) {
+	case AudioFrame, WordTimestampFrame, TTSDoneFrame:
+		if !p.interrupted {
+			p.playbackQueue = append(p.playbackQueue, v)
+		}
+	case EndFrame:
+		p.taskCtx.Logger.Printf("EndFrame queued in PlaybackSink after %d pending playback frames: reason=%q\n", len(p.playbackQueue), v.Reason)
+		p.playbackQueue = append(p.playbackQueue, v)
+	case LLMResponseStartFrame:
+		p.interrupted = false
+		p.playbackStarted = false
+		p.playbackQueue = nil
+		p.metrics.StartAt(MetricE2ELatency, v.StartedAt)
+	case TTSSpeakFrame:
+		p.interrupted = false
+		p.playbackStarted = false
+		p.playbackQueue = nil
+	case InterruptFrame:
+		p.interrupted = true
+		// EndFrame and any other !IsInterruptible() frames survive the purge.
+		kept := p.playbackQueue[:0]
+		for _, qf := range p.playbackQueue {
+			if !qf.IsInterruptible() {
+				kept = append(kept, qf)
+			}
+		}
+		p.playbackQueue = kept
+		p.taskCtx.Logger.Printf("Playback interrupted (kept %d uninterruptible frames)\n", len(kept))
+	}
+}
+
+// tick advances playback by one 20ms frame. Returns true iff an
+// EndFrame was processed and runPlayback should exit.
+func (p *PlaybackSinkProcessor) tick() bool {
+	var botPCM []int16
+	for len(p.playbackQueue) > 0 {
+		switch f := p.playbackQueue[0].(type) {
+		case AudioFrame:
+			if !p.playbackStarted {
+				p.playbackStarted = true
+				// Broadcast both ways: upstream lets UserIdleProcessor
+				// cancel its idle timer; downstream is informational for
+				// any future post-Playback consumer. Mirrors Pipecat's
+				// BaseOutputTransport.MediaSender._bot_started_speaking.
+				p.Broadcast(NewBotStartedSpeakingFrame())
+				if mf := p.metrics.Stop(MetricE2ELatency); mf != nil {
+					p.PushFrame(*mf, Downstream)
+				}
+			}
+			botPCM = p.decodeBotFrame(f.Data)
+			p.playbackQueue = p.playbackQueue[1:]
+			goto mix
+		case WordTimestampFrame:
+			p.taskCtx.UIEvents.Send(UIEvent{Type: AssistantSpeaking, Data: map[string]interface{}{"text": f.Words[0]}})
+			p.PushFrame(f, Upstream)
+			p.playbackQueue = p.playbackQueue[1:]
+		case TTSDoneFrame:
+			p.taskCtx.Logger.Println("Playback complete")
+			p.PushFrame(f, Upstream)
+			// Broadcast: upstream tells ContextAggregator/UserIdle that
+			// the bot finished speaking; downstream copy is for parity
+			// with Pipecat (no consumer today).
+			p.Broadcast(NewBotStoppedSpeakingFrame())
+			p.playbackQueue = p.playbackQueue[1:]
+		case EndFrame:
+			p.playbackQueue = p.playbackQueue[1:]
+			p.writeSilenceTail()
+			p.taskCtx.Logger.Printf("EndFrame leaving PlaybackSink after playback drain: reason=%q\n", f.Reason)
+			p.PushFrame(f, Downstream)
+			return true
+		default:
+			p.playbackQueue = p.playbackQueue[1:]
+		}
+	}
+mix:
+	opusData := p.mixAndEncode(botPCM)
+	if opusData == nil {
+		return false
+	}
+	p.botTrack.WriteSample(media.Sample{
+		Data:     opusData,
+		Duration: 20 * time.Millisecond,
+	}, nil)
+	return false
 }
 
 func (p *PlaybackSinkProcessor) getBgFrame() []int16 {
@@ -141,7 +299,7 @@ func (p *PlaybackSinkProcessor) mixAndEncode(botPCM []int16) []byte {
 	opusData := make([]byte, 1000)
 	n, err := p.opusEncoder.Encode(mixed, opusData)
 	if err != nil {
-		p.sessionCtx.Logger.Println("playback opus encode error:", err)
+		p.taskCtx.Logger.Println("playback opus encode error:", err)
 		return nil
 	}
 	return opusData[:n]
@@ -151,7 +309,7 @@ func (p *PlaybackSinkProcessor) decodeBotFrame(opusData []byte) []int16 {
 	pcm := make([]int16, framePCM)
 	_, err := p.opusDecoder.Decode(opusData, pcm)
 	if err != nil {
-		p.sessionCtx.Logger.Println("playback opus decode error:", err)
+		p.taskCtx.Logger.Println("playback opus decode error:", err)
 		return nil
 	}
 	return pcm
@@ -161,7 +319,7 @@ func (p *PlaybackSinkProcessor) writeSilenceTail() {
 	if !p.playbackStarted || playbackEndTail <= 0 {
 		return
 	}
-	p.sessionCtx.Logger.Printf("Writing %s playback silence before EndFrame\n", playbackEndTail)
+	p.taskCtx.Logger.Printf("Writing %s playback silence before EndFrame\n", playbackEndTail)
 
 	silence := make([]int16, framePCM)
 	frames := int(playbackEndTail / (20 * time.Millisecond))
@@ -169,7 +327,7 @@ func (p *PlaybackSinkProcessor) writeSilenceTail() {
 		opusData := make([]byte, 1000)
 		n, err := p.opusEncoder.Encode(silence, opusData)
 		if err != nil {
-			p.sessionCtx.Logger.Println("playback silence encode error:", err)
+			p.taskCtx.Logger.Println("playback silence encode error:", err)
 			return
 		}
 		p.botTrack.WriteSample(media.Sample{
@@ -177,102 +335,5 @@ func (p *PlaybackSinkProcessor) writeSilenceTail() {
 			Duration: 20 * time.Millisecond,
 		}, nil)
 		time.Sleep(20 * time.Millisecond)
-	}
-}
-
-func (p *PlaybackSinkProcessor) Process(ch ProcessorChannels) {
-	ticker := time.NewTicker(20 * time.Millisecond)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case frame := <-ch.System:
-			switch frame.(type) {
-			case InterruptFrame:
-				p.interrupted = true
-				p.playbackQueue = nil
-				p.sessionCtx.Logger.Println("Playback interrupted")
-			}
-		default:
-			select {
-			case frame := <-ch.System:
-				switch frame.(type) {
-				case InterruptFrame:
-					p.interrupted = true
-					p.playbackQueue = nil
-					p.sessionCtx.Logger.Println("Playback interrupted")
-				}
-			case frame, ok := <-ch.Data:
-				if !ok {
-					return
-				}
-				switch f := frame.(type) {
-				case EndFrame:
-					p.sessionCtx.Logger.Printf("EndFrame queued in PlaybackSinkProcessor after %d pending playback frames: reason=%q\n", len(p.playbackQueue), f.Reason)
-					p.playbackQueue = append(p.playbackQueue, f)
-				case AudioFrame, WordTimestampFrame, TTSDoneFrame:
-					if !p.interrupted {
-						p.playbackQueue = append(p.playbackQueue, f)
-					}
-				case LLMResponseStartFrame:
-					p.interrupted = false
-					p.playbackStarted = false
-					p.playbackQueue = nil
-					p.metrics.StartAt(MetricE2ELatency, f.StartedAt)
-				case TTSSpeakFrame:
-					p.interrupted = false
-					p.playbackStarted = false
-					p.playbackQueue = nil
-				case LLMResponseEndFrame:
-					// ignore
-				default:
-					p.sessionCtx.Logger.Printf("PlaybackSink received frame of type %T\n", f)
-				}
-			case <-ticker.C:
-				// Drain non-audio frames from front of queue, then play one audio frame.
-				var botPCM []int16
-				for len(p.playbackQueue) > 0 {
-					switch f := p.playbackQueue[0].(type) {
-					case AudioFrame:
-						if !p.playbackStarted {
-							p.playbackStarted = true
-							ch.Send(BotStartedSpeakingFrame{}, Upstream)
-							if mf := p.metrics.Stop(MetricE2ELatency); mf != nil {
-								ch.Send(*mf, Downstream)
-							}
-						}
-						botPCM = p.decodeBotFrame(f.Data)
-						p.playbackQueue = p.playbackQueue[1:]
-						goto mix // one audio frame per tick
-					case WordTimestampFrame:
-						p.sessionCtx.UIEvents.Send(UIEvent{Type: AssistantSpeaking, Data: map[string]interface{}{"text": f.Words[0]}})
-						ch.Send(f, Upstream)
-						p.playbackQueue = p.playbackQueue[1:]
-					case TTSDoneFrame:
-						p.sessionCtx.Logger.Println("Playback complete")
-						ch.Send(f, Upstream)
-						ch.Send(BotStoppedSpeakingFrame{}, Upstream)
-						p.playbackQueue = p.playbackQueue[1:]
-					case EndFrame:
-						p.playbackQueue = p.playbackQueue[1:]
-						p.writeSilenceTail()
-						p.sessionCtx.Logger.Printf("EndFrame leaving PlaybackSinkProcessor after playback drain: reason=%q\n", f.Reason)
-						ch.Send(f, Downstream)
-						return
-					default:
-						p.playbackQueue = p.playbackQueue[1:]
-					}
-				}
-			mix:
-				opusData := p.mixAndEncode(botPCM)
-				if opusData == nil {
-					continue
-				}
-				p.botTrack.WriteSample(media.Sample{
-					Data:     opusData,
-					Duration: 20 * time.Millisecond,
-				}, nil)
-			}
-		}
 	}
 }

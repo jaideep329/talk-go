@@ -25,11 +25,17 @@ type MetricsData struct {
 // MetricsFrame carries metrics through the pipeline as a system frame.
 // It is intercepted by the pipeline's Send function and never reaches processors.
 type MetricsFrame struct {
+	FrameBase
 	Data []MetricsData
 }
 
-func (f MetricsFrame) FrameType() FrameType { return MetricsType }
-func (f MetricsFrame) IsSystem() bool       { return true }
+func NewMetricsFrame(data []MetricsData) MetricsFrame {
+	return MetricsFrame{FrameBase: FrameBase{Meta: newFrameMeta("MetricsFrame")}, Data: data}
+}
+
+func (f MetricsFrame) FrameType() FrameType  { return MetricsType }
+func (f MetricsFrame) IsSystem() bool        { return true }
+func (f MetricsFrame) IsInterruptible() bool { return false }
 
 // ProcessorMetrics is a lightweight helper for timing measurements.
 // Embed in any processor that needs to emit metrics. Thread-safe.
@@ -71,11 +77,12 @@ func (m *ProcessorMetrics) Stop(label MetricLabel) *MetricsFrame {
 	}
 	valueMs := float64(time.Since(start).Microseconds()) / 1000.0
 	delete(m.timers, label)
-	return &MetricsFrame{Data: []MetricsData{{
+	mf := NewMetricsFrame([]MetricsData{{
 		Processor: m.processor,
 		Label:     label,
 		ValueMs:   valueMs,
-	}}}
+	}})
+	return &mf
 }
 
 // Reset clears all pending timers (e.g., on interrupt).

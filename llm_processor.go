@@ -8,22 +8,65 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 )
 
+// llmEndpoint is the OpenAI Chat Completions URL. Exposed as a package
+// variable so tests can override it to point at an httptest server.
+var llmEndpoint = "https://api.openai.com/v1/chat/completions"
+
 type LLMProcessor struct {
-	sessionCtx     *SessionContext
-	metrics        *ProcessorMetrics
-	isStreaming    bool
-	cancelLLM      context.CancelFunc
-	responseFrames chan Frame
+	*BaseProcessor
+	taskCtx   *TaskContext
+	metrics   *ProcessorMetrics
+	cancelMu  sync.Mutex
+	cancelLLM context.CancelFunc
 }
 
-func NewLLMProcessor(sessionCtx *SessionContext) *LLMProcessor {
-	return &LLMProcessor{
-		sessionCtx:     sessionCtx,
-		metrics:        NewProcessorMetrics("llm"),
-		responseFrames: make(chan Frame, 100),
+func NewLLMProcessor(taskCtx *TaskContext) *LLMProcessor {
+	p := &LLMProcessor{
+		taskCtx: taskCtx,
+		metrics: NewProcessorMetrics("llm"),
+	}
+	p.BaseProcessor = NewBaseProcessor("LLM", p, taskCtx)
+	return p
+}
+
+func (p *LLMProcessor) ProcessFrame(ctx context.Context, frame Frame, dir Direction) {
+	switch f := frame.(type) {
+	case EndFrame:
+		p.taskCtx.Logger.Printf("EndFrame at LLMProcessor, cancelling LLM: reason=%q\n", f.Reason)
+		p.cancelInFlight()
+		p.metrics.Reset()
+		p.PushFrame(f, dir)
+	case LLMMessagesFrame:
+		runCtx, cancel := context.WithCancel(ctx)
+		p.cancelMu.Lock()
+		if p.cancelLLM != nil {
+			p.cancelLLM()
+		}
+		p.cancelLLM = cancel
+		p.cancelMu.Unlock()
+		p.Go(func() { p.runLLM(runCtx, f.Messages) })
+	case InterruptFrame:
+		// Base has already cancelled the previous procCtx, which cancels any
+		// in-flight runLLM transitively. Clearing the stored cancel func is
+		// just bookkeeping.
+		p.cancelInFlight()
+		p.metrics.Reset()
+		p.PushFrame(frame, dir)
+	default:
+		p.PushFrame(frame, dir)
+	}
+}
+
+func (p *LLMProcessor) cancelInFlight() {
+	p.cancelMu.Lock()
+	defer p.cancelMu.Unlock()
+	if p.cancelLLM != nil {
+		p.cancelLLM()
+		p.cancelLLM = nil
 	}
 }
 
@@ -35,23 +78,27 @@ func (p *LLMProcessor) runLLM(ctx context.Context, messages []map[string]string)
 	}
 	jsonBody, err := json.Marshal(body)
 	if err != nil {
-		p.sessionCtx.Logger.Println("json marshal error:", err)
+		p.taskCtx.Logger.Println("json marshal error:", err)
 		return
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", "https://api.openai.com/v1/chat/completions", bytes.NewReader(jsonBody))
+	req, err := http.NewRequestWithContext(ctx, "POST", llmEndpoint, bytes.NewReader(jsonBody))
 	if err != nil {
-		p.sessionCtx.Logger.Println("request error:", err)
+		p.taskCtx.Logger.Println("request error:", err)
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+os.Getenv("OPENAI_API_KEY"))
+
 	p.metrics.Start(MetricTTFB)
 	p.metrics.Start(MetricProcessing)
-	p.responseFrames <- LLMResponseStartFrame{StartedAt: time.Now()}
+	p.PushFrame(NewLLMResponseStartFrame(time.Now()), Downstream)
+
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		p.sessionCtx.Logger.Println("LLM request failed:", err)
+		if ctx.Err() == nil {
+			p.taskCtx.Logger.Println("LLM request failed:", err)
+		}
 		return
 	}
 	defer resp.Body.Close()
@@ -59,6 +106,9 @@ func (p *LLMProcessor) runLLM(ctx context.Context, messages []map[string]string)
 	firstToken := true
 	scanner := bufio.NewScanner(resp.Body)
 	for scanner.Scan() {
+		if ctx.Err() != nil {
+			return
+		}
 		line := scanner.Text()
 		if !strings.HasPrefix(line, "data: ") {
 			continue
@@ -78,100 +128,25 @@ func (p *LLMProcessor) runLLM(ctx context.Context, messages []map[string]string)
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
 			continue
 		}
-		if len(chunk.Choices) > 0 {
-			content := chunk.Choices[0].Delta.Content
-			if content == "" {
-				continue
-			}
-			if firstToken {
-				firstToken = false
-				if mf := p.metrics.Stop(MetricTTFB); mf != nil {
-					p.responseFrames <- *mf
-				}
-			}
-			p.responseFrames <- TextFrame{Text: content}
+		if len(chunk.Choices) == 0 {
+			continue
 		}
+		content := chunk.Choices[0].Delta.Content
+		if content == "" {
+			continue
+		}
+		if firstToken {
+			firstToken = false
+			if mf := p.metrics.Stop(MetricTTFB); mf != nil {
+				p.PushFrame(*mf, Downstream)
+			}
+		}
+		p.PushFrame(NewTextFrame(content), Downstream)
 	}
 	if ctx.Err() == nil {
 		if mf := p.metrics.Stop(MetricProcessing); mf != nil {
-			p.responseFrames <- *mf
+			p.PushFrame(*mf, Downstream)
 		}
-		p.responseFrames <- LLMResponseEndFrame{}
-	}
-}
-
-func (p *LLMProcessor) Process(ch ProcessorChannels) {
-	for {
-		select {
-		case frame := <-ch.System:
-			switch frame.(type) {
-			case InterruptFrame:
-				if p.cancelLLM != nil {
-					p.cancelLLM()
-				}
-				p.metrics.Reset()
-				p.isStreaming = false
-				ch.Send(frame, Downstream) // propagate to TTS/PlaybackSink
-			}
-		default:
-			select {
-			case frame := <-ch.System:
-				switch frame.(type) {
-				case InterruptFrame:
-					if p.cancelLLM != nil {
-						p.cancelLLM()
-					}
-					p.metrics.Reset()
-					p.isStreaming = false
-					ch.Send(frame, Downstream)
-				}
-			case frame, ok := <-ch.Data:
-				if !ok {
-					return
-				}
-				switch f := frame.(type) {
-				case EndFrame:
-					p.sessionCtx.Logger.Printf("EndFrame at LLMProcessor data path, cancelling LLM and forwarding downstream: reason=%q\n", f.Reason)
-					if p.cancelLLM != nil {
-						p.cancelLLM()
-					}
-					p.metrics.Reset()
-					p.isStreaming = false
-					ch.Send(f, Downstream)
-					return
-				case LLMMessagesFrame:
-					ctx, cancel := context.WithCancel(context.Background())
-					p.cancelLLM = cancel
-					go p.runLLM(ctx, f.Messages)
-				// Pass-through downstream
-				case TTSSpeakFrame:
-					ch.Send(f, Downstream)
-				// Upstream frames — forward to ContextAggregator
-				case WordTimestampFrame:
-					ch.Send(f, Upstream)
-				case TTSDoneFrame:
-					p.isStreaming = false
-					ch.Send(f, Upstream)
-				case BotStartedSpeakingFrame:
-					ch.Send(f, Upstream)
-				case BotStoppedSpeakingFrame:
-					ch.Send(f, Upstream)
-				default:
-					p.sessionCtx.Logger.Printf("LLM received unexpected frame: %T\n", f)
-				}
-			case responseFrame := <-p.responseFrames:
-				switch responseFrame.(type) {
-				case LLMResponseStartFrame:
-					p.isStreaming = true
-					ch.Send(responseFrame, Downstream)
-				case LLMResponseEndFrame:
-					ch.Send(responseFrame, Downstream)
-				default:
-					if p.isStreaming {
-						ch.Send(responseFrame, Downstream)
-					}
-				}
-			}
-		}
+		p.PushFrame(NewLLMResponseEndFrame(), Downstream)
 	}
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/binary"
 
 	"github.com/hraban/opus"
@@ -8,35 +9,41 @@ import (
 )
 
 type AudioSourceProcessor struct {
-	sessionCtx  *SessionContext
-	audioFrames chan Frame
+	*BaseProcessor
+	taskCtx *TaskContext
 }
 
-func NewAudioSourceProcessor(sessionCtx *SessionContext) *AudioSourceProcessor {
-	return &AudioSourceProcessor{
-		sessionCtx:  sessionCtx,
-		audioFrames: make(chan Frame, 100),
-	}
+func NewAudioSourceProcessor(taskCtx *TaskContext) *AudioSourceProcessor {
+	a := &AudioSourceProcessor{taskCtx: taskCtx}
+	a.BaseProcessor = NewBaseProcessor("AudioSource", a, taskCtx)
+	return a
 }
 
 func (a *AudioSourceProcessor) readAudioTrack(track *webrtc.TrackRemote) {
 	decoder, err := opus.NewDecoder(16000, 1)
 	if err != nil {
-		a.sessionCtx.Logger.Fatal("failed to create opus decoder:", err)
+		a.taskCtx.Logger.Fatal("failed to create opus decoder:", err)
 	}
 
 	pcmBuf := make([]int16, 960)
 
 	for {
+		select {
+		case <-a.ctx.Done():
+			a.taskCtx.Logger.Println("audio source reader exiting: processor stopped")
+			return
+		default:
+		}
+
 		rtpPacket, _, err := track.ReadRTP()
 		if err != nil {
-			a.sessionCtx.Logger.Println("track read error:", err)
+			a.taskCtx.Logger.Println("track read error:", err)
 			return
 		}
 
 		n, err := decoder.Decode(rtpPacket.Payload, pcmBuf)
 		if err != nil {
-			a.sessionCtx.Logger.Println("opus decode error:", err)
+			a.taskCtx.Logger.Println("opus decode error:", err)
 			continue
 		}
 
@@ -45,38 +52,23 @@ func (a *AudioSourceProcessor) readAudioTrack(track *webrtc.TrackRemote) {
 			binary.LittleEndian.PutUint16(pcmBytes[i*2:], uint16(pcmBuf[i]))
 		}
 
-		select {
-		case <-a.sessionCtx.Ctx.Done():
-			a.sessionCtx.Logger.Println("audio source reader exiting: session closed")
-			return
-		case a.audioFrames <- AudioFrame{Data: pcmBytes}:
-		}
+		a.PushFrame(NewAudioFrame(pcmBytes), Downstream)
 	}
 }
 
+// SetTrack is called by the LiveKit OnTrackSubscribed callback. It spawns
+// a tracked goroutine that reads RTP packets, decodes opus to PCM, and
+// pushes AudioFrames downstream.
 func (a *AudioSourceProcessor) SetTrack(track *webrtc.TrackRemote) {
-	go a.readAudioTrack(track)
+	a.Go(func() { a.readAudioTrack(track) })
 }
 
-func (a *AudioSourceProcessor) Process(ch ProcessorChannels) {
-	for {
-		select {
-		case frame := <-ch.System:
-			ch.Send(frame, Downstream)
-		case frame, ok := <-ch.Data:
-			if !ok {
-				return
-			}
-			switch f := frame.(type) {
-			case EndFrame:
-				a.sessionCtx.Logger.Printf("EndFrame at AudioSourceProcessor, forwarding downstream: reason=%q\n", f.Reason)
-				ch.Send(f, Downstream)
-				return
-			default:
-				a.sessionCtx.Logger.Printf("AudioSource received unexpected frame: %T\n", f)
-			}
-		case frame := <-a.audioFrames:
-			ch.Send(frame, Downstream)
-		}
+func (a *AudioSourceProcessor) ProcessFrame(ctx context.Context, frame Frame, dir Direction) {
+	switch f := frame.(type) {
+	case EndFrame:
+		a.taskCtx.Logger.Printf("EndFrame at AudioSourceProcessor: reason=%q\n", f.Reason)
+		a.PushFrame(f, dir)
+	default:
+		a.PushFrame(frame, dir)
 	}
 }

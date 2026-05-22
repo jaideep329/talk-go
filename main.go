@@ -52,8 +52,8 @@ func handleConnect(w http.ResponseWriter, r *http.Request) {
 
 func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	roomName := r.URL.Query().Get("room")
-	session := getSession(roomName)
-	if session == nil {
+	task := getSession(roomName)
+	if task == nil {
 		http.Error(w, "unknown room", http.StatusNotFound)
 		return
 	}
@@ -62,26 +62,26 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		log.Printf("WebSocket upgrade error: %v", err)
 		return
 	}
-	session.SessionCtx.UIEvents.AddClient(conn)
+	task.TaskCtx.UIEvents.AddClient(conn)
 	// Keep connection alive — read until client disconnects
 	for {
 		_, msg, err := conn.ReadMessage()
 		if err != nil {
-			session.SessionCtx.Logger.Printf("UI websocket disconnected, requesting EndFrame: %v\n", err)
-			session.SessionCtx.UIEvents.RemoveClient(conn)
-			session.End("ui websocket disconnected")
+			task.TaskCtx.Logger.Printf("UI websocket disconnected, requesting EndFrame: %v\n", err)
+			task.TaskCtx.UIEvents.RemoveClient(conn)
+			task.End("ui websocket disconnected")
 			return
 		}
 		var event struct {
 			Type string `json:"type"`
 		}
 		if err := json.Unmarshal(msg, &event); err != nil {
-			session.SessionCtx.Logger.Printf("Ignoring malformed websocket message: %v\n", err)
+			task.TaskCtx.Logger.Printf("Ignoring malformed websocket message: %v\n", err)
 			continue
 		}
 		if event.Type == "end_call" {
-			session.SessionCtx.Logger.Println("UI requested end_call, requesting EndFrame")
-			session.End("ui requested end call")
+			task.TaskCtx.Logger.Println("UI requested end_call, requesting EndFrame")
+			task.End("ui requested end call")
 		}
 	}
 }

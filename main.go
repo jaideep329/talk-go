@@ -22,7 +22,6 @@ func main() {
 	stdr.SetVerbosity(0)
 	lksdk.SetLogger(protoLogger.LogRLogger(stdr.New(log.New(io.Discard, "", 0))))
 	http.HandleFunc("/connect", handleConnect)
-	http.HandleFunc("/ws", handleWebSocket)
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		http.ServeFile(w, r, "livekit-client.html")
 	})
@@ -48,42 +47,6 @@ func handleConnect(w http.ResponseWriter, r *http.Request) {
 		"token":      token,
 		"room_name":  roomName,
 	})
-}
-
-func handleWebSocket(w http.ResponseWriter, r *http.Request) {
-	roomName := r.URL.Query().Get("room")
-	task := getSession(roomName)
-	if task == nil {
-		http.Error(w, "unknown room", http.StatusNotFound)
-		return
-	}
-	conn, err := upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		log.Printf("WebSocket upgrade error: %v", err)
-		return
-	}
-	task.TaskCtx.UIEvents.AddClient(conn)
-	// Keep connection alive — read until client disconnects
-	for {
-		_, msg, err := conn.ReadMessage()
-		if err != nil {
-			task.TaskCtx.Logger.Printf("UI websocket disconnected, requesting EndFrame: %v\n", err)
-			task.TaskCtx.UIEvents.RemoveClient(conn)
-			task.End("ui websocket disconnected")
-			return
-		}
-		var event struct {
-			Type string `json:"type"`
-		}
-		if err := json.Unmarshal(msg, &event); err != nil {
-			task.TaskCtx.Logger.Printf("Ignoring malformed websocket message: %v\n", err)
-			continue
-		}
-		if event.Type == "end_call" {
-			task.TaskCtx.Logger.Println("UI requested end_call, requesting EndFrame")
-			task.End("ui requested end call")
-		}
-	}
 }
 
 func loadEnv(path string) {

@@ -5,12 +5,33 @@ import (
 	"fmt"
 	"log"
 	"math/rand/v2"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	lksdk "github.com/livekit/server-sdk-go/v2"
 )
+
+// captureGoroutineStacks returns a textual dump of every live
+// goroutine's stack. Used as a last-resort diagnostic when
+// completeEnd's wg.Wait times out — the dump tells us which
+// goroutines (STT reader, TTS reader, playback, etc.) are still
+// blocked and exactly which call they're parked on. The buffer is
+// grown until runtime.Stack stops truncating.
+func captureGoroutineStacks() string {
+	buf := make([]byte, 64<<10) // 64 KiB to start
+	for {
+		n := runtime.Stack(buf, true)
+		if n < len(buf) {
+			return string(buf[:n])
+		}
+		if len(buf) >= 8<<20 { // cap at 8 MiB
+			return string(buf[:n])
+		}
+		buf = make([]byte, len(buf)*2)
+	}
+}
 
 // Pipeline is a thin wrapper that links processors into a chain and
 // starts each one. Routing is distributed — each processor knows its
@@ -130,7 +151,11 @@ func createSession() (string, *PipelineTask) {
 
 	pipelineSource := NewPipelineSourceProcessor(taskCtx)
 	audioSource := NewAudioSourceProcessor(taskCtx)
-	taskCtx.Room = joinRoom(roomName, audioSource)
+	taskCtx.Room = joinRoom(roomName, taskCtx, audioSource)
+	// Hand the room to the UI sender so it can publish DataPackets.
+	// Any events emitted before this point (none today, but
+	// defensive) silently no-op.
+	uiEvents.SetRoom(taskCtx.Room)
 	task.Source = pipelineSource
 
 	sessionsMu.Lock()
@@ -182,42 +207,63 @@ func (t *PipelineTask) End(reason string) {
 	t.Source.Queue(NewEndFrame(reason))
 }
 
+// completeEnd is the EndFrame-driven cleanup. It is called from inside
+// PipelineSinkProcessor.ProcessFrame, which runs on the sink's
+// processLoop goroutine — a goroutine tracked by t.wg. If we ran the
+// cleanup synchronously, t.wg.Wait() below would deadlock waiting for
+// the very goroutine it's running in to call Done() (which only fires
+// when ProcessFrame returns).
+//
+// Fix: dispatch the body to a separate, untracked goroutine and return
+// immediately. The sink's processLoop then sees ProcessFrame return,
+// auto-cancels b.ctx (per its EndFrame handler), and its deferred
+// Done() fires — allowing the wg drain to make progress.
+//
+// cleanupOnce still gates re-entry, so even if completeEnd is invoked
+// multiple times, runCleanup runs exactly once.
 func (t *PipelineTask) completeEnd(frame EndFrame) {
 	t.cleanupOnce.Do(func() {
-		t.endRequested.Store(true)
-		t.cleanupStarted.Store(true)
-		reason := frame.Reason
-		if reason == "" {
-			reason = "unspecified"
-		}
-		t.TaskCtx.Logger.Printf("EndFrame reached pipeline sink, cleaning up task: %s\n", reason)
-		t.TaskCtx.UIEvents.Send(UIEvent{Type: CallEnded, Data: map[string]interface{}{"reason": reason}})
-
-		// Stop signals cancellation to all processors; the actual wait happens
-		// via the shared WaitGroup below.
-		t.Pipeline.Stop()
-
-		// Disconnect the LiveKit room before waiting. AudioSource's
-		// ReadRTP doesn't respect context, so its reader only exits when
-		// the room is closed — disconnecting here unblocks it so the
-		// WaitGroup can drain.
-		if t.TaskCtx.Room != nil {
-			t.TaskCtx.Room.Disconnect()
-		}
-
-		// Bounded wait for stragglers — 10s gives TTS's 8s pending-end timeout
-		// room to fire before we hard-cancel.
-		done := make(chan struct{})
-		go func() { t.wg.Wait(); close(done) }()
-		select {
-		case <-done:
-			t.TaskCtx.Logger.Println("All processor goroutines exited cleanly")
-		case <-time.After(10 * time.Second):
-			t.TaskCtx.Logger.Println("Timed out waiting 10s for processor goroutines")
-		}
-
-		t.Cancel()
-		removeSession(t.RoomName)
-		t.TaskCtx.Logger.Printf("PipelineTask cleanup complete after EndFrame: reason=%q\n", reason)
+		go t.runCleanup(frame)
 	})
+}
+
+func (t *PipelineTask) runCleanup(frame EndFrame) {
+	t.endRequested.Store(true)
+	t.cleanupStarted.Store(true)
+	reason := frame.Reason
+	if reason == "" {
+		reason = "unspecified"
+	}
+	t.TaskCtx.Logger.Printf("EndFrame reached pipeline sink, cleaning up task: %s\n", reason)
+	t.TaskCtx.UIEvents.Send(UIEvent{Type: CallEnded, Data: map[string]interface{}{"reason": reason}})
+
+	// Stop signals cancellation to all processors; the actual wait happens
+	// via the shared WaitGroup below.
+	t.Pipeline.Stop()
+
+	// Disconnect the LiveKit room before waiting. AudioSource's
+	// ReadRTP doesn't respect context, so its reader only exits when
+	// the room is closed — disconnecting here unblocks it so the
+	// WaitGroup can drain.
+	if t.TaskCtx.Room != nil {
+		t.TaskCtx.Room.Disconnect()
+	}
+
+	// Bounded wait for stragglers — 10s gives TTS's pending-end deferral
+	// room to fire before we hard-cancel. If we time out, dump every
+	// live goroutine's stack so we can see which one is blocked and
+	// where.
+	done := make(chan struct{})
+	go func() { t.wg.Wait(); close(done) }()
+	select {
+	case <-done:
+		t.TaskCtx.Logger.Println("All processor goroutines exited cleanly")
+	case <-time.After(10 * time.Second):
+		t.TaskCtx.Logger.Println("Timed out waiting 10s for processor goroutines; dumping stacks:")
+		t.TaskCtx.Logger.Println(captureGoroutineStacks())
+	}
+
+	t.Cancel()
+	removeSession(t.RoomName)
+	t.TaskCtx.Logger.Printf("PipelineTask cleanup complete after EndFrame: reason=%q\n", reason)
 }

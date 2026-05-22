@@ -204,10 +204,11 @@
   <script>
     // LiveKit SDK loaded lazily on first connect
     let Room, RoomEvent;
-    // Keep room and ws outside Alpine's reactive proxy — LiveKit uses
+    // Keep room outside Alpine's reactive proxy — LiveKit uses
     // structuredClone internally which breaks on Proxy objects.
     let _room = null;
-    let _ws = null;
+    const _decoder = new TextDecoder();
+    const _encoder = new TextEncoder();
 
     function app() {
       return {
@@ -250,12 +251,6 @@
             const { server_url, token, room_name } = await res.json();
             this.roomName = room_name;
 
-            // Connect WebSocket for UI events
-            const wsProtocol = location.protocol === "https:" ? "wss:" : "ws:";
-            _ws = new WebSocket(`${wsProtocol}//${location.host}/ws?room=${room_name}`);
-            _ws.onmessage = (e) => this.handleUIEvent(JSON.parse(e.data));
-            _ws.onclose = () => console.log("UI WebSocket closed");
-
             // Connect LiveKit (outside Alpine proxy)
             _room = new Room();
             const remoteAudio = document.getElementById("remote-audio");
@@ -267,8 +262,21 @@
               for (const el of track.detach()) el.remove();
             });
             _room.on(RoomEvent.Disconnected, () => {
-              this.connected = false;
+              // The room can disconnect for reasons other than our
+              // `call_ended` path (network drop, server-side end).
+              // Tear down local state so the UI stays consistent.
               this.connecting = false;
+              this.finishDisconnect();
+            });
+            // UI events arrive on the same WebRTC peer connection as
+            // audio, via the data channel. No separate WebSocket.
+            _room.on(RoomEvent.DataReceived, (payload, participant, kind, topic) => {
+              try {
+                const event = JSON.parse(_decoder.decode(payload));
+                this.handleUIEvent(event);
+              } catch (err) {
+                console.warn("UI data parse error:", err);
+              }
             });
 
             await _room.connect(server_url, token);
@@ -281,10 +289,22 @@
           }
         },
 
-        disconnect() {
-          if (_ws && _ws.readyState === WebSocket.OPEN) {
-            _ws.send(JSON.stringify({ type: "end_call" }));
-            return;
+        async disconnect() {
+          // Ask the bot to drain gracefully via a control data packet.
+          // The bot will publish `call_ended` once cleanup completes,
+          // and we tear down the room then. If publish fails (room not
+          // ready / already gone), just tear down immediately.
+          if (_room && _room.localParticipant) {
+            try {
+              const payload = _encoder.encode(JSON.stringify({ type: "end_call" }));
+              await _room.localParticipant.publishData(payload, {
+                reliable: true,
+                topic: "control",
+              });
+              return;
+            } catch (err) {
+              console.warn("publishData(end_call) failed, tearing down locally:", err);
+            }
           }
           this.finishDisconnect();
         },
@@ -293,10 +313,6 @@
           if (_room) {
             _room.disconnect();
             _room = null;
-          }
-          if (_ws) {
-            _ws.close();
-            _ws = null;
           }
           this.connected = false;
           this.roomName = "";

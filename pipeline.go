@@ -49,12 +49,19 @@ func (p *Pipeline) Stop() {
 // Metrics is the handler invoked when a MetricsFrame is emitted by any
 // processor (intercepted in BaseProcessor.PushFrame). wg is the shared
 // WaitGroup used by BaseProcessor.Go() to track goroutines.
+//
+// EndTask is a closure that lets any processor request graceful task
+// shutdown without holding a reference to PipelineTask. It enqueues an
+// EndFrame at PipelineSource so every processor (including upstream of
+// the caller) sees the EndFrame in pipeline order. Wired by
+// createSession to PipelineTask.End.
 type TaskContext struct {
 	Ctx      context.Context
 	Logger   *log.Logger
 	Room     *lksdk.Room
 	UIEvents *UIEventSender
 	Metrics  func(MetricsFrame)
+	EndTask  func(reason string)
 	wg       *sync.WaitGroup
 }
 
@@ -116,6 +123,7 @@ func createSession() (string, *PipelineTask) {
 		Logger:   logger,
 		UIEvents: uiEvents,
 		Metrics:  metricsHandler,
+		EndTask:  task.End,
 		wg:       &task.wg,
 	}
 	task.TaskCtx = taskCtx
@@ -171,7 +179,7 @@ func (t *PipelineTask) End(reason string) {
 		return
 	}
 	t.TaskCtx.Logger.Printf("Queueing EndFrame: %s\n", reason)
-	t.Source.Queue(EndFrame{Reason: reason})
+	t.Source.Queue(NewEndFrame(reason))
 }
 
 func (t *PipelineTask) completeEnd(frame EndFrame) {

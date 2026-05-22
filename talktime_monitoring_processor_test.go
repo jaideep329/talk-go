@@ -88,10 +88,11 @@ func TestTalkTime_DropsDownstreamFramesDuringShutdown(t *testing.T) {
 	source.QueueFrame(TextFrame{Text: "late"}, Downstream)
 	time.Sleep(50 * time.Millisecond)
 
-	// Explicit Stop: TalkTime emitted EndFrame from its timer goroutine,
-	// so source's base goroutines never see the EndFrame and won't
-	// auto-cancel. This mirrors what PipelineTask.completeEnd does in
-	// production via pipeline.Stop().
+	// Explicit Stop: this test bypasses runProcessorTest, so taskCtx.EndTask
+	// was never wired and TalkTime's call to it was a no-op (no EndFrame
+	// reaches the pipeline). We still need to stop the chain explicitly,
+	// mirroring what PipelineTask.completeEnd does in production via
+	// pipeline.Stop().
 	source.Stop()
 	p.Stop()
 	sink.Stop()

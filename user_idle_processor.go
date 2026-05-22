@@ -40,7 +40,7 @@ func (p *UserIdleProcessor) startIdleTimer() {
 	p.idleTimer = time.AfterFunc(idleTimeout, func() {
 		count := p.idlePromptCount.Add(1)
 		p.taskCtx.Logger.Printf("User idle (%d/%d), injecting prompt\n", count, maxIdlePrompts)
-		p.PushFrame(TTSSpeakFrame{Text: idlePromptText}, Downstream)
+		p.PushFrame(NewTTSSpeakFrame(idlePromptText), Downstream)
 	})
 }
 

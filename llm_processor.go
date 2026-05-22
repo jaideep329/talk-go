@@ -92,7 +92,7 @@ func (p *LLMProcessor) runLLM(ctx context.Context, messages []map[string]string)
 
 	p.metrics.Start(MetricTTFB)
 	p.metrics.Start(MetricProcessing)
-	p.PushFrame(LLMResponseStartFrame{StartedAt: time.Now()}, Downstream)
+	p.PushFrame(NewLLMResponseStartFrame(time.Now()), Downstream)
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -141,12 +141,12 @@ func (p *LLMProcessor) runLLM(ctx context.Context, messages []map[string]string)
 				p.PushFrame(*mf, Downstream)
 			}
 		}
-		p.PushFrame(TextFrame{Text: content}, Downstream)
+		p.PushFrame(NewTextFrame(content), Downstream)
 	}
 	if ctx.Err() == nil {
 		if mf := p.metrics.Stop(MetricProcessing); mf != nil {
 			p.PushFrame(*mf, Downstream)
 		}
-		p.PushFrame(LLMResponseEndFrame{}, Downstream)
+		p.PushFrame(NewLLMResponseEndFrame(), Downstream)
 	}
 }

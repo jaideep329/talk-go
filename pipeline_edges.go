@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 )
 
@@ -64,9 +65,25 @@ func (p *PipelineSourceProcessor) drainExternalFrames() {
 }
 
 func (p *PipelineSourceProcessor) ProcessFrame(ctx context.Context, frame Frame, dir Direction) {
-	// Upstream-direction frames from neighbors have no further upstream
-	// target (Prev is nil at the source). Downstream-direction frames
-	// arrive only via Queue, not via ProcessFrame. Drop silently.
+	// ErrorFrames bubble up to the source so they can be logged
+	// centrally and (if fatal) trigger task shutdown via EndTask.
+	// PushError on every processor routes here.
+	if ef, ok := frame.(ErrorFrame); ok {
+		if p.logger != nil {
+			fatalTag := ""
+			if ef.Fatal {
+				fatalTag = " (fatal)"
+			}
+			p.logger.Printf("ErrorFrame at pipeline source from %s%s: %s\n", ef.Processor, fatalTag, ef.Err)
+		}
+		if ef.Fatal && p.taskCtx != nil {
+			p.taskCtx.EndTask(fmt.Sprintf("fatal error from %s: %s", ef.Processor, ef.Err))
+		}
+		return
+	}
+	// Other upstream-direction frames from neighbors have no further
+	// upstream target (Prev is nil at the source). Downstream-direction
+	// frames arrive only via Queue, not via ProcessFrame. Drop silently.
 }
 
 // PipelineSinkProcessor terminates the chain. It invokes onEnd when an

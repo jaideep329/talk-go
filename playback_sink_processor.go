@@ -219,7 +219,7 @@ func (p *PlaybackSinkProcessor) tick() bool {
 				// cancel its idle timer; downstream is informational for
 				// any future post-Playback consumer. Mirrors Pipecat's
 				// BaseOutputTransport.MediaSender._bot_started_speaking.
-				p.Broadcast(BotStartedSpeakingFrame{})
+				p.Broadcast(NewBotStartedSpeakingFrame())
 				if mf := p.metrics.Stop(MetricE2ELatency); mf != nil {
 					p.PushFrame(*mf, Downstream)
 				}
@@ -237,7 +237,7 @@ func (p *PlaybackSinkProcessor) tick() bool {
 			// Broadcast: upstream tells ContextAggregator/UserIdle that
 			// the bot finished speaking; downstream copy is for parity
 			// with Pipecat (no consumer today).
-			p.Broadcast(BotStoppedSpeakingFrame{})
+			p.Broadcast(NewBotStoppedSpeakingFrame())
 			p.playbackQueue = p.playbackQueue[1:]
 		case EndFrame:
 			p.playbackQueue = p.playbackQueue[1:]

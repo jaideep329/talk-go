@@ -227,6 +227,26 @@ func (b *BaseProcessor) Broadcast(frame BroadcastableFrame) {
 	b.PushFrame(up, Upstream)
 }
 
+// PushError emits an ErrorFrame upstream so PipelineSourceProcessor can
+// log it and (if fatal) terminate the task via taskCtx.EndTask. Mirrors
+// Pipecat's FrameProcessor.push_error: the processor that detects an
+// error reports it, the source decides what to do.
+//
+// ErrorFrame is a system frame so it bubbles past any queued data
+// frames upstream; non-fatal errors are informational, fatal errors
+// trigger graceful task shutdown at the source.
+func (b *BaseProcessor) PushError(errMsg string, fatal bool) {
+	frame := NewErrorFrame(b.name, errMsg, fatal)
+	if b.taskCtx != nil && b.taskCtx.Logger != nil {
+		fatalTag := ""
+		if fatal {
+			fatalTag = " (fatal)"
+		}
+		b.taskCtx.Logger.Printf("ErrorFrame pushed from %s%s: %s\n", b.name, fatalTag, errMsg)
+	}
+	b.PushFrame(frame, Upstream)
+}
+
 // Start begins the input and process loops. Concrete processors that
 // need their own background goroutines should call BaseProcessor.Start
 // first, then b.Go(...) to register them.

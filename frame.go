@@ -1,10 +1,56 @@
 package main
 
-import "time"
+import (
+	"fmt"
+	"sync/atomic"
+	"time"
+)
 
 type FrameType int
 
+// FrameMeta holds the identifying metadata for a frame. ID is assigned
+// monotonically by newFrameMeta so a frame can be traced as it travels
+// through the pipeline. Name is the Go type name, included for logs.
+// Mirrors Pipecat's name+id pair (see FrameProcessor: "FooFrame#42").
+type FrameMeta struct {
+	ID   int64
+	Name string
+}
+
+// FrameBase is embedded into every concrete frame type. It carries the
+// per-frame ID and name and provides default ID()/Name()/String()
+// implementations. Value-receiver methods are fine because Meta is set
+// once at construction and never mutated.
+type FrameBase struct {
+	Meta FrameMeta
+}
+
+func (b FrameBase) ID() int64    { return b.Meta.ID }
+func (b FrameBase) Name() string { return b.Meta.Name }
+func (b FrameBase) String() string {
+	if b.Meta.Name == "" {
+		return fmt.Sprintf("<unnamed>#%d", b.Meta.ID)
+	}
+	return fmt.Sprintf("%s#%d", b.Meta.Name, b.Meta.ID)
+}
+
+// nextFrameID hands out monotonically increasing IDs. Package-scoped
+// so IDs are globally unique within a process — useful for cross-task
+// log correlation.
+var nextFrameID atomic.Int64
+
+// newFrameMeta builds a FrameMeta with a fresh ID and the given name.
+// Constructors for each frame type call this. Frames constructed via
+// struct literals (allowed in tests) get a zero-value Meta — their
+// ID()/Name() return 0 and "".
+func newFrameMeta(name string) FrameMeta {
+	return FrameMeta{ID: nextFrameID.Add(1), Name: name}
+}
+
 // Frame is implemented by every frame flowing through the pipeline.
+//
+// ID + Name come from FrameBase (embedded in every concrete frame).
+// Used in logs to correlate the same frame as it traverses processors.
 //
 // IsSystem returns true for frames that should be processed with priority
 // (they bypass the per-processor data queue). System frames are handled
@@ -16,6 +62,8 @@ type FrameType int
 // interrupt. System frames are never enqueued in the purgeable queue, so
 // their value is conventional (false).
 type Frame interface {
+	ID() int64
+	Name() string
 	FrameType() FrameType
 	IsSystem() bool
 	IsInterruptible() bool
@@ -26,7 +74,8 @@ type Frame interface {
 // independent copy of the frame so the upstream and downstream copies
 // don't share mutable state. Most broadcast frames are zero-field structs
 // (BotStartedSpeakingFrame, BotStoppedSpeakingFrame) where Clone is a
-// one-liner returning the zero value.
+// one-liner returning a constructor call (which assigns a new ID, since
+// the two clones are distinct frame instances).
 type BroadcastableFrame interface {
 	Frame
 	Clone() Frame
@@ -47,18 +96,29 @@ const (
 	BotStartedSpeaking
 	BotStoppedSpeaking
 	LLMMessages
+	Error
 )
 
 type AudioFrame struct {
+	FrameBase
 	Data []byte
 }
 
-func (f AudioFrame) FrameType() FrameType { return Audio }
-func (f AudioFrame) IsSystem() bool       { return false }
+func NewAudioFrame(data []byte) AudioFrame {
+	return AudioFrame{FrameBase: FrameBase{Meta: newFrameMeta("AudioFrame")}, Data: data}
+}
+
+func (f AudioFrame) FrameType() FrameType  { return Audio }
+func (f AudioFrame) IsSystem() bool        { return false }
 func (f AudioFrame) IsInterruptible() bool { return true }
 
 type TextFrame struct {
+	FrameBase
 	Text string
+}
+
+func NewTextFrame(text string) TextFrame {
+	return TextFrame{FrameBase: FrameBase{Meta: newFrameMeta("TextFrame")}, Text: text}
 }
 
 func (f TextFrame) FrameType() FrameType  { return Text }
@@ -66,6 +126,11 @@ func (f TextFrame) IsSystem() bool        { return false }
 func (f TextFrame) IsInterruptible() bool { return true }
 
 type InterruptFrame struct {
+	FrameBase
+}
+
+func NewInterruptFrame() InterruptFrame {
+	return InterruptFrame{FrameBase: FrameBase{Meta: newFrameMeta("InterruptFrame")}}
 }
 
 func (f InterruptFrame) FrameType() FrameType  { return Interrupt }
@@ -73,7 +138,12 @@ func (f InterruptFrame) IsSystem() bool        { return true }
 func (f InterruptFrame) IsInterruptible() bool { return false }
 
 type LLMResponseStartFrame struct {
+	FrameBase
 	StartedAt time.Time
+}
+
+func NewLLMResponseStartFrame(startedAt time.Time) LLMResponseStartFrame {
+	return LLMResponseStartFrame{FrameBase: FrameBase{Meta: newFrameMeta("LLMResponseStartFrame")}, StartedAt: startedAt}
 }
 
 func (f LLMResponseStartFrame) FrameType() FrameType  { return LLMResponseStart }
@@ -81,6 +151,11 @@ func (f LLMResponseStartFrame) IsSystem() bool        { return false }
 func (f LLMResponseStartFrame) IsInterruptible() bool { return true }
 
 type LLMResponseEndFrame struct {
+	FrameBase
+}
+
+func NewLLMResponseEndFrame() LLMResponseEndFrame {
+	return LLMResponseEndFrame{FrameBase: FrameBase{Meta: newFrameMeta("LLMResponseEndFrame")}}
 }
 
 func (f LLMResponseEndFrame) FrameType() FrameType  { return LLMResponseEnd }
@@ -88,10 +163,21 @@ func (f LLMResponseEndFrame) IsSystem() bool        { return false }
 func (f LLMResponseEndFrame) IsInterruptible() bool { return true }
 
 type TranscriptFrame struct {
+	FrameBase
 	Text       string
 	IsFinal    bool
 	ResponseID int  // Groups tokens from the same STT websocket message.
 	Finished   bool // Stream-level Soniox flag; not an utterance boundary.
+}
+
+func NewTranscriptFrame(text string, isFinal bool, responseID int, finished bool) TranscriptFrame {
+	return TranscriptFrame{
+		FrameBase:  FrameBase{Meta: newFrameMeta("TranscriptFrame")},
+		Text:       text,
+		IsFinal:    isFinal,
+		ResponseID: responseID,
+		Finished:   finished,
+	}
 }
 
 func (f TranscriptFrame) FrameType() FrameType  { return Transcript }
@@ -105,7 +191,12 @@ func (f TranscriptFrame) IsInterruptible() bool { return true }
 // survives the purge. This mirrors Pipecat's UninterruptibleFrame mixin
 // on EndFrame.
 type EndFrame struct {
+	FrameBase
 	Reason string
+}
+
+func NewEndFrame(reason string) EndFrame {
+	return EndFrame{FrameBase: FrameBase{Meta: newFrameMeta("EndFrame")}, Reason: reason}
 }
 
 func (f EndFrame) FrameType() FrameType  { return End }
@@ -113,45 +204,106 @@ func (f EndFrame) IsSystem() bool        { return false }
 func (f EndFrame) IsInterruptible() bool { return false }
 
 type WordTimestampFrame struct {
+	FrameBase
 	Words []string
+}
+
+func NewWordTimestampFrame(words []string) WordTimestampFrame {
+	return WordTimestampFrame{FrameBase: FrameBase{Meta: newFrameMeta("WordTimestampFrame")}, Words: words}
 }
 
 func (f WordTimestampFrame) FrameType() FrameType  { return WordTimestamp }
 func (f WordTimestampFrame) IsSystem() bool        { return false }
 func (f WordTimestampFrame) IsInterruptible() bool { return true }
 
-type TTSDoneFrame struct{}
+type TTSDoneFrame struct {
+	FrameBase
+}
+
+func NewTTSDoneFrame() TTSDoneFrame {
+	return TTSDoneFrame{FrameBase: FrameBase{Meta: newFrameMeta("TTSDoneFrame")}}
+}
 
 func (f TTSDoneFrame) FrameType() FrameType  { return TTSDone }
 func (f TTSDoneFrame) IsSystem() bool        { return false }
 func (f TTSDoneFrame) IsInterruptible() bool { return true }
 
 type TTSSpeakFrame struct {
+	FrameBase
 	Text string
+}
+
+func NewTTSSpeakFrame(text string) TTSSpeakFrame {
+	return TTSSpeakFrame{FrameBase: FrameBase{Meta: newFrameMeta("TTSSpeakFrame")}, Text: text}
 }
 
 func (f TTSSpeakFrame) FrameType() FrameType  { return TTSSpeak }
 func (f TTSSpeakFrame) IsSystem() bool        { return false }
 func (f TTSSpeakFrame) IsInterruptible() bool { return true }
 
-type BotStartedSpeakingFrame struct{}
+type BotStartedSpeakingFrame struct {
+	FrameBase
+}
+
+func NewBotStartedSpeakingFrame() BotStartedSpeakingFrame {
+	return BotStartedSpeakingFrame{FrameBase: FrameBase{Meta: newFrameMeta("BotStartedSpeakingFrame")}}
+}
 
 func (f BotStartedSpeakingFrame) FrameType() FrameType  { return BotStartedSpeaking }
 func (f BotStartedSpeakingFrame) IsSystem() bool        { return false }
 func (f BotStartedSpeakingFrame) IsInterruptible() bool { return true }
-func (f BotStartedSpeakingFrame) Clone() Frame          { return BotStartedSpeakingFrame{} }
+func (f BotStartedSpeakingFrame) Clone() Frame          { return NewBotStartedSpeakingFrame() }
 
-type BotStoppedSpeakingFrame struct{}
+type BotStoppedSpeakingFrame struct {
+	FrameBase
+}
+
+func NewBotStoppedSpeakingFrame() BotStoppedSpeakingFrame {
+	return BotStoppedSpeakingFrame{FrameBase: FrameBase{Meta: newFrameMeta("BotStoppedSpeakingFrame")}}
+}
 
 func (f BotStoppedSpeakingFrame) FrameType() FrameType  { return BotStoppedSpeaking }
 func (f BotStoppedSpeakingFrame) IsSystem() bool        { return false }
 func (f BotStoppedSpeakingFrame) IsInterruptible() bool { return true }
-func (f BotStoppedSpeakingFrame) Clone() Frame          { return BotStoppedSpeakingFrame{} }
+func (f BotStoppedSpeakingFrame) Clone() Frame          { return NewBotStoppedSpeakingFrame() }
 
 type LLMMessagesFrame struct {
+	FrameBase
 	Messages []map[string]string
+}
+
+func NewLLMMessagesFrame(messages []map[string]string) LLMMessagesFrame {
+	return LLMMessagesFrame{FrameBase: FrameBase{Meta: newFrameMeta("LLMMessagesFrame")}, Messages: messages}
 }
 
 func (f LLMMessagesFrame) FrameType() FrameType  { return LLMMessages }
 func (f LLMMessagesFrame) IsSystem() bool        { return false }
 func (f LLMMessagesFrame) IsInterruptible() bool { return true }
+
+// ErrorFrame propagates an error upstream so the source can react
+// (log + optionally end the task on Fatal). Mirrors Pipecat's ErrorFrame:
+// pushed by BaseProcessor.PushError; routed to PipelineSourceProcessor
+// which decides whether to call TaskContext.EndTask.
+//
+// ErrorFrame is a system frame (urgent priority) so it bubbles past any
+// queued data frames. It survives interrupt purges because diagnostic
+// errors should not be silently dropped.
+type ErrorFrame struct {
+	FrameBase
+	Err       string // error message
+	Fatal     bool   // if true, PipelineSource calls EndTask
+	Processor string // name of the processor that pushed the error
+}
+
+func NewErrorFrame(processor, errMsg string, fatal bool) ErrorFrame {
+	return ErrorFrame{
+		FrameBase: FrameBase{Meta: newFrameMeta("ErrorFrame")},
+		Err:       errMsg,
+		Fatal:     fatal,
+		Processor: processor,
+	}
+}
+
+func (f ErrorFrame) FrameType() FrameType  { return Error }
+func (f ErrorFrame) IsSystem() bool        { return true }
+func (f ErrorFrame) IsInterruptible() bool { return false }

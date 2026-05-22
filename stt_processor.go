@@ -150,12 +150,7 @@ func (s *STTProcessor) read() {
 		s.taskCtx.Logger.Printf("STT response received: response_id=%d finished=%v tokens=%d\n", responseID, resp.Finished, len(resp.Tokens))
 		for _, tok := range resp.Tokens {
 			s.taskCtx.Logger.Printf("STT token received: response_id=%d finished=%v is_final=%v text=%q\n", responseID, resp.Finished, tok.IsFinal, tok.Text)
-			s.PushFrame(TranscriptFrame{
-				Text:       tok.Text,
-				IsFinal:    tok.IsFinal,
-				ResponseID: responseID,
-				Finished:   resp.Finished,
-			}, Downstream)
+			s.PushFrame(NewTranscriptFrame(tok.Text, tok.IsFinal, responseID, resp.Finished), Downstream)
 		}
 	}
 }

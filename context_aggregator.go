@@ -142,7 +142,7 @@ You are conducting your first telephonic consultation with a new client. You are
 	a.spokenWords = nil
 	a.resetInterimTranscript()
 	a.resetFinalTranscript()
-	a.PushFrame(LLMMessagesFrame{Messages: a.messages}, Downstream)
+	a.PushFrame(NewLLMMessagesFrame(a.messages), Downstream)
 }
 
 func (a *ContextAggregator) ProcessFrame(ctx context.Context, frame Frame, dir Direction) {
@@ -158,7 +158,7 @@ func (a *ContextAggregator) ProcessFrame(ctx context.Context, frame Frame, dir D
 		if a.botSpeaking && !a.interruptSent && !f.IsFinal {
 			if len(strings.Fields(interimTranscript)) >= minBargeInWords {
 				a.taskCtx.Logger.Println("Barge-in detected")
-				a.PushFrame(InterruptFrame{}, Downstream)
+				a.PushFrame(NewInterruptFrame(), Downstream)
 				a.interruptSent = true
 				a.botSpeaking = false
 				a.commitSpokenText(true)

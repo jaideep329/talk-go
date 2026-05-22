@@ -47,10 +47,16 @@ func (p *TalkTimeMonitoringProcessor) runTimer() {
 	if !p.ending.CompareAndSwap(false, true) {
 		return
 	}
-	p.taskCtx.Logger.Printf("Talk time exceeded after %s, sending closing prompt then EndFrame\n", p.maxTalkTime)
-	p.PushFrame(InterruptFrame{}, Downstream)
-	p.PushFrame(TTSSpeakFrame{Text: talkTimeExceededPrompt}, Downstream)
-	p.PushFrame(EndFrame{Reason: talkTimeExceededReason}, Downstream)
+	p.taskCtx.Logger.Printf("Talk time exceeded after %s, sending closing prompt then ending task\n", p.maxTalkTime)
+	p.PushFrame(NewInterruptFrame(), Downstream)
+	p.PushFrame(NewTTSSpeakFrame(talkTimeExceededPrompt), Downstream)
+	// Route EndFrame through the task source instead of pushing it
+	// downstream directly. This way upstream processors (STT,
+	// AudioSource, UserIdle, ContextAggregator) also see the EndFrame
+	// in pipeline order, matching Pipecat's source-driven lifecycle.
+	if p.taskCtx.EndTask != nil {
+		p.taskCtx.EndTask(talkTimeExceededReason)
+	}
 }
 
 func (p *TalkTimeMonitoringProcessor) ProcessFrame(ctx context.Context, frame Frame, dir Direction) {

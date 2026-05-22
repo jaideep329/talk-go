@@ -540,7 +540,7 @@ func (t *TTSProcessor) handleTTSEvent(event ttsEvent) bool {
 	case ttsEventDone:
 		t.taskCtx.Logger.Printf("TTS synthesis done: context_id=%s\n", event.contextID)
 		t.pushRemainingAudioFrames()
-		t.PushFrame(TTSDoneFrame{}, Downstream)
+		t.PushFrame(NewTTSDoneFrame(), Downstream)
 		return true
 	}
 	return false
@@ -563,7 +563,7 @@ func (t *TTSProcessor) handleAudioChunkData(audioData []byte) {
 		if opusFrame == nil {
 			break
 		}
-		t.PushFrame(AudioFrame{Data: opusFrame}, Downstream)
+		t.PushFrame(NewAudioFrame(opusFrame), Downstream)
 		t.audioTimePushed += 0.02 // 20ms per opus frame
 		t.emitPendingWords()
 	}
@@ -575,7 +575,7 @@ func (t *TTSProcessor) emitPendingWords() {
 	for len(t.pendingWords) > 0 && t.pendingWords[0].start <= t.audioTimePushed {
 		w := t.pendingWords[0]
 		t.pendingWords = t.pendingWords[1:]
-		t.PushFrame(WordTimestampFrame{Words: []string{w.word}}, Downstream)
+		t.PushFrame(NewWordTimestampFrame([]string{w.word}), Downstream)
 	}
 }
 
@@ -589,12 +589,12 @@ func (t *TTSProcessor) pushRemainingAudioFrames() {
 		}
 		opusFrame := t.makeOpusData()
 		if opusFrame != nil {
-			t.PushFrame(AudioFrame{Data: opusFrame}, Downstream)
+			t.PushFrame(NewAudioFrame(opusFrame), Downstream)
 			t.audioTimePushed += 0.02
 		}
 	}
 	for _, w := range t.pendingWords {
-		t.PushFrame(WordTimestampFrame{Words: []string{w.word}}, Downstream)
+		t.PushFrame(NewWordTimestampFrame([]string{w.word}), Downstream)
 	}
 	t.pendingWords = nil
 }

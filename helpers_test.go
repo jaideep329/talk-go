@@ -28,6 +28,7 @@ import (
 // the send loop encounters one, it sleeps for the given duration before
 // continuing. It never actually flows through the pipeline.
 type SleepFrame struct {
+	FrameBase
 	Duration time.Duration
 }
 
@@ -167,6 +168,13 @@ func runProcessorTest(t *testing.T, fix *testFixture, cfg runConfig) (downstream
 
 	source := newQueueProcessor(fix.TaskCtx, "test-source", Upstream)
 	sink := newQueueProcessor(fix.TaskCtx, "test-sink", Downstream)
+
+	// Wire taskCtx.EndTask so processors that call it (e.g.
+	// TalkTimeMonitor) inject EndFrame at the source — same behavior as
+	// PipelineSource in production.
+	fix.TaskCtx.EndTask = func(reason string) {
+		source.QueueFrame(NewEndFrame(reason), Downstream)
+	}
 
 	source.Link(cfg.processor)
 	cfg.processor.Link(sink)

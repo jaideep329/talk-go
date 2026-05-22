@@ -52,7 +52,7 @@ func (a *AudioSourceProcessor) readAudioTrack(track *webrtc.TrackRemote) {
 			binary.LittleEndian.PutUint16(pcmBytes[i*2:], uint16(pcmBuf[i]))
 		}
 
-		a.PushFrame(AudioFrame{Data: pcmBytes}, Downstream)
+		a.PushFrame(NewAudioFrame(pcmBytes), Downstream)
 	}
 }
 

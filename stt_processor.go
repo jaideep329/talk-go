@@ -21,18 +21,29 @@ type SonioxResponseMessage struct {
 }
 
 // sttDialURL is the Soniox websocket endpoint. Exposed as a package
-// variable so tests can override it to point at an unreachable URL
-// and avoid actually dialing Soniox.
+// variable so tests can override it to point at an unreachable URL.
 var sttDialURL = "wss://stt-rt.soniox.com/transcribe-websocket"
 
+// STTProcessor uses a single cancellation signal — the embedded
+// BaseProcessor.ctx (referred to via s.ctx). Three things shut it down:
+//
+//   - s.Stop() called by ProcessFrame(EndFrame) when EndFrame propagates
+//     through this processor.
+//   - s.Stop() called by Pipeline.Stop() from PipelineTask.completeEnd.
+//   - taskCtx.Ctx cancellation (transitively cancels s.ctx, since s.ctx
+//     was derived from taskCtx.Ctx in NewBaseProcessor).
+//
+// Stop closes the websocket — which is what unblocks the reader's
+// blocking ReadMessage — and cancels b.ctx, which unblocks the writer's
+// select. Idempotent via closeOnce + BaseProcessor's atomic cancelling
+// flag.
 type STTProcessor struct {
 	*BaseProcessor
 	taskCtx       *TaskContext
 	websocketConn *websocket.Conn
-	audioFrames   chan AudioFrame // ProcessFrame → writer goroutine
-	connected     chan struct{}   // closed when websocketConn is established
-	done          chan struct{}
-	stopOnce      sync.Once
+	audioFrames   chan AudioFrame
+	connected     chan struct{} // closed when the websocket is established
+	closeOnce     sync.Once
 }
 
 func NewSTTProcessor(taskCtx *TaskContext) *STTProcessor {
@@ -40,122 +51,88 @@ func NewSTTProcessor(taskCtx *TaskContext) *STTProcessor {
 		taskCtx:     taskCtx,
 		audioFrames: make(chan AudioFrame, 100),
 		connected:   make(chan struct{}),
-		done:        make(chan struct{}),
 	}
 	p.BaseProcessor = NewBaseProcessor("STT", p, taskCtx)
 	return p
 }
 
-// connect dials Soniox in a retry loop and writes the initial config
-// message. Returns true once a usable connection is established, false
-// if shutdown was requested first.
-func (s *STTProcessor) connect() bool {
-	for {
-		select {
-		case <-s.done:
-			return false
-		case <-s.taskCtx.Ctx.Done():
-			return false
-		case <-s.ctx.Done():
-			return false
-		default:
-		}
-		conn, _, err := websocket.DefaultDialer.Dial(sttDialURL, nil)
-		if err != nil {
-			s.taskCtx.Logger.Printf("STT websocket connect failed: %v, retrying in 1s...", err)
-			if !s.sleepOrExit(time.Second) {
-				return false
-			}
-			continue
-		}
-		config := map[string]interface{}{
-			"api_key":                   os.Getenv("SONIOX_API_KEY"),
-			"model":                     "stt-rt-v4",
-			"audio_format":              "s16le",
-			"sample_rate":               16000,
-			"num_channels":              1,
-			"language_hints":            []string{"hi"},
-			"enable_endpoint_detection": true,
-			"max_endpoint_delay_ms":     300,
-		}
-		if err := conn.WriteJSON(config); err != nil {
-			s.taskCtx.Logger.Printf("STT config send failed: %v, retrying in 1s...", err)
-			conn.Close()
-			if !s.sleepOrExit(time.Second) {
-				return false
-			}
-			continue
-		}
-		s.websocketConn = conn
-		s.taskCtx.Logger.Println("STT websocket connected")
-		return true
-	}
-}
-
-// sleepOrExit sleeps for d, returning false if shutdown was requested
-// before the sleep completed.
-func (s *STTProcessor) sleepOrExit(d time.Duration) bool {
-	select {
-	case <-s.done:
-		return false
-	case <-s.taskCtx.Ctx.Done():
-		return false
-	case <-s.ctx.Done():
-		return false
-	case <-time.After(d):
-		return true
-	}
-}
-
-func (s *STTProcessor) Start(ctx context.Context) {
-	s.BaseProcessor.Start(ctx)
-	s.Go(s.runReader)
-	s.Go(s.writeAudioWebsocket)
-}
-
-// runReader connects to Soniox, signals readiness, and then reads
-// transcripts until shutdown. Spawned in a Go-tracked goroutine.
-func (s *STTProcessor) runReader() {
-	if !s.connect() {
-		return
-	}
-	close(s.connected)
-	s.readSTTWebsocket()
-}
-
-func (s *STTProcessor) stop() {
-	s.stopOnce.Do(func() {
-		s.taskCtx.Logger.Println("STTProcessor stopping websocket reader/writer")
-		close(s.done)
+// Stop cancels b.ctx first (so the reader's post-ReadMessage ctx check
+// fires before it tries to reconnect) and then closes the websocket
+// (so the blocked ReadMessage returns). Order matters.
+func (s *STTProcessor) Stop() {
+	s.BaseProcessor.Stop()
+	s.closeOnce.Do(func() {
 		if s.websocketConn != nil {
 			s.websocketConn.Close()
 		}
 	})
 }
 
-func (s *STTProcessor) readSTTWebsocket() {
+func (s *STTProcessor) Start(ctx context.Context) {
+	s.BaseProcessor.Start(ctx)
+	s.Go(s.runReader)
+	s.Go(s.runWriter)
+}
+
+func sttConfigPayload() map[string]interface{} {
+	return map[string]interface{}{
+		"api_key":                   os.Getenv("SONIOX_API_KEY"),
+		"model":                     "stt-rt-v4",
+		"audio_format":              "s16le",
+		"sample_rate":               16000,
+		"num_channels":              1,
+		"language_hints":            []string{"hi"},
+		"enable_endpoint_detection": true,
+		"max_endpoint_delay_ms":     300,
+	}
+}
+
+// connect dials Soniox in an interruptible retry loop. Returns true
+// once the connection is established and configured, false if b.ctx is
+// cancelled first.
+func (s *STTProcessor) connect() bool {
+	for {
+		if s.ctx.Err() != nil {
+			return false
+		}
+		conn, _, err := websocket.DefaultDialer.Dial(sttDialURL, nil)
+		if err == nil {
+			err = conn.WriteJSON(sttConfigPayload())
+			if err == nil {
+				s.websocketConn = conn
+				s.taskCtx.Logger.Println("STT websocket connected")
+				return true
+			}
+			conn.Close()
+		}
+		s.taskCtx.Logger.Printf("STT connect failed: %v, retrying in 1s...", err)
+		select {
+		case <-time.After(time.Second):
+		case <-s.ctx.Done():
+			return false
+		}
+	}
+}
+
+func (s *STTProcessor) runReader() {
+	if !s.connect() {
+		return
+	}
+	close(s.connected)
+	s.read()
+}
+
+func (s *STTProcessor) read() {
 	responseID := 0
 	for {
-		select {
-		case <-s.done:
-			s.taskCtx.Logger.Println("STT reader exiting: processor ended")
-			return
-		default:
-		}
-		if s.taskCtx.Ctx.Err() != nil {
-			s.taskCtx.Logger.Println("STT reader exiting: session closed")
+		if s.ctx.Err() != nil {
+			s.taskCtx.Logger.Println("STT reader exiting")
 			return
 		}
 		_, msg, err := s.websocketConn.ReadMessage()
 		if err != nil {
-			select {
-			case <-s.done:
-				s.taskCtx.Logger.Println("STT reader exiting: processor ended")
-				return
-			default:
-			}
-			if s.taskCtx.Ctx.Err() != nil {
-				s.taskCtx.Logger.Println("STT reader exiting: session closed")
+			if s.ctx.Err() != nil {
+				s.taskCtx.Logger.Println("STT reader exiting")
 				return
 			}
 			s.taskCtx.Logger.Println("STT read error, reconnecting:", err)
@@ -171,39 +148,34 @@ func (s *STTProcessor) readSTTWebsocket() {
 		}
 		responseID++
 		s.taskCtx.Logger.Printf("STT response received: response_id=%d finished=%v tokens=%d\n", responseID, resp.Finished, len(resp.Tokens))
-
-		for _, token := range resp.Tokens {
-			s.taskCtx.Logger.Printf("STT token received: response_id=%d finished=%v is_final=%v text=%q\n", responseID, resp.Finished, token.IsFinal, token.Text)
-			s.PushFrame(TranscriptFrame{Text: token.Text, IsFinal: token.IsFinal, ResponseID: responseID, Finished: resp.Finished}, Downstream)
+		for _, tok := range resp.Tokens {
+			s.taskCtx.Logger.Printf("STT token received: response_id=%d finished=%v is_final=%v text=%q\n", responseID, resp.Finished, tok.IsFinal, tok.Text)
+			s.PushFrame(TranscriptFrame{
+				Text:       tok.Text,
+				IsFinal:    tok.IsFinal,
+				ResponseID: responseID,
+				Finished:   resp.Finished,
+			}, Downstream)
 		}
 	}
 }
 
-func (s *STTProcessor) writeAudioWebsocket() {
-	// Wait for the reader's connect() to succeed before sending audio.
+func (s *STTProcessor) runWriter() {
 	select {
 	case <-s.connected:
-	case <-s.done:
-		return
-	case <-s.taskCtx.Ctx.Done():
+	case <-s.ctx.Done():
 		return
 	}
 	for {
 		select {
-		case <-s.done:
-			s.taskCtx.Logger.Println("STT writer exiting: processor ended")
+		case <-s.ctx.Done():
 			return
-		case <-s.taskCtx.Ctx.Done():
-			s.taskCtx.Logger.Println("STT writer exiting: session closed")
-			s.websocketConn.Close()
-			return
-		case audioFrame := <-s.audioFrames:
-			if err := s.websocketConn.WriteMessage(websocket.BinaryMessage, audioFrame.Data); err != nil {
-				if s.taskCtx.Ctx.Err() != nil {
+		case audio := <-s.audioFrames:
+			if err := s.websocketConn.WriteMessage(websocket.BinaryMessage, audio.Data); err != nil {
+				if s.ctx.Err() != nil {
 					return
 				}
 				s.taskCtx.Logger.Println("STT write error, skipping frame:", err)
-				continue
 			}
 		}
 	}
@@ -213,13 +185,13 @@ func (s *STTProcessor) ProcessFrame(ctx context.Context, frame Frame, dir Direct
 	switch f := frame.(type) {
 	case AudioFrame:
 		select {
-		case <-s.done:
+		case <-s.ctx.Done():
 		case s.audioFrames <- f:
 		}
 	case EndFrame:
-		s.taskCtx.Logger.Printf("EndFrame at STTProcessor, forwarding downstream and stopping STT: reason=%q\n", f.Reason)
+		s.taskCtx.Logger.Printf("EndFrame at STTProcessor: reason=%q\n", f.Reason)
 		s.PushFrame(f, dir)
-		s.stop()
+		s.Stop()
 	default:
 		s.PushFrame(frame, dir)
 	}

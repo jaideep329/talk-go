@@ -124,11 +124,10 @@ type TTSProcessor struct {
 	commands  chan ttsCommand
 	ttsEvents chan ttsEvent
 	connected chan struct{} // closed when websocketConn is established
-	done      chan struct{}
 
 	websocketConn *websocket.Conn
 	opusEncoder   *opus.Encoder
-	stopOnce      sync.Once
+	closeOnce     sync.Once // idempotent websocket close
 }
 
 type CartesiaTTSMessage struct {
@@ -177,7 +176,6 @@ func NewTTSProcessor(taskCtx *TaskContext) *TTSProcessor {
 		commands:    make(chan ttsCommand, 100),
 		ttsEvents:   make(chan ttsEvent, 100),
 		connected:   make(chan struct{}),
-		done:        make(chan struct{}),
 	}
 	t.BaseProcessor = NewBaseProcessor("TTS", t, taskCtx)
 	return t
@@ -187,6 +185,21 @@ func (t *TTSProcessor) Start(ctx context.Context) {
 	t.BaseProcessor.Start(ctx)
 	t.Go(t.runReader)
 	t.Go(t.orchestrator)
+}
+
+// Stop cancels b.ctx (unblocking the orchestrator/writer selects) and
+// closes the websocket (unblocking the reader's ReadMessage). Order
+// matters: cancel ctx before closing the ws so the reader exits
+// cleanly on its ctx check rather than racing into a reconnect attempt.
+// Idempotent via BaseProcessor's cancelling flag + closeOnce.
+func (t *TTSProcessor) Stop() {
+	t.BaseProcessor.Stop()
+	t.activeContextId.Store("")
+	t.closeOnce.Do(func() {
+		if t.websocketConn != nil {
+			t.websocketConn.Close()
+		}
+	})
 }
 
 // runReader connects to Cartesia, signals readiness, and then reads
@@ -256,8 +269,6 @@ func (t *TTSProcessor) orchestrator() {
 	case <-t.connected:
 	case <-t.ctx.Done():
 		return
-	case <-t.done:
-		return
 	}
 
 	var pendingEnd *EndFrame
@@ -313,7 +324,7 @@ func (t *TTSProcessor) orchestrator() {
 			pendingEndDone = nil
 		}
 		pendingEnd = nil
-		t.stop()
+		t.Stop()
 		return true
 	}
 
@@ -356,7 +367,7 @@ func (t *TTSProcessor) orchestrator() {
 		if doneCh != nil {
 			close(doneCh)
 		}
-		t.stop()
+		t.Stop()
 		return true
 	}
 
@@ -658,58 +669,27 @@ func (t *TTSProcessor) makeOpusData() []byte {
 
 func (t *TTSProcessor) connect() bool {
 	for {
-		select {
-		case <-t.done:
+		if t.ctx.Err() != nil {
 			return false
-		case <-t.taskCtx.Ctx.Done():
-			return false
-		case <-t.ctx.Done():
-			return false
-		default:
 		}
 		conn, _, err := websocket.DefaultDialer.Dial(ttsDialURL+os.Getenv("CARTESIA_API_KEY"), nil)
-		if err != nil {
-			t.taskCtx.Logger.Printf("TTS websocket connect failed: %v, retrying in 1s...", err)
-			if !t.sleepOrExit(time.Second) {
-				return false
-			}
-			continue
+		if err == nil {
+			t.websocketConn = conn
+			t.taskCtx.Logger.Println("TTS websocket connected")
+			return true
 		}
-		t.websocketConn = conn
-		t.taskCtx.Logger.Println("TTS websocket connected")
-		return true
-	}
-}
-
-// sleepOrExit sleeps for d, returning false if shutdown was requested
-// before the sleep completed.
-func (t *TTSProcessor) sleepOrExit(d time.Duration) bool {
-	select {
-	case <-t.done:
-		return false
-	case <-t.taskCtx.Ctx.Done():
-		return false
-	case <-t.ctx.Done():
-		return false
-	case <-time.After(d):
-		return true
-	}
-}
-
-func (t *TTSProcessor) stop() {
-	t.stopOnce.Do(func() {
-		t.taskCtx.Logger.Println("TTSProcessor stopping websocket reader")
-		close(t.done)
-		t.activeContextId.Store("")
-		if t.websocketConn != nil {
-			t.websocketConn.Close()
+		t.taskCtx.Logger.Printf("TTS connect failed: %v, retrying in 1s...", err)
+		select {
+		case <-time.After(time.Second):
+		case <-t.ctx.Done():
+			return false
 		}
-	})
+	}
 }
 
 func (t *TTSProcessor) pushTTSEvent(event ttsEvent) bool {
 	select {
-	case <-t.done:
+	case <-t.ctx.Done():
 		return false
 	case t.ttsEvents <- event:
 		return true
@@ -718,27 +698,14 @@ func (t *TTSProcessor) pushTTSEvent(event ttsEvent) bool {
 
 func (t *TTSProcessor) readTTSConnectionData() {
 	for {
-		select {
-		case <-t.done:
-			t.taskCtx.Logger.Println("TTS reader exiting: processor ended")
-			return
-		default:
-		}
-		if t.taskCtx.Ctx.Err() != nil {
-			t.taskCtx.Logger.Println("TTS reader exiting: session closed")
-			t.websocketConn.Close()
+		if t.ctx.Err() != nil {
+			t.taskCtx.Logger.Println("TTS reader exiting")
 			return
 		}
 		_, msg, err := t.websocketConn.ReadMessage()
 		if err != nil {
-			select {
-			case <-t.done:
-				t.taskCtx.Logger.Println("TTS reader exiting: processor ended")
-				return
-			default:
-			}
-			if t.taskCtx.Ctx.Err() != nil {
-				t.taskCtx.Logger.Println("TTS reader exiting: session closed")
+			if t.ctx.Err() != nil {
+				t.taskCtx.Logger.Println("TTS reader exiting")
 				return
 			}
 			t.taskCtx.Logger.Println("TTS read error, reconnecting:", err)

@@ -1,8 +1,7 @@
-package main
+package voicepipelinecore
 
 import (
 	"encoding/json"
-	"log"
 	"os"
 	"time"
 
@@ -20,13 +19,40 @@ const controlTopic = "control"
 // distinguish bot vs user when handling participant lifecycle events.
 const botIdentity = "bot"
 
-// joinRoom connects the bot to the LiveKit room and wires the room
+// JoinRoom connects the bot to the LiveKit room and wires the room
 // callbacks. taskCtx is needed so the data-channel control messages
 // and human-participant disconnect can route through taskCtx.EndTask.
-func joinRoom(roomName string, taskCtx *TaskContext, audioSource *AudioSourceProcessor) *lksdk.Room {
-	endTask := func(reason string) {
+func JoinRoom(roomName string, taskCtx *TaskContext, audioSource *AudioSourceProcessor) (*lksdk.Room, error) {
+	logger := func(format string, args ...interface{}) {
+		if taskCtx != nil && taskCtx.Logger != nil {
+			taskCtx.Logger.Printf(format, args...)
+		}
+	}
+	endTask := func(reason EndReason) {
 		if taskCtx != nil && taskCtx.EndTask != nil {
 			taskCtx.EndTask(reason)
+		}
+	}
+	markUserJoined := func(p *lksdk.RemoteParticipant) {
+		if p == nil || p.Identity() == botIdentity {
+			return
+		}
+		at := time.Now()
+		if taskCtx != nil {
+			if taskCtx.callStats != nil {
+				taskCtx.callStats.MarkUserJoined(at)
+			}
+			if taskCtx.callEvents != nil {
+				taskCtx.callEvents.fireUserJoined(at)
+			}
+		}
+	}
+	markUserLeft := func(p *lksdk.RemoteParticipant) {
+		if p == nil || p.Identity() == botIdentity {
+			return
+		}
+		if taskCtx != nil && taskCtx.callStats != nil {
+			taskCtx.callStats.MarkUserLeft(time.Now())
 		}
 	}
 
@@ -37,18 +63,23 @@ func joinRoom(roomName string, taskCtx *TaskContext, audioSource *AudioSourcePro
 		ParticipantIdentity: botIdentity,
 	}, &lksdk.RoomCallback{
 		// Browser closing the tab / network dropping → bot has no one
-		// to talk to. Mirrors the pre-DataPacket behavior where a UI
-		// WebSocket close triggered EndTask.
+		// to talk to. Route it through EndTask so shutdown still follows
+		// the source-driven EndFrame path.
+		OnParticipantConnected: func(p *lksdk.RemoteParticipant) {
+			logger("[%s] Participant %q connected", roomName, p.Identity())
+			markUserJoined(p)
+		},
 		OnParticipantDisconnected: func(p *lksdk.RemoteParticipant) {
 			if p.Identity() == botIdentity {
 				return
 			}
-			log.Printf("[%s] Participant %q disconnected, requesting EndFrame", roomName, p.Identity())
-			endTask("ui participant disconnected")
+			logger("[%s] Participant %q disconnected, requesting EndFrame", roomName, p.Identity())
+			markUserLeft(p)
+			endTask(EndReasonClientDisconnect)
 		},
 		ParticipantCallback: lksdk.ParticipantCallback{
 			OnTrackSubscribed: func(track *webrtc.TrackRemote, pub *lksdk.RemoteTrackPublication, participant *lksdk.RemoteParticipant) {
-				log.Printf("[%s] Track subscribed: %s from %s (kind: %s)", roomName, track.ID(), participant.Identity(), track.Kind())
+				logger("[%s] Track subscribed: %s from %s (kind: %s)", roomName, track.ID(), participant.Identity(), track.Kind())
 				if track.Kind() == webrtc.RTPCodecTypeAudio {
 					audioSource.SetTrack(track)
 				}
@@ -65,24 +96,30 @@ func joinRoom(roomName string, taskCtx *TaskContext, audioSource *AudioSourcePro
 					Type string `json:"type"`
 				}
 				if err := json.Unmarshal(ud.Payload, &msg); err != nil {
-					log.Printf("[%s] control data malformed: %v", roomName, err)
+					logger("[%s] control data malformed: %v", roomName, err)
 					return
 				}
 				if msg.Type == "end_call" {
-					log.Printf("[%s] UI requested end_call via data channel", roomName)
-					endTask("ui requested end call")
+					logger("[%s] UI requested end_call via data channel", roomName)
+					endTask(EndReasonClientDisconnect)
 				}
 			},
 		},
 	})
 	if err != nil {
-		log.Fatalf("[%s] failed to join room: %v", roomName, err)
+		return nil, err
 	}
-	log.Printf("[%s] Bot joined the room", roomName)
-	return room
+	logger("[%s] Bot joined the room", roomName)
+	if taskCtx != nil && taskCtx.callEvents != nil {
+		taskCtx.callEvents.fireBotJoined(time.Now())
+	}
+	for _, p := range room.GetRemoteParticipants() {
+		markUserJoined(p)
+	}
+	return room, nil
 }
 
-func generateToken(roomName, identity string) (string, error) {
+func GenerateToken(roomName, identity string) (string, error) {
 	at := auth.NewAccessToken(os.Getenv("LIVEKIT_API_KEY"), os.Getenv("LIVEKIT_API_SECRET"))
 	grant := &auth.VideoGrant{
 		RoomJoin: true,

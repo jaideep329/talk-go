@@ -1,4 +1,4 @@
-package main
+package voicepipelinecore
 
 import (
 	"sync"
@@ -90,4 +90,42 @@ func (m *ProcessorMetrics) Reset() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.timers = make(map[MetricLabel]time.Time)
+}
+
+type perTurnMetrics struct {
+	mu      sync.Mutex
+	current TurnMetrics
+}
+
+func (m *perTurnMetrics) absorb(frame MetricsFrame) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, d := range frame.Data {
+		switch {
+		case d.Processor == "llm" && d.Label == MetricTTFB:
+			m.current.LLMTTFBMs = d.ValueMs
+		case d.Processor == "llm" && d.Label == MetricProcessing:
+			m.current.LLMProcessingMs = d.ValueMs
+		case d.Processor == "tts" && d.Label == MetricTextAggregation:
+			m.current.TTSTextAggregationMs = d.ValueMs
+		case d.Processor == "tts" && d.Label == MetricTTFB:
+			m.current.TTSTTFBMs = d.ValueMs
+		case d.Processor == "playback" && d.Label == MetricE2ELatency:
+			m.current.E2ELatencyMs = d.ValueMs
+		}
+	}
+}
+
+func (m *perTurnMetrics) snapshotAndReset() TurnMetrics {
+	if m == nil {
+		return TurnMetrics{}
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := m.current
+	m.current = TurnMetrics{}
+	return out
 }

@@ -1,4 +1,4 @@
-package main
+package voicepipelinecore
 
 import (
 	"context"
@@ -107,6 +107,7 @@ func newTestFixture(t *testing.T) *testFixture {
 		Logger:   logger,
 		UIEvents: NewUIEventSender(logger),
 		Metrics:  fix.captureMetrics,
+		metrics:  &perTurnMetrics{},
 		wg:       &wg,
 	}
 	return fix
@@ -172,8 +173,8 @@ func runProcessorTest(t *testing.T, fix *testFixture, cfg runConfig) (downstream
 	// Wire taskCtx.EndTask so processors that call it (e.g.
 	// TalkTimeMonitor) inject EndFrame at the source — same behavior as
 	// PipelineSource in production.
-	fix.TaskCtx.EndTask = func(reason string) {
-		source.QueueFrame(NewEndFrame(reason), Downstream)
+	fix.TaskCtx.EndTask = func(reason EndReason) {
+		source.QueueFrame(NewEndFrame(string(reason)), Downstream)
 	}
 
 	source.Link(cfg.processor)

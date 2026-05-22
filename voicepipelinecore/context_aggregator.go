@@ -1,8 +1,9 @@
-package main
+package voicepipelinecore
 
 import (
 	"context"
 	"strings"
+	"time"
 )
 
 const minBargeInWords = 3
@@ -17,15 +18,34 @@ type ContextAggregator struct {
 	interimResponseID int
 	interruptSent     bool
 	botSpeaking       bool
+	useDefaultPrompt  bool
 }
 
-func NewContextAggregator(taskCtx *TaskContext) *ContextAggregator {
+func NewContextAggregator(taskCtx *TaskContext, initialMessages ...[]Message) *ContextAggregator {
+	useDefaultPrompt := true
+	messages := []map[string]string{}
+	if len(initialMessages) > 0 {
+		useDefaultPrompt = false
+		messages = messagesFromInitial(initialMessages[0])
+	}
 	a := &ContextAggregator{
-		taskCtx:  taskCtx,
-		messages: []map[string]string{},
+		taskCtx:          taskCtx,
+		messages:         messages,
+		useDefaultPrompt: useDefaultPrompt,
 	}
 	a.BaseProcessor = NewBaseProcessor("ContextAggregator", a, taskCtx)
 	return a
+}
+
+func messagesFromInitial(initial []Message) []map[string]string {
+	messages := make([]map[string]string, 0, len(initial))
+	for _, msg := range initial {
+		if msg.Role == "" || msg.Content == "" {
+			continue
+		}
+		messages = append(messages, map[string]string{"role": msg.Role, "content": msg.Content})
+	}
+	return messages
 }
 
 func (a *ContextAggregator) appendWords(words []string) {
@@ -105,6 +125,13 @@ func (a *ContextAggregator) commitSpokenText(interrupted bool) {
 		a.taskCtx.Logger.Printf("Committing to history (interrupted=%v): %s\n", interrupted, spoken)
 		a.messages = append(a.messages, map[string]string{"role": "assistant", "content": spoken})
 		a.taskCtx.UIEvents.Send(UIEvent{Type: CommittedAssistant, Data: map[string]interface{}{"role": "assistant", "text": spoken}})
+		metrics := TurnMetrics{}
+		if a.taskCtx.metrics != nil {
+			metrics = a.taskCtx.metrics.snapshotAndReset()
+		}
+		if a.taskCtx.turnObservers != nil {
+			a.taskCtx.turnObservers.emitAssistantTurnCommitted(spoken, time.Now(), metrics)
+		}
 	} else if interrupted {
 		a.taskCtx.Logger.Println("Barge-in interrupted bot before any assistant words were committed")
 	}
@@ -127,15 +154,21 @@ func (a *ContextAggregator) addUserMessage(text string) {
 		a.messages = append(a.messages, map[string]string{"role": "user", "content": text})
 		a.taskCtx.UIEvents.Send(UIEvent{Type: UserTranscript, Data: map[string]interface{}{"role": "user", "text": text, "is_final": true}})
 	}
+	if a.taskCtx.turnObservers != nil {
+		a.taskCtx.turnObservers.emitUserTurnCommitted(text, time.Now())
+	}
 }
 
 func (a *ContextAggregator) submitUserMessage(text string) {
 	a.taskCtx.Logger.Printf("Final transcript received: %s\n", text)
-	if len(a.messages) == 0 {
+	if len(a.messages) == 0 && a.useDefaultPrompt {
 		a.messages = append(a.messages, map[string]string{"role": "system", "content": `You are an expert health coach named Disha. You have deep experience in chronic care management and behavioral change. You are a master influencer and help the users achieve their health goals with the power of conversation.
 You have been trained by master clinicians at a company called Curelink.
 
 You are conducting your first telephonic consultation with a new client. You are talking with the user via an audio call on the Disha Health App. Always respond in exactly 2 sentences. Never respond with just 1 sentence.`})
+	}
+	if a.taskCtx.callEvents != nil {
+		a.taskCtx.callEvents.fireUserFirstSpeech(time.Now())
 	}
 	a.addUserMessage(text)
 	a.interruptSent = false

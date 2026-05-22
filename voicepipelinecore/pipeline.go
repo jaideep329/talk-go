@@ -1,7 +1,8 @@
-package main
+package voicepipelinecore
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"math/rand/v2"
@@ -75,15 +76,47 @@ func (p *Pipeline) Stop() {
 // shutdown without holding a reference to PipelineTask. It enqueues an
 // EndFrame at PipelineSource so every processor (including upstream of
 // the caller) sees the EndFrame in pipeline order. Wired by
-// createSession to PipelineTask.End.
+// NewTask to PipelineTask.End.
 type TaskContext struct {
-	Ctx      context.Context
-	Logger   *log.Logger
-	Room     *lksdk.Room
-	UIEvents *UIEventSender
-	Metrics  func(MetricsFrame)
-	EndTask  func(reason string)
-	wg       *sync.WaitGroup
+	Ctx           context.Context
+	Logger        *log.Logger
+	Room          *lksdk.Room
+	UIEvents      *UIEventSender
+	Metrics       func(MetricsFrame)
+	EndTask       func(reason EndReason)
+	wg            *sync.WaitGroup
+	callStats     *callStatsTracker
+	callEvents    *callEventDispatcher
+	turnObservers *conversationTurnObserverSet
+	metrics       *perTurnMetrics
+}
+
+// TaskOptions configures one voice session.
+type TaskOptions struct {
+	// Logger is required.
+	Logger *log.Logger
+
+	// RoomName is the LiveKit room name. If empty, NewTask mints one
+	// like "room-1234567".
+	RoomName string
+
+	// InitialMessages seeds the LLM conversation context. A nil slice
+	// preserves the core demo's default prompt; an explicit empty slice
+	// means the caller is intentionally providing no initial context.
+	InitialMessages []Message
+
+	// MaxTalkTime overrides the talk-time monitor default when non-nil.
+	MaxTalkTime *time.Duration
+
+	// CallEvents contains one-shot call timeline hooks.
+	CallEvents CallEvents
+
+	// ConversationTurnObservers receive committed user/assistant turns.
+	ConversationTurnObservers []ConversationTurnObserver
+
+	// OnCleanup runs after all processor goroutines have exited. Use
+	// this to remove the task from binary-level registries.
+	OnCleanup func()
 }
 
 // PipelineTask is the lifecycle owner of a single voice-call pipeline.
@@ -95,40 +128,49 @@ type PipelineTask struct {
 	Source         *PipelineSourceProcessor
 	Pipeline       *Pipeline
 	RoomName       string
+	OnCleanup      func()
+	onCallEnded    func(reason EndReason, stats CallStats)
+	callStats      *callStatsTracker
 	wg             sync.WaitGroup
 	endRequested   atomic.Bool
 	cleanupStarted atomic.Bool
 	cleanupOnce    sync.Once
+	endReasonMu    sync.Mutex
+	endReason      EndReason
 }
 
-var (
-	sessions   = map[string]*PipelineTask{}
-	sessionsMu sync.Mutex
-)
-
-func getSession(roomName string) *PipelineTask {
-	sessionsMu.Lock()
-	defer sessionsMu.Unlock()
-	return sessions[roomName]
-}
-
-func removeSession(roomName string) {
-	sessionsMu.Lock()
-	defer sessionsMu.Unlock()
-	delete(sessions, roomName)
-}
-
-func createSession() (string, *PipelineTask) {
-	roomName := fmt.Sprintf("room-%d", rand.IntN(9000000)+1000000)
-	logger := log.New(log.Writer(), fmt.Sprintf("[%s] ", roomName), log.Flags())
-	ctx, cancel := context.WithCancel(context.Background())
+// NewTask builds a PipelineTask but does not start its processors. The
+// LiveKit room is joined during construction so callers can mint the
+// browser token after receiving the room name.
+func NewTask(parentCtx context.Context, opts TaskOptions) (*PipelineTask, error) {
+	if opts.Logger == nil {
+		return nil, errors.New("voicepipelinecore: TaskOptions.Logger is required")
+	}
+	if parentCtx == nil {
+		parentCtx = context.Background()
+	}
+	roomName := opts.RoomName
+	if roomName == "" {
+		roomName = fmt.Sprintf("room-%d", rand.IntN(9000000)+1000000)
+	}
+	logger := opts.Logger
+	ctx, cancel := context.WithCancel(parentCtx)
 	uiEvents := NewUIEventSender(logger)
+	callStats := newCallStatsTracker()
+	turnMetrics := &perTurnMetrics{}
 
 	// task is created first (with zero-value WaitGroup) so taskCtx can
 	// hold a pointer to it.
-	task := &PipelineTask{Cancel: cancel, RoomName: roomName}
+	task := &PipelineTask{
+		Cancel:      cancel,
+		RoomName:    roomName,
+		OnCleanup:   opts.OnCleanup,
+		onCallEnded: opts.CallEvents.OnCallEnded,
+		callStats:   callStats,
+	}
 
 	metricsHandler := func(mf MetricsFrame) {
+		turnMetrics.absorb(mf)
 		for _, d := range mf.Data {
 			logger.Printf("Metric [%s] %s: %.1fms\n", d.Processor, d.Label, d.ValueMs)
 			uiEvents.Send(UIEvent{Type: Metrics, Data: map[string]interface{}{
@@ -140,32 +182,45 @@ func createSession() (string, *PipelineTask) {
 	}
 
 	taskCtx := &TaskContext{
-		Ctx:      ctx,
-		Logger:   logger,
-		UIEvents: uiEvents,
-		Metrics:  metricsHandler,
-		EndTask:  task.End,
-		wg:       &task.wg,
+		Ctx:       ctx,
+		Logger:    logger,
+		UIEvents:  uiEvents,
+		Metrics:   metricsHandler,
+		EndTask:   task.End,
+		wg:        &task.wg,
+		callStats: callStats,
+		metrics:   turnMetrics,
 	}
+	taskCtx.callEvents = newCallEventDispatcher(logger, &task.wg, opts.CallEvents)
 	task.TaskCtx = taskCtx
 
 	pipelineSource := NewPipelineSourceProcessor(taskCtx)
 	audioSource := NewAudioSourceProcessor(taskCtx)
-	taskCtx.Room = joinRoom(roomName, taskCtx, audioSource)
+	room, err := JoinRoom(roomName, taskCtx, audioSource)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	taskCtx.Room = room
 	// Hand the room to the UI sender so it can publish DataPackets.
 	// Any events emitted before this point (none today, but
 	// defensive) silently no-op.
 	uiEvents.SetRoom(taskCtx.Room)
+	taskCtx.turnObservers = newConversationTurnObserverSet(taskCtx, opts.ConversationTurnObservers)
 	task.Source = pipelineSource
-
-	sessionsMu.Lock()
-	sessions[roomName] = task
-	sessionsMu.Unlock()
 
 	sttProcessor := NewSTTProcessor(taskCtx)
 	userIdle := NewUserIdleProcessor(taskCtx)
-	contextAggregator := NewContextAggregator(taskCtx)
+	var contextAggregator *ContextAggregator
+	if opts.InitialMessages != nil {
+		contextAggregator = NewContextAggregator(taskCtx, opts.InitialMessages)
+	} else {
+		contextAggregator = NewContextAggregator(taskCtx)
+	}
 	talkTimeMonitor := NewTalkTimeMonitoringProcessor(taskCtx)
+	if opts.MaxTalkTime != nil {
+		talkTimeMonitor = NewTalkTimeMonitoringProcessorWithMaxTalkTime(taskCtx, *opts.MaxTalkTime)
+	}
 	llmProcessor := NewLLMProcessor(taskCtx)
 	ttsProcessor := NewTTSProcessor(taskCtx)
 	playbackSink := NewPlaybackSinkProcessor(taskCtx)
@@ -183,14 +238,16 @@ func createSession() (string, *PipelineTask) {
 		playbackSink,
 		pipelineSink,
 	})
-	task.Pipeline.Start(ctx)
-	return roomName, task
+	return task, nil
 }
 
-func (t *PipelineTask) End(reason string) {
-	if reason == "" {
-		reason = "unspecified"
-	}
+// Start links and starts every processor in the task pipeline.
+func (t *PipelineTask) Start() {
+	t.Pipeline.Start(t.TaskCtx.Ctx)
+}
+
+func (t *PipelineTask) End(reason EndReason) {
+	reason = normalizeEndReason(reason)
 	if t.cleanupStarted.Load() || t.TaskCtx.Ctx.Err() != nil {
 		t.TaskCtx.Logger.Printf("Ignoring EndFrame request after cleanup started: %s\n", reason)
 		return
@@ -203,8 +260,24 @@ func (t *PipelineTask) End(reason string) {
 		t.TaskCtx.Logger.Printf("Ignoring EndFrame request after cleanup started: %s\n", reason)
 		return
 	}
+	t.setEndReason(reason)
 	t.TaskCtx.Logger.Printf("Queueing EndFrame: %s\n", reason)
-	t.Source.Queue(NewEndFrame(reason))
+	t.Source.Queue(NewEndFrame(string(reason)))
+}
+
+func (t *PipelineTask) setEndReason(reason EndReason) {
+	reason = normalizeEndReason(reason)
+	t.endReasonMu.Lock()
+	defer t.endReasonMu.Unlock()
+	if t.endReason == "" {
+		t.endReason = reason
+	}
+}
+
+func (t *PipelineTask) currentEndReason() EndReason {
+	t.endReasonMu.Lock()
+	defer t.endReasonMu.Unlock()
+	return normalizeEndReason(t.endReason)
 }
 
 // completeEnd is the EndFrame-driven cleanup. It is called from inside
@@ -230,10 +303,8 @@ func (t *PipelineTask) completeEnd(frame EndFrame) {
 func (t *PipelineTask) runCleanup(frame EndFrame) {
 	t.endRequested.Store(true)
 	t.cleanupStarted.Store(true)
-	reason := frame.Reason
-	if reason == "" {
-		reason = "unspecified"
-	}
+	reason := normalizeEndReason(EndReason(frame.Reason))
+	t.setEndReason(reason)
 	t.TaskCtx.Logger.Printf("EndFrame reached pipeline sink, cleaning up task: %s\n", reason)
 	t.TaskCtx.UIEvents.Send(UIEvent{Type: CallEnded, Data: map[string]interface{}{"reason": reason}})
 
@@ -247,6 +318,10 @@ func (t *PipelineTask) runCleanup(frame EndFrame) {
 	// WaitGroup can drain.
 	if t.TaskCtx.Room != nil {
 		t.TaskCtx.Room.Disconnect()
+	}
+
+	if t.TaskCtx.turnObservers != nil {
+		t.TaskCtx.turnObservers.stopAndDrain()
 	}
 
 	// Bounded wait for stragglers — 10s gives TTS's pending-end deferral
@@ -263,7 +338,29 @@ func (t *PipelineTask) runCleanup(frame EndFrame) {
 		t.TaskCtx.Logger.Println(captureGoroutineStacks())
 	}
 
+	endedAt := time.Now()
+	if t.callStats != nil {
+		t.callStats.MarkUserLeft(endedAt)
+	}
+	if t.onCallEnded != nil {
+		stats := CallStats{EndedAt: endedAt}
+		if t.callStats != nil {
+			stats.TotalUserDurationSec = t.callStats.TotalDurationSec(endedAt)
+			stats.FirstUserAudioFrameAt = t.callStats.FirstUserAudioFrameAt()
+		}
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.TaskCtx.Logger.Printf("OnCallEnded callback panicked: %v\n", r)
+				}
+			}()
+			t.onCallEnded(t.currentEndReason(), stats)
+		}()
+	}
+
 	t.Cancel()
-	removeSession(t.RoomName)
+	if t.OnCleanup != nil {
+		t.OnCleanup()
+	}
 	t.TaskCtx.Logger.Printf("PipelineTask cleanup complete after EndFrame: reason=%q\n", reason)
 }

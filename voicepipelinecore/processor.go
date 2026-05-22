@@ -1,4 +1,4 @@
-package main
+package voicepipelinecore
 
 import (
 	"context"
@@ -219,7 +219,8 @@ func (b *BaseProcessor) PushFrame(frame Frame, dir Direction) {
 // Each receiver sees a distinct frame instance so downstream and
 // upstream consumers can hold independent state. Sibling IDs (Pipecat's
 // broadcast_sibling_id) are intentionally omitted; they exist in
-// Pipecat only to let observers deduplicate, and we have no observers.
+// Pipecat only to let frame observers deduplicate. Our turn observers
+// attach at committed conversation-turn boundaries instead.
 func (b *BaseProcessor) Broadcast(frame BroadcastableFrame) {
 	down := frame.Clone()
 	up := frame.Clone()

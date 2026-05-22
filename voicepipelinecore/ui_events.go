@@ -1,4 +1,4 @@
-package main
+package voicepipelinecore
 
 import (
 	"encoding/json"
@@ -42,7 +42,7 @@ type UIEvent struct {
 //   - The server SDK silently discards dc.Send errors (engine.go), so
 //     a send before the lossy channel is fully open is dropped without
 //     any signal back to us — and lossy channels can take a moment to
-//     finish ICE/DTLS after joinRoom returns.
+//     finish ICE/DTLS after JoinRoom returns.
 //   - Lossy DataChannels are configured Ordered:false, MaxRetransmits:0,
 //     so even when open, congestion drops packets with no retry.
 //   - UI event traffic is tiny (a few small JSON blobs per second peak).
@@ -57,7 +57,7 @@ func NewUIEventSender(logger *log.Logger) *UIEventSender {
 }
 
 // SetRoom wires the LiveKit room into the sender. Called by
-// createSession once the bot has joined; before that, Send is a no-op
+// NewTask once the bot has joined; before that, Send is a no-op
 // (any events emitted during the brief startup window are dropped).
 func (s *UIEventSender) SetRoom(room *lksdk.Room) {
 	s.room.Store(room)

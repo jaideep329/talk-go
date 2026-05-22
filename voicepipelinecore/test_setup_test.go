@@ -1,4 +1,4 @@
-package main
+package voicepipelinecore
 
 // init runs once for the test binary. It redirects the STT and TTS
 // dial URLs to a definitely-unreachable loopback so background connect

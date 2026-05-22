@@ -1,4 +1,4 @@
-package main
+package voicepipelinecore
 
 import (
 	"testing"
@@ -67,8 +67,8 @@ func TestPipelineSink_CallsOnEndCallback(t *testing.T) {
 func TestPipelineSource_FatalErrorTriggersEndTask(t *testing.T) {
 	fix := newTestFixture(t)
 
-	endCalls := make(chan string, 1)
-	fix.TaskCtx.EndTask = func(reason string) { endCalls <- reason }
+	endCalls := make(chan EndReason, 1)
+	fix.TaskCtx.EndTask = func(reason EndReason) { endCalls <- reason }
 
 	p := NewPipelineSourceProcessor(fix.TaskCtx)
 	p.Start(fix.RootCtx)
@@ -79,8 +79,8 @@ func TestPipelineSource_FatalErrorTriggersEndTask(t *testing.T) {
 
 	select {
 	case reason := <-endCalls:
-		if reason == "" {
-			t.Error("EndTask called with empty reason")
+		if reason != EndReasonError {
+			t.Errorf("EndTask reason = %q, want %q", reason, EndReasonError)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("EndTask was not called within 2s")
@@ -97,8 +97,8 @@ func TestPipelineSource_FatalErrorTriggersEndTask(t *testing.T) {
 func TestPipelineSource_NonFatalErrorIsLoggedNotEnded(t *testing.T) {
 	fix := newTestFixture(t)
 
-	endCalls := make(chan string, 1)
-	fix.TaskCtx.EndTask = func(reason string) { endCalls <- reason }
+	endCalls := make(chan EndReason, 1)
+	fix.TaskCtx.EndTask = func(reason EndReason) { endCalls <- reason }
 
 	p := NewPipelineSourceProcessor(fix.TaskCtx)
 	p.Start(fix.RootCtx)

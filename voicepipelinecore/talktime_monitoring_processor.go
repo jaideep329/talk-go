@@ -1,4 +1,4 @@
-package main
+package voicepipelinecore
 
 import (
 	"context"
@@ -9,7 +9,6 @@ import (
 const (
 	defaultMaxTalkTime     = 120 * time.Second
 	talkTimeExceededPrompt = "Your talk time is exhausted now. Ending the call."
-	talkTimeExceededReason = "talk time exhausted"
 )
 
 type TalkTimeMonitoringProcessor struct {
@@ -55,7 +54,7 @@ func (p *TalkTimeMonitoringProcessor) runTimer() {
 	// AudioSource, UserIdle, ContextAggregator) also see the EndFrame
 	// in pipeline order, matching Pipecat's source-driven lifecycle.
 	if p.taskCtx.EndTask != nil {
-		p.taskCtx.EndTask(talkTimeExceededReason)
+		p.taskCtx.EndTask(EndReasonTalkTimeExhausted)
 	}
 }
 

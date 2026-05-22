@@ -1,4 +1,4 @@
-package main
+package voicepipelinecore
 
 import (
 	"testing"
@@ -38,6 +38,63 @@ func TestContextAggregator_FinalTranscriptEmitsLLMMessages(t *testing.T) {
 	}
 	if last["content"] != "hello" {
 		t.Errorf("user content: got %q, want 'hello'", last["content"])
+	}
+}
+
+func TestContextAggregator_InitialMessagesSeedLLMContext(t *testing.T) {
+	fix := newTestFixture(t)
+	a := NewContextAggregator(fix.TaskCtx, []Message{
+		{Role: "system", Content: "seed context"},
+		{Role: "assistant", Content: "hello seed"},
+	})
+
+	down, _ := runProcessorTest(t, fix, runConfig{
+		processor: a,
+		framesToSend: []Frame{
+			TranscriptFrame{Text: "new user", IsFinal: true},
+			TranscriptFrame{Text: "<end>", IsFinal: true},
+		},
+		sendEndFrame: true,
+	})
+
+	llmMsg, ok := findFrame[LLMMessagesFrame](down)
+	if !ok {
+		t.Fatalf("expected LLMMessagesFrame, got %s", describeFrameTypes(down))
+	}
+	if len(llmMsg.Messages) != 3 {
+		t.Fatalf("message count = %d, want 3", len(llmMsg.Messages))
+	}
+	if llmMsg.Messages[0]["content"] != "seed context" {
+		t.Fatalf("first message content = %q, want seed context", llmMsg.Messages[0]["content"])
+	}
+	last := llmMsg.Messages[len(llmMsg.Messages)-1]
+	if last["role"] != "user" || last["content"] != "new user" {
+		t.Fatalf("last message = %+v, want user new user", last)
+	}
+}
+
+func TestContextAggregator_ExplicitEmptyInitialMessagesSkipsDefaultPrompt(t *testing.T) {
+	fix := newTestFixture(t)
+	a := NewContextAggregator(fix.TaskCtx, []Message{})
+
+	down, _ := runProcessorTest(t, fix, runConfig{
+		processor: a,
+		framesToSend: []Frame{
+			TranscriptFrame{Text: "hello", IsFinal: true},
+			TranscriptFrame{Text: "<end>", IsFinal: true},
+		},
+		sendEndFrame: true,
+	})
+
+	llmMsg, ok := findFrame[LLMMessagesFrame](down)
+	if !ok {
+		t.Fatalf("expected LLMMessagesFrame, got %s", describeFrameTypes(down))
+	}
+	if len(llmMsg.Messages) != 1 {
+		t.Fatalf("message count = %d, want only the user message", len(llmMsg.Messages))
+	}
+	if llmMsg.Messages[0]["role"] != "user" {
+		t.Fatalf("first message role = %q, want user", llmMsg.Messages[0]["role"])
 	}
 }
 
@@ -276,5 +333,68 @@ func TestContextAggregator_TTSDoneCommitsAssistantMessage(t *testing.T) {
 	}
 	if !sawAssistant {
 		t.Error("expected an assistant message after TTSDone commit")
+	}
+}
+
+func TestContextAggregator_EmitsObserverCommittedTurnsWithMetrics(t *testing.T) {
+	fix := newTestFixture(t)
+	obs := &recordingObserver{}
+	fix.TaskCtx.turnObservers = newConversationTurnObserverSet(fix.TaskCtx, []ConversationTurnObserver{obs})
+	defer fix.TaskCtx.turnObservers.stopAndDrain()
+	a := NewContextAggregator(fix.TaskCtx)
+
+	fix.TaskCtx.metrics.absorb(NewMetricsFrame([]MetricsData{
+		{Processor: "llm", Label: MetricTTFB, ValueMs: 12},
+		{Processor: "tts", Label: MetricTTFB, ValueMs: 34},
+	}))
+	a.addUserMessage("hello")
+	a.appendWords([]string{"hi", "there"})
+	a.commitSpokenText(false)
+	fix.TaskCtx.turnObservers.stopAndDrain()
+
+	if err := waitForWG(fix.WG, 2*time.Second); err != nil {
+		t.Fatalf("waitForWG: %v", err)
+	}
+	obs.mu.Lock()
+	defer obs.mu.Unlock()
+	if len(obs.users) != 1 || obs.users[0] != "hello" {
+		t.Fatalf("user turn observer events = %v, want [hello]", obs.users)
+	}
+	if len(obs.assistants) != 1 || obs.assistants[0] != "hi there" {
+		t.Fatalf("assistant turn observer events = %v, want [hi there]", obs.assistants)
+	}
+	if len(obs.metrics) != 1 || obs.metrics[0].LLMTTFBMs != 12 || obs.metrics[0].TTSTTFBMs != 34 {
+		t.Fatalf("assistant metrics = %+v, want llm=12 tts=34", obs.metrics)
+	}
+}
+
+func TestContextAggregator_UserFirstSpeechLifecycleFiresOnce(t *testing.T) {
+	fix := newTestFixture(t)
+	calls := make(chan time.Time, 2)
+	fix.TaskCtx.callEvents = newCallEventDispatcher(fix.Logger, fix.WG, CallEvents{
+		OnUserFirstSpeech: func(at time.Time) { calls <- at },
+	})
+	a := NewContextAggregator(fix.TaskCtx)
+
+	runProcessorTest(t, fix, runConfig{
+		processor: a,
+		framesToSend: []Frame{
+			TranscriptFrame{Text: "first", IsFinal: true},
+			TranscriptFrame{Text: "<end>", IsFinal: true},
+			TranscriptFrame{Text: "second", IsFinal: true},
+			TranscriptFrame{Text: "<end>", IsFinal: true},
+		},
+		sendEndFrame: true,
+	})
+
+	select {
+	case <-calls:
+	default:
+		t.Fatal("OnUserFirstSpeech was not called")
+	}
+	select {
+	case <-calls:
+		t.Fatal("OnUserFirstSpeech should only fire once")
+	default:
 	}
 }

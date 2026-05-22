@@ -1,4 +1,4 @@
-package main
+package voicepipelinecore
 
 import (
 	"testing"
@@ -35,8 +35,8 @@ func TestTalkTime_TimerEmitsShutdownSequence(t *testing.T) {
 	endFrame, ok := findFrame[EndFrame](down)
 	if !ok {
 		t.Errorf("expected EndFrame downstream, got %s", describeFrameTypes(down))
-	} else if endFrame.Reason != talkTimeExceededReason {
-		t.Errorf("EndFrame.Reason: got %q, want %q", endFrame.Reason, talkTimeExceededReason)
+	} else if endFrame.Reason != string(EndReasonTalkTimeExhausted) {
+		t.Errorf("EndFrame.Reason: got %q, want %q", endFrame.Reason, EndReasonTalkTimeExhausted)
 	}
 }
 

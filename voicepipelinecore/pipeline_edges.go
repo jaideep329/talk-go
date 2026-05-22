@@ -1,8 +1,7 @@
-package main
+package voicepipelinecore
 
 import (
 	"context"
-	"fmt"
 	"log"
 )
 
@@ -76,8 +75,11 @@ func (p *PipelineSourceProcessor) ProcessFrame(ctx context.Context, frame Frame,
 			}
 			p.logger.Printf("ErrorFrame at pipeline source from %s%s: %s\n", ef.Processor, fatalTag, ef.Err)
 		}
-		if ef.Fatal && p.taskCtx != nil {
-			p.taskCtx.EndTask(fmt.Sprintf("fatal error from %s: %s", ef.Processor, ef.Err))
+		if ef.Fatal && p.taskCtx != nil && p.taskCtx.EndTask != nil {
+			if p.taskCtx.Logger != nil {
+				p.taskCtx.Logger.Printf("Fatal error details: fatal error from %s: %s\n", ef.Processor, ef.Err)
+			}
+			p.taskCtx.EndTask(EndReasonError)
 		}
 		return
 	}

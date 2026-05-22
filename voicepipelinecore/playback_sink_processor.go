@@ -1,4 +1,4 @@
-package main
+package voicepipelinecore
 
 import (
 	"context"
@@ -28,6 +28,7 @@ const (
 //     to runPlayback via queueCh.
 //   - runPlayback owns playbackQueue, interrupted, playbackStarted, and
 //     all interaction with botTrack.
+//
 // On EndFrame, ProcessFrame blocks until runPlayback has drained the
 // queue, written the silence tail, and forwarded EndFrame downstream,
 // so the base's auto-shutdown does not cancel ctx mid-drain.
@@ -215,6 +216,9 @@ func (p *PlaybackSinkProcessor) tick() bool {
 		case AudioFrame:
 			if !p.playbackStarted {
 				p.playbackStarted = true
+				if p.taskCtx.callEvents != nil {
+					p.taskCtx.callEvents.fireBotFirstSpeech(time.Now())
+				}
 				// Broadcast both ways: upstream lets UserIdleProcessor
 				// cancel its idle timer; downstream is informational for
 				// any future post-Playback consumer. Mirrors Pipecat's

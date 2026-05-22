@@ -1,8 +1,9 @@
-package main
+package voicepipelinecore
 
 import (
 	"context"
 	"encoding/binary"
+	"time"
 
 	"github.com/hraban/opus"
 	"github.com/pion/webrtc/v4"
@@ -17,6 +18,30 @@ func NewAudioSourceProcessor(taskCtx *TaskContext) *AudioSourceProcessor {
 	a := &AudioSourceProcessor{taskCtx: taskCtx}
 	a.BaseProcessor = NewBaseProcessor("AudioSource", a, taskCtx)
 	return a
+}
+
+func hasAudibleSamples(samples []int16) bool {
+	const audibleThreshold = 1000
+	for _, sample := range samples {
+		v := int32(sample)
+		if v < 0 {
+			v = -v
+		}
+		if v > audibleThreshold {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *AudioSourceProcessor) maybeMarkFirstUserAudio(samples []int16) {
+	if a.taskCtx == nil || a.taskCtx.callStats == nil || !hasAudibleSamples(samples) {
+		return
+	}
+	at := time.Now()
+	if a.taskCtx.callStats.MarkFirstUserAudio(at) && a.taskCtx.callEvents != nil {
+		a.taskCtx.callEvents.fireFirstUserAudio(at)
+	}
 }
 
 func (a *AudioSourceProcessor) readAudioTrack(track *webrtc.TrackRemote) {
@@ -46,6 +71,7 @@ func (a *AudioSourceProcessor) readAudioTrack(track *webrtc.TrackRemote) {
 			a.taskCtx.Logger.Println("opus decode error:", err)
 			continue
 		}
+		a.maybeMarkFirstUserAudio(pcmBuf[:n])
 
 		pcmBytes := make([]byte, n*2)
 		for i := 0; i < n; i++ {

@@ -1,0 +1,162 @@
+package disha
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log"
+	"net"
+	"strings"
+	"time"
+
+	"github.com/redis/go-redis/v9"
+)
+
+const (
+	conversationDataKeyPrefix  = "conversation_data"
+	conversationChunkKeyPrefix = "conversation_chunks"
+)
+
+var ErrConversationDataNotFound = errors.New("disha: conversation_data not found in Redis")
+
+// RedisClient is the narrow Redis surface required by the Disha
+// integration.
+type RedisClient interface {
+	GetConversationData(ctx context.Context, conversationID string) (*ConversationData, error)
+	AppendChunk(ctx context.Context, userID, conversationID string, chunk ConversationChunk) error
+	Close() error
+}
+
+type redisClient struct {
+	rdb    *redis.Client
+	logger *log.Logger
+}
+
+func NewRedisClient(addr, password string, db int, logger *log.Logger) RedisClient {
+	return &redisClient{
+		rdb:    redis.NewClient(redisOptions(addr, password, db)),
+		logger: logger,
+	}
+}
+
+func redisOptions(addr, password string, db int) *redis.Options {
+	var opts *redis.Options
+	if strings.Contains(addr, "://") {
+		parsed, err := redis.ParseURL(addr)
+		if err == nil {
+			opts = parsed
+		}
+	}
+	if opts == nil {
+		opts = &redis.Options{Addr: normalizeRedisAddr(addr)}
+	}
+	if password != "" {
+		opts.Password = password
+	}
+	opts.DB = db
+	opts.MaxRetries = 3
+	opts.MinRetryBackoff = 100 * time.Millisecond
+	opts.MaxRetryBackoff = time.Second
+	opts.DialTimeout = 5 * time.Second
+	opts.ReadTimeout = 3 * time.Second
+	opts.WriteTimeout = 3 * time.Second
+	return opts
+}
+
+func normalizeRedisAddr(addr string) string {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return "localhost:6379"
+	}
+	if strings.Contains(addr, "://") {
+		return addr
+	}
+	if strings.Contains(addr, ":") {
+		return addr
+	}
+	return addr + ":6379"
+}
+
+func (c *redisClient) Close() error {
+	return c.rdb.Close()
+}
+
+func (c *redisClient) GetConversationData(ctx context.Context, conversationID string) (*ConversationData, error) {
+	key := conversationDataKey(conversationID)
+	var raw []byte
+	err := withRedisTimeoutRetry(ctx, func() error {
+		var getErr error
+		raw, getErr = c.rdb.Get(ctx, key).Bytes()
+		return getErr
+	})
+	if errors.Is(err, redis.Nil) {
+		return nil, fmt.Errorf("%w: %s", ErrConversationDataNotFound, conversationID)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("disha: redis GET %s failed: %w", key, err)
+	}
+
+	var data ConversationData
+	if err := json.Unmarshal(raw, &data); err != nil {
+		return nil, fmt.Errorf("disha: conversation_data malformed for %s: %w", conversationID, err)
+	}
+	return &data, nil
+}
+
+func (c *redisClient) AppendChunk(ctx context.Context, userID, conversationID string, chunk ConversationChunk) error {
+	key := conversationChunksKey(userID, conversationID)
+	payload, err := json.Marshal(chunk)
+	if err != nil {
+		return fmt.Errorf("disha: chunk marshal failed: %w", err)
+	}
+	if err := withRedisTimeoutRetry(ctx, func() error {
+		return c.rdb.RPush(ctx, key, payload).Err()
+	}); err != nil {
+		return fmt.Errorf("disha: redis RPUSH %s failed: %w", key, err)
+	}
+	if c.logger != nil {
+		c.logger.Printf("Appended chunk %s to Redis conversation %s\n", chunk.ID, conversationID)
+	}
+	return nil
+}
+
+func conversationDataKey(conversationID string) string {
+	return fmt.Sprintf("%s:%s", conversationDataKeyPrefix, conversationID)
+}
+
+func conversationChunksKey(userID, conversationID string) string {
+	return fmt.Sprintf("%s:%s:%s", conversationChunkKeyPrefix, userID, conversationID)
+}
+
+func withRedisTimeoutRetry(ctx context.Context, op func() error) error {
+	const maxAttempts = 3
+	backoff := 100 * time.Millisecond
+	var err error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		err = op()
+		if err == nil || !isRedisTimeout(err) || attempt == maxAttempts {
+			return err
+		}
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+		backoff *= 2
+		if backoff > time.Second {
+			backoff = time.Second
+		}
+	}
+	return err
+}
+
+func isRedisTimeout(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
+}

@@ -48,11 +48,13 @@ A full test suite covering every processor lives in `_test.go` files; `go test -
 
 #### Pipeline files:
 
-Core pipeline files live under `voicepipelinecore/` unless marked as root-level.
+Core pipeline files live under `voicepipelinecore/` unless marked as root-level. Disha integration files live under `disha/` and must not be imported by `voicepipelinecore/`.
 
 | File | Purpose |
 |------|---------|
 | root `main.go` | Entry point. Loads `.env`, configures logging (both terminal + `app.log`), silences LiveKit/pion logs, serves HTTP (`:3000`). Two HTTP routes only: `/connect` creates a `voicepipelinecore.PipelineTask` + returns LiveKit token; `/` serves `livekit-client.html`. There is **no** custom WebSocket route — UI events ride the LiveKit data channel (see `ui_events.go`) |
+| `disha/types.go` | Disha Redis/API payload structs: `conversation_data:{conversation_id}`, `conversation_chunks:{user_id}:{conversation_id}`, update-conversation, post-call, and `/common/enqueue_job` request bodies |
+| `disha/redis_client.go` | Narrow Redis client for Disha integration. Reads `conversation_data:{conversation_id}`, appends JSON chunks to `conversation_chunks:{user_id}:{conversation_id}`, normalizes `DISHA_REDIS_URL` host values, and retries Redis timeouts with Disha-style exponential backoff |
 | `processor.go` | The Pipecat-style core: `Direction`, `Envelope{Frame, Direction}`, `Processor` interface, `BaseProcessor` struct, `BroadcastableFrame` interface. `BaseProcessor` owns the per-processor goroutine layout (inputLoop + processLoop), the two input channels (inputSysCh + inputDataCh) for structural system-frame priority, the procCh and per-interrupt procCtx, cancel-and-recreate on `InterruptFrame`, EndFrame auto-cancel, `PushFrame` with `MetricsFrame` intercept, `Broadcast`, `Go` (shared-WG tracking), `Link`/`Prev`/`Next` |
 | `task_types.go` | Public integration types: `Message`, `EndReason` constants, `CallStats`, `TurnMetrics`, and `ConversationTurnObserver` |
 | `pipeline.go` | `Pipeline` (thin: just `Link` + `Start`/`Stop`), `TaskContext` (Ctx, Logger, Room, UIEvents, Metrics, typed EndTask closure, callStats, shared `wg`, call-events/turn-observer/turn-metrics internals), `TaskOptions`, `PipelineTask` (lifecycle owner: holds source, pipeline, cleanup hook, idempotency flags). `NewTask()` wires everything; root `main.go` owns the sessions map and calls `PipelineTask.Start()`. `completeEnd` dispatches its body to an untracked goroutine (`runCleanup`) so the sink's processLoop — which calls `completeEnd` via `onEnd` — isn't waiting for its own `Done()`. `runCleanup` disconnects the LiveKit room BEFORE the bounded 10s `wg.Wait` because `AudioSource.ReadRTP` doesn't respect context — disconnecting is what unblocks the reader; it also stop-and-drains turn observers before `OnCallEnded`. On WG timeout, `captureGoroutineStacks` dumps every live goroutine for diagnosis |
@@ -93,6 +95,7 @@ Ported from `pipecat/tests/utils.py`. Every processor has a `_test.go` file; hel
 | `llm_processor_test.go` | Streams TextFrames downstream (httptest stub); InterruptFrame cancels in-flight HTTP; EndFrame cancels in-flight; upstream frames pass through; server error handled gracefully |
 | `tts_processor_test.go` | InterruptFrame forwarded downstream immediately by ProcessFrame; upstream frames (Word/TTSDone/BotSpeaking) pass through |
 | `conversation_turn_observer_test.go` | Conversation turn observer FIFO drain and panic recovery |
+| `disha/redis_client_test.go`, `disha/types_test.go` | Miniredis coverage for Disha `conversation_data` parsing, missing/malformed values, chunk `RPUSH`, Redis address normalization, timeout retry, and explicit `null` end-reason JSON |
 | `metrics_turn_test.go` | Per-turn metric absorb/snapshot/reset |
 | `call_events_test.go` | Call events are once-only and tracked by the shared WaitGroup |
 | `call_stats_tracker_test.go` | Joined duration accumulation and first-audio timestamp idempotency |
@@ -255,6 +258,9 @@ CARTESIA_API_KEY=...
 LIVEKIT_API_KEY=...
 LIVEKIT_API_SECRET=...
 LIVEKIT_URL=wss://...
+DISHA_REDIS_URL=...
+DISHA_REDIS_PASSWORD=...
+REDIS_DB=0
 ```
 
 ### Dependencies
@@ -266,13 +272,15 @@ LIVEKIT_URL=wss://...
 - `github.com/pion/webrtc/v4` — WebRTC types (`TrackRemote`, `RTPCodecCapability`)
 - `github.com/hajimehoshi/go-mp3` — MP3 decoding for background office sound
 - `github.com/go-logr/stdr` — Used to silence LiveKit/pion debug logs
+- `github.com/redis/go-redis/v9` — Disha Redis client
+- `github.com/alicebob/miniredis/v2` — Redis unit-test server
 
 ### Build & Run
 
 ```bash
 brew install opus opusfile pkg-config  # one-time
 go build ./...
-./awesomeProject  # or: go run .
+./talk-go  # or: go run .
 # Open http://localhost:3000, click Connect
 ```
 
@@ -296,7 +304,7 @@ go test -v -run TestUserIdle ./...  # one processor's tests
 ### Known Issues / Gotchas
 
 - Audio can sound choppy if Opus frames aren't paced at 20ms intervals — use `time.Ticker`, not `time.Sleep`
-- The go.mod module name is still `awesomeProject` (from the original learning project)
+- The `disha` package is intentionally not wired into `/connect` yet; Phase 5 will route requests with `conversation_id` through Disha session assembly
 - Upstream frames (WordTimestampFrame, TTSDoneFrame, BotStarted/StoppedSpeakingFrame) pass through TTS and LLM as forwarding hops to reach ContextAggregator and UserIdleProcessor; the `default: PushFrame(frame, dir)` in each processor handles this
 - Soniox sends transcript snapshots: individual responses duplicate prior non-final tokens and add/refine the current hypothesis. STT should forward token text plus response metadata (`ResponseID`, `Finished`) without owning transcript semantics. ContextAggregator replaces non-final text per response, updates the UI from that latest snapshot, and starts turns only from final tokens ending in `<end>`; `Finished` is logged for debugging but is not the turn boundary
 - Cartesia may send late audio/done messages after context cancellation — `activeContextId` atomic check in TTS reader goroutine drops them

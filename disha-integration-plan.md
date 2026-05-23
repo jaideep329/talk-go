@@ -6,7 +6,7 @@
 
 You have no prior conversation context. This document is self-contained. Read it top to bottom before writing any code.
 
-**Do NOT commit anything.** The user (Jaideep) wants to review each phase locally before commits. Work in the working tree, run tests after each phase, and stop after the phase boundaries listed in §13 unless explicitly told to continue.
+Do not commit phase work unless Jaideep explicitly asks. Current exception: Phase 0 + Phase 1/1.5 were committed on branch `codex/disha-integration-core` after an explicit request. Continue working in the working tree for later phases, run tests after each phase, and stop after the phase boundaries listed in §13 unless explicitly told to continue.
 
 ---
 
@@ -14,7 +14,8 @@ You have no prior conversation context. This document is self-contained. Read it
 
 - **Phase 0 is implemented.** The reusable core is now `voicepipelinecore/`, root `main.go` only owns the demo HTTP wrapper/session map, UI events use LiveKit data packets, and exported API entry points are `voicepipelinecore.NewTask`, `PipelineTask.Start`, `PipelineTask.End`, `JoinRoom`, and `GenerateToken`.
 - **Phase 1 + 1.5 are implemented.** Core now has `TaskOptions.InitialMessages`, `TaskOptions.MaxTalkTime`, typed `EndReason`, `CallStats`, once-only call events, `callStatsTracker`, explicit stop-and-drain `ConversationTurnObserver` workers, and `perTurnMetrics` snapshots. `TaskContext.EndTask` is typed as `func(EndReason)`; there is no legacy string reason mapper.
-- **Current boundary choice:** Disha business logic still does not live in `voicepipelinecore`. The remaining work should add Disha-specific Redis/HTTP/prompt/session assembly in a separate package that builds `TaskOptions`.
+- **Phase 2 is implemented.** The `disha/` package now has Redis/API payload structs, a narrow Redis client for `conversation_data:{conversation_id}` reads and `conversation_chunks:{user_id}:{conversation_id}` appends, Disha-style Redis timeout retry, explicit `null` `end_reason` JSON support, and tests with miniredis/JSON assertions.
+- **Current boundary choice:** Disha business logic still does not live in `voicepipelinecore`. The remaining work should add Disha-specific HTTP client, prompt/session assembly, turn persistence observer, and `/connect` routing in the `disha/` package/root binary boundary.
 
 ---
 

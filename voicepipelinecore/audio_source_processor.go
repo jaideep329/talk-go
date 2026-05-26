@@ -4,9 +4,6 @@ import (
 	"context"
 	"encoding/binary"
 	"time"
-
-	"github.com/hraban/opus"
-	"github.com/pion/webrtc/v4"
 )
 
 type AudioSourceProcessor struct {
@@ -44,49 +41,21 @@ func (a *AudioSourceProcessor) maybeMarkFirstUserAudio(samples []int16) {
 	}
 }
 
-func (a *AudioSourceProcessor) readAudioTrack(track *webrtc.TrackRemote) {
-	decoder, err := opus.NewDecoder(16000, 1)
-	if err != nil {
-		a.taskCtx.Logger.Fatal("failed to create opus decoder:", err)
+// PushPCM is called by the Daily bridge with raw 16kHz mono PCM from
+// remote participants.
+func (a *AudioSourceProcessor) PushPCM(pcmBytes []byte, sampleRate, channels int) {
+	if sampleRate != 16000 || channels != 1 {
+		a.taskCtx.Logger.Printf("unexpected Daily audio format: sample_rate=%d channels=%d\n", sampleRate, channels)
 	}
-
-	pcmBuf := make([]int16, 960)
-
-	for {
-		select {
-		case <-a.ctx.Done():
-			a.taskCtx.Logger.Println("audio source reader exiting: processor stopped")
-			return
-		default:
-		}
-
-		rtpPacket, _, err := track.ReadRTP()
-		if err != nil {
-			a.taskCtx.Logger.Println("track read error:", err)
-			return
-		}
-
-		n, err := decoder.Decode(rtpPacket.Payload, pcmBuf)
-		if err != nil {
-			a.taskCtx.Logger.Println("opus decode error:", err)
-			continue
-		}
-		a.maybeMarkFirstUserAudio(pcmBuf[:n])
-
-		pcmBytes := make([]byte, n*2)
-		for i := 0; i < n; i++ {
-			binary.LittleEndian.PutUint16(pcmBytes[i*2:], uint16(pcmBuf[i]))
-		}
-
-		a.PushFrame(NewAudioFrame(pcmBytes), Downstream)
+	if len(pcmBytes) == 0 {
+		return
 	}
-}
-
-// SetTrack is called by the LiveKit OnTrackSubscribed callback. It spawns
-// a tracked goroutine that reads RTP packets, decodes opus to PCM, and
-// pushes AudioFrames downstream.
-func (a *AudioSourceProcessor) SetTrack(track *webrtc.TrackRemote) {
-	a.Go(func() { a.readAudioTrack(track) })
+	samples := make([]int16, len(pcmBytes)/2)
+	for i := range samples {
+		samples[i] = int16(binary.LittleEndian.Uint16(pcmBytes[i*2:]))
+	}
+	a.maybeMarkFirstUserAudio(samples)
+	a.PushFrame(NewAudioFrame(pcmBytes), Downstream)
 }
 
 func (a *AudioSourceProcessor) ProcessFrame(ctx context.Context, frame Frame, dir Direction) {

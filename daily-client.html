@@ -214,15 +214,39 @@
   <div id="remote-audio"></div>
 
   <script>
-    // LiveKit SDK loaded lazily on first connect
-    let Room, RoomEvent;
-    // Keep room outside Alpine's reactive proxy — LiveKit uses
-    // structuredClone internally which breaks on Proxy objects.
-    let _room = null;
-    const _decoder = new TextDecoder();
-    const _encoder = new TextEncoder();
+    // Daily SDK loaded lazily on first connect.
+    let DailyIframe;
+    // Keep call object outside Alpine's reactive proxy; SDK internals are
+    // not designed to be proxied.
+    let _call = null;
     const CREATE_ROOM_URL = "http://localhost:8000/bot/create_room";
     const DISHA_TEST_USER_ID = "d37d59b9-9727-40ea-9de9-8bba729af6e9";
+
+    function attachDailyAudio(event) {
+      const track = event && event.track;
+      if (!track || track.kind !== "audio") return;
+      const participant = event.participant || {};
+      if (participant.local) return;
+      const remoteAudio = document.getElementById("remote-audio");
+      const id = participant.session_id || participant.user_id || track.id;
+      const existing = remoteAudio.querySelector(`[data-track-id="${track.id}"]`);
+      if (existing) return;
+      const el = document.createElement("audio");
+      el.autoplay = true;
+      el.playsInline = true;
+      el.dataset.participantId = id;
+      el.dataset.trackId = track.id;
+      el.srcObject = new MediaStream([track]);
+      remoteAudio.appendChild(el);
+    }
+
+    function detachDailyAudio(event) {
+      const track = event && event.track;
+      if (!track) return;
+      const remoteAudio = document.getElementById("remote-audio");
+      const el = remoteAudio.querySelector(`[data-track-id="${track.id}"]`);
+      if (el) el.remove();
+    }
 
     function app() {
       return {
@@ -256,11 +280,10 @@
           this.lastError = "";
           this.turns = [];
           try {
-            // Lazy-load LiveKit SDK on first connect
-            if (!Room) {
-              const lk = await import("https://cdn.jsdelivr.net/npm/livekit-client@2/dist/livekit-client.esm.mjs");
-              Room = lk.Room;
-              RoomEvent = lk.RoomEvent;
+            // Lazy-load Daily SDK on first connect.
+            if (!DailyIframe) {
+              const daily = await import("https://cdn.jsdelivr.net/npm/@daily-co/daily-js/+esm");
+              DailyIframe = daily.default || daily.DailyIframe || daily;
             }
 
             const res = await fetch(CREATE_ROOM_URL, {
@@ -276,91 +299,89 @@
               throw new Error(errorText || res.statusText);
             }
             const roomData = await res.json();
-            const serverUrl = roomData.server_url || roomData.room_url;
+            const roomUrl = roomData.room_url;
             const token = roomData.token;
-            if (!serverUrl || !token) {
-              throw new Error("Create Room did not return LiveKit connection details");
+            if (!roomUrl || !token) {
+              throw new Error("Create Room did not return Daily connection details");
             }
             this.roomName = roomData.room_name || "";
             this.conversationId = roomData.conversation_id || "";
 
-            // Connect LiveKit (outside Alpine proxy)
-            _room = new Room();
-            const remoteAudio = document.getElementById("remote-audio");
+            // Connect Daily (outside Alpine proxy).
+            _call = DailyIframe.createCallObject({
+              audioSource: true,
+              videoSource: false,
+              subscribeToTracksAutomatically: true,
+            });
 
-            _room.on(RoomEvent.TrackSubscribed, (track) => {
-              remoteAudio.appendChild(track.attach());
-            });
-            _room.on(RoomEvent.TrackUnsubscribed, (track) => {
-              for (const el of track.detach()) el.remove();
-            });
-            _room.on(RoomEvent.Disconnected, () => {
-              // The room can disconnect for reasons other than our
-              // `call_ended` path (network drop, server-side end).
-              // Tear down local state so the UI stays consistent.
+            _call.on("track-started", attachDailyAudio);
+            _call.on("track-stopped", detachDailyAudio);
+            _call.on("left-meeting", () => {
               this.connecting = false;
               this.finishDisconnect();
             });
-            // UI events arrive on the same WebRTC peer connection as
-            // audio, via the data channel. No separate WebSocket.
-            _room.on(RoomEvent.DataReceived, (payload, participant, kind, topic) => {
+            _call.on("app-message", (event) => {
               try {
-                const event = JSON.parse(_decoder.decode(payload));
-                this.handleUIEvent(event);
+                const data = typeof event.data === "string" ? JSON.parse(event.data) : event.data;
+                this.handleUIEvent(data);
               } catch (err) {
-                console.warn("UI data parse error:", err);
+                console.warn("Daily app message parse error:", err);
               }
             });
 
-            await _room.connect(serverUrl, token);
-            await _room.localParticipant.setMicrophoneEnabled(true);
+            await _call.join({
+              url: roomUrl,
+              token,
+              startVideoOff: true,
+              startAudioOff: false,
+            });
+            _call.setLocalAudio(true);
             this.connected = true;
             this.connecting = false;
           } catch (err) {
             console.error("Connect error:", err);
             this.lastError = err.message || "Connect failed";
             this.connecting = false;
-            if (_room) {
-              _room.disconnect();
-              _room = null;
+            if (_call) {
+              _call.destroy();
+              _call = null;
             }
           }
         },
 
         async disconnect() {
-          // Ask the bot to drain gracefully via a control data packet.
+          // Ask the bot to drain gracefully via a Daily app message.
           // The bot will publish `call_ended` once cleanup completes,
-          // and we tear down the room then. If publish fails (room not
+          // and we tear down the call then. If publish fails (call not
           // ready / already gone), just tear down immediately.
-          if (_room && _room.localParticipant) {
+          if (_call) {
             try {
-              const payload = _encoder.encode(JSON.stringify({ type: "end_call" }));
-              await _room.localParticipant.publishData(payload, {
-                reliable: true,
-                topic: "control",
-              });
+              await _call.sendAppMessage({ type: "end_call" }, "*");
               return;
             } catch (err) {
-              console.warn("publishData(end_call) failed, tearing down locally:", err);
+              console.warn("sendAppMessage(end_call) failed, tearing down locally:", err);
             }
           }
           this.finishDisconnect();
         },
 
         finishDisconnect() {
-          if (_room) {
-            _room.disconnect();
-            _room = null;
+          if (_call) {
+            const call = _call;
+            _call = null;
+            call.leave().catch(() => {});
+            call.destroy();
           }
+          document.getElementById("remote-audio").replaceChildren();
           this.connected = false;
           this.roomName = "";
           this.conversationId = "";
         },
 
         toggleMic() {
-          if (!_room) return;
+          if (!_call) return;
           this.micEnabled = !this.micEnabled;
-          _room.localParticipant.setMicrophoneEnabled(this.micEnabled);
+          _call.setLocalAudio(this.micEnabled);
         },
 
         handleUIEvent(event) {

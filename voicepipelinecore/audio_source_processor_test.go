@@ -6,9 +6,8 @@ import (
 )
 
 // TestAudioSource_ForwardsEndFrame verifies AudioSourceProcessor's
-// ProcessFrame forwards EndFrame downstream. We don't test the actual
-// RTP reading path here (would require a webrtc.TrackRemote stub) —
-// that's covered by integration testing.
+// ProcessFrame forwards EndFrame downstream. Daily bridge audio ingress is
+// covered by PushPCM-focused checks and integration testing.
 func TestAudioSource_ForwardsEndFrame(t *testing.T) {
 	fix := newTestFixture(t)
 	a := NewAudioSourceProcessor(fix.TaskCtx)

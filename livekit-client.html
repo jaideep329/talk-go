@@ -144,6 +144,17 @@
     #remote-audio {
       display: none;
     }
+    @media (max-width: 760px) {
+      header {
+        align-items: flex-start;
+        flex-direction: column;
+        gap: 0.75rem;
+      }
+      .controls {
+        width: 100%;
+        flex-wrap: wrap;
+      }
+    }
   </style>
 </head>
 <body x-data="app()">
@@ -196,7 +207,8 @@
   </div>
 
   <footer>
-    <span x-show="connected" x-text="'Room: ' + roomName"></span>
+    <span x-show="lastError" x-text="lastError"></span>
+    <span x-show="!lastError && connected" x-text="'Room: ' + roomName + (conversationId ? ' | Conversation: ' + conversationId : '')"></span>
   </footer>
 
   <div id="remote-audio"></div>
@@ -204,10 +216,13 @@
   <script>
     // LiveKit SDK loaded lazily on first connect
     let Room, RoomEvent;
-    // Keep room and ws outside Alpine's reactive proxy — LiveKit uses
+    // Keep room outside Alpine's reactive proxy — LiveKit uses
     // structuredClone internally which breaks on Proxy objects.
     let _room = null;
-    let _ws = null;
+    const _decoder = new TextDecoder();
+    const _encoder = new TextEncoder();
+    const CREATE_ROOM_URL = "http://localhost:8000/bot/create_room";
+    const DISHA_TEST_USER_ID = "d37d59b9-9727-40ea-9de9-8bba729af6e9";
 
     function app() {
       return {
@@ -215,6 +230,8 @@
         connecting: false,
         micEnabled: true,
         roomName: "",
+        conversationId: "",
+        lastError: "",
         turns: [],
         liveText: "",
         assistantLiveText: "",
@@ -236,6 +253,7 @@
 
         async connect() {
           this.connecting = true;
+          this.lastError = "";
           this.turns = [];
           try {
             // Lazy-load LiveKit SDK on first connect
@@ -245,16 +263,26 @@
               RoomEvent = lk.RoomEvent;
             }
 
-            const res = await fetch("/connect");
-            if (!res.ok) throw new Error(res.statusText);
-            const { server_url, token, room_name } = await res.json();
-            this.roomName = room_name;
-
-            // Connect WebSocket for UI events
-            const wsProtocol = location.protocol === "https:" ? "wss:" : "ws:";
-            _ws = new WebSocket(`${wsProtocol}//${location.host}/ws?room=${room_name}`);
-            _ws.onmessage = (e) => this.handleUIEvent(JSON.parse(e.data));
-            _ws.onclose = () => console.log("UI WebSocket closed");
+            const res = await fetch(CREATE_ROOM_URL, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                user_id: DISHA_TEST_USER_ID,
+                resume_enabled: true,
+              }),
+            });
+            if (!res.ok) {
+              const errorText = await res.text();
+              throw new Error(errorText || res.statusText);
+            }
+            const roomData = await res.json();
+            const serverUrl = roomData.server_url || roomData.room_url;
+            const token = roomData.token;
+            if (!serverUrl || !token) {
+              throw new Error("Create Room did not return LiveKit connection details");
+            }
+            this.roomName = roomData.room_name || "";
+            this.conversationId = roomData.conversation_id || "";
 
             // Connect LiveKit (outside Alpine proxy)
             _room = new Room();
@@ -267,24 +295,54 @@
               for (const el of track.detach()) el.remove();
             });
             _room.on(RoomEvent.Disconnected, () => {
-              this.connected = false;
+              // The room can disconnect for reasons other than our
+              // `call_ended` path (network drop, server-side end).
+              // Tear down local state so the UI stays consistent.
               this.connecting = false;
+              this.finishDisconnect();
+            });
+            // UI events arrive on the same WebRTC peer connection as
+            // audio, via the data channel. No separate WebSocket.
+            _room.on(RoomEvent.DataReceived, (payload, participant, kind, topic) => {
+              try {
+                const event = JSON.parse(_decoder.decode(payload));
+                this.handleUIEvent(event);
+              } catch (err) {
+                console.warn("UI data parse error:", err);
+              }
             });
 
-            await _room.connect(server_url, token);
+            await _room.connect(serverUrl, token);
             await _room.localParticipant.setMicrophoneEnabled(true);
             this.connected = true;
             this.connecting = false;
           } catch (err) {
             console.error("Connect error:", err);
+            this.lastError = err.message || "Connect failed";
             this.connecting = false;
+            if (_room) {
+              _room.disconnect();
+              _room = null;
+            }
           }
         },
 
-        disconnect() {
-          if (_ws && _ws.readyState === WebSocket.OPEN) {
-            _ws.send(JSON.stringify({ type: "end_call" }));
-            return;
+        async disconnect() {
+          // Ask the bot to drain gracefully via a control data packet.
+          // The bot will publish `call_ended` once cleanup completes,
+          // and we tear down the room then. If publish fails (room not
+          // ready / already gone), just tear down immediately.
+          if (_room && _room.localParticipant) {
+            try {
+              const payload = _encoder.encode(JSON.stringify({ type: "end_call" }));
+              await _room.localParticipant.publishData(payload, {
+                reliable: true,
+                topic: "control",
+              });
+              return;
+            } catch (err) {
+              console.warn("publishData(end_call) failed, tearing down locally:", err);
+            }
           }
           this.finishDisconnect();
         },
@@ -294,12 +352,9 @@
             _room.disconnect();
             _room = null;
           }
-          if (_ws) {
-            _ws.close();
-            _ws = null;
-          }
           this.connected = false;
           this.roomName = "";
+          this.conversationId = "";
         },
 
         toggleMic() {

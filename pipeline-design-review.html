@@ -1,0 +1,2016 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Talk-Go × Pipecat — Pipeline Design Review</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f5f6fb;
+      --panel: #ffffff;
+      --ink: #0f172a;
+      --ink-soft: #334155;
+      --muted: #64748b;
+      --line: #e2e8f0;
+      --soft: #f1f5f9;
+
+      /* Voice colors */
+      --pipecat: #4338ca;
+      --pipecat-soft: #ede9fe;
+      --pipecat-ink: #312e81;
+
+      --talkgo: #0d9488;
+      --talkgo-soft: #ccfbf1;
+      --talkgo-ink: #134e4a;
+
+      --mytake: #b45309;
+      --mytake-soft: #fef3c7;
+      --mytake-ink: #78350f;
+
+      --agree: #047857;
+      --agree-soft: #d1fae5;
+      --agree-ink: #064e3b;
+
+      --pushback: #b91c1c;
+      --pushback-soft: #fee2e2;
+      --pushback-ink: #7f1d1d;
+
+      --neutral: #475569;
+      --neutral-soft: #f1f5f9;
+
+      --shadow: 0 8px 24px rgba(15, 23, 42, 0.06);
+      --shadow-lg: 0 24px 60px rgba(15, 23, 42, 0.08);
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body { margin: 0; padding: 0; }
+
+    body {
+      background: var(--bg);
+      color: var(--ink);
+      font-family: 'Inter', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.6;
+      font-size: 15px;
+    }
+
+    /* Header */
+    header.hero {
+      background:
+        radial-gradient(1100px 360px at 12% -10%, rgba(67, 56, 202, 0.45), transparent 60%),
+        radial-gradient(900px 360px at 88% -20%, rgba(13, 148, 136, 0.45), transparent 60%),
+        linear-gradient(140deg, #0b1023 0%, #131a35 70%);
+      color: #f8fafc;
+      padding: 56px 32px 44px;
+      border-bottom: 1px solid #1f2a44;
+    }
+    .hero-inner { max-width: 1280px; margin: 0 auto; }
+    .eyebrow {
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      font-size: 11px;
+      color: #a5b4fc;
+      font-weight: 700;
+    }
+    h1 {
+      font-size: 40px;
+      letter-spacing: -0.02em;
+      margin: 8px 0 12px;
+      font-weight: 700;
+      max-width: 900px;
+    }
+    .lede {
+      font-size: 17px;
+      color: #cbd5e1;
+      max-width: 800px;
+      margin: 0 0 24px;
+    }
+
+    .legend {
+      display: flex;
+      gap: 18px;
+      flex-wrap: wrap;
+      color: #cbd5e1;
+      font-size: 13px;
+      margin-top: 14px;
+      align-items: center;
+    }
+    .legend-item { display: inline-flex; align-items: center; gap: 6px; }
+
+    .filter-bar {
+      margin-top: 22px;
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+      font-size: 13px;
+      color: #cbd5e1;
+    }
+    .filter-bar button {
+      background: transparent;
+      border: 1px solid rgba(255, 255, 255, 0.18);
+      color: #e2e8f0;
+      padding: 6px 12px;
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      border-radius: 999px;
+      cursor: pointer;
+      transition: all 0.14s ease;
+    }
+    .filter-bar button:hover { background: rgba(255, 255, 255, 0.08); }
+    .filter-bar button.active {
+      background: #f8fafc;
+      color: #0f172a;
+      border-color: transparent;
+    }
+
+    /* Layout */
+    .layout {
+      display: grid;
+      grid-template-columns: 240px 1fr;
+      gap: 32px;
+      max-width: 1280px;
+      margin: 0 auto;
+      padding: 32px 32px 80px;
+    }
+    @media (max-width: 980px) {
+      .layout { grid-template-columns: 1fr; padding: 24px 16px 60px; }
+      .toc { position: static !important; max-height: none !important; }
+    }
+
+    /* TOC */
+    .toc {
+      position: sticky;
+      top: 24px;
+      max-height: calc(100vh - 48px);
+      overflow-y: auto;
+      align-self: start;
+      font-size: 13px;
+    }
+    .toc h4 {
+      margin: 0 0 12px;
+      color: var(--muted);
+      font-size: 11px;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      font-weight: 700;
+    }
+    .toc a {
+      display: block;
+      padding: 6px 10px;
+      color: var(--ink-soft);
+      text-decoration: none;
+      border-left: 2px solid transparent;
+      margin-bottom: 2px;
+      transition: all 0.12s ease;
+      border-radius: 0 6px 6px 0;
+    }
+    .toc a:hover { background: var(--soft); color: var(--ink); }
+    .toc a.active {
+      border-left-color: var(--pipecat);
+      color: var(--pipecat-ink);
+      background: var(--pipecat-soft);
+      font-weight: 600;
+    }
+
+    /* Main */
+    main { min-width: 0; }
+
+    section.block {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 28px 32px 32px;
+      margin: 0 0 28px;
+      box-shadow: var(--shadow);
+    }
+    section.block > .section-eyebrow {
+      color: var(--muted);
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      font-size: 11px;
+      font-weight: 700;
+      margin-bottom: 6px;
+    }
+    section.block > h2 {
+      font-size: 26px;
+      letter-spacing: -0.01em;
+      margin: 0 0 8px;
+      font-weight: 700;
+    }
+    section.block > .tldr {
+      color: var(--ink-soft);
+      font-size: 15px;
+      margin: 0 0 22px;
+      padding: 12px 14px;
+      background: var(--soft);
+      border-left: 3px solid var(--muted);
+      border-radius: 0 8px 8px 0;
+    }
+    section.block > .tldr b { color: var(--ink); }
+
+    h3 {
+      font-size: 17px;
+      margin: 26px 0 10px;
+      letter-spacing: -0.005em;
+    }
+    p { margin: 0 0 12px; }
+    p:last-child { margin-bottom: 0; }
+
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      background: var(--soft);
+      color: #1e293b;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 0.88em;
+    }
+    code.file {
+      background: #eef2ff;
+      color: #312e81;
+      font-size: 0.82em;
+    }
+
+    pre {
+      background: #0f172a;
+      color: #e2e8f0;
+      border-radius: 10px;
+      padding: 16px 18px;
+      overflow-x: auto;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12.5px;
+      line-height: 1.6;
+      margin: 12px 0;
+    }
+    pre .kw { color: #c084fc; }
+    pre .str { color: #86efac; }
+    pre .com { color: #64748b; font-style: italic; }
+    pre .num { color: #fbbf24; }
+    pre .typ { color: #7dd3fc; }
+    pre .fn  { color: #fde68a; }
+
+    /* Two-column comparison */
+    .compare {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+      margin: 14px 0 6px;
+    }
+    @media (max-width: 760px) { .compare { grid-template-columns: 1fr; } }
+    .panel {
+      border-radius: 10px;
+      padding: 16px 18px;
+      border: 1px solid;
+      position: relative;
+      overflow: hidden;
+    }
+    .panel h4 {
+      margin: 0 0 10px;
+      font-size: 12px;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .panel.p-pipecat { background: var(--pipecat-soft); border-color: #c7d2fe; }
+    .panel.p-pipecat h4 { color: var(--pipecat-ink); }
+    .panel.p-pipecat pre { background: #1e1b4b; }
+    .panel.p-talkgo { background: var(--talkgo-soft); border-color: #99f6e4; }
+    .panel.p-talkgo h4 { color: var(--talkgo-ink); }
+    .panel.p-talkgo pre { background: #042f2e; }
+    .panel ul, .panel ol { margin: 8px 0 0 18px; }
+    .panel li { margin: 4px 0; }
+
+    /* Tags */
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      padding: 3px 7px;
+      border-radius: 4px;
+      margin-right: 6px;
+      vertical-align: middle;
+      text-transform: uppercase;
+      line-height: 1;
+    }
+    .tag-pipecat  { background: var(--pipecat-soft);  color: var(--pipecat-ink);  border: 1px solid #c7d2fe; }
+    .tag-talkgo   { background: var(--talkgo-soft);   color: var(--talkgo-ink);   border: 1px solid #99f6e4; }
+    .tag-mytake   { background: var(--mytake-soft);   color: var(--mytake-ink);   border: 1px solid #fde68a; }
+    .tag-agree    { background: var(--agree-soft);    color: var(--agree-ink);    border: 1px solid #6ee7b7; }
+    .tag-pushback { background: var(--pushback-soft); color: var(--pushback-ink); border: 1px solid #fca5a5; }
+    .tag-neutral  { background: var(--neutral-soft);  color: var(--neutral);      border: 1px solid var(--line); }
+
+    .legend-item .tag { margin-right: 0; }
+
+    /* Voice annotation blocks */
+    .voice {
+      padding: 12px 14px 12px 16px;
+      border-radius: 8px;
+      margin: 12px 0;
+      border-left: 4px solid;
+      background: #fff;
+    }
+    .voice .voice-head {
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      margin-bottom: 4px;
+    }
+    .voice-pipecat  { border-color: var(--pipecat);  background: #f5f3ff; }
+    .voice-pipecat  .voice-head { color: var(--pipecat-ink); }
+    .voice-talkgo   { border-color: var(--talkgo);   background: #f0fdfa; }
+    .voice-talkgo   .voice-head { color: var(--talkgo-ink); }
+    .voice-mytake   { border-color: var(--mytake);   background: #fffbeb; }
+    .voice-mytake   .voice-head { color: var(--mytake-ink); }
+    .voice-agree    { border-color: var(--agree);    background: #ecfdf5; }
+    .voice-agree    .voice-head { color: var(--agree-ink); }
+    .voice-pushback { border-color: var(--pushback); background: #fef2f2; }
+    .voice-pushback .voice-head { color: var(--pushback-ink); }
+
+    /* Filter modes — dim non-matching */
+    body.filter-pipecat  .voice:not(.voice-pipecat)  { opacity: 0.18; }
+    body.filter-talkgo   .voice:not(.voice-talkgo)   { opacity: 0.18; }
+    body.filter-mytake   .voice:not(.voice-mytake)   { opacity: 0.18; }
+    body.filter-opinion  .voice-pipecat,
+    body.filter-opinion  .voice-talkgo               { opacity: 0.18; }
+
+    /* Pipeline diagram */
+    .pipeline-row {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      align-items: center;
+      margin: 14px 0;
+    }
+    .node {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12px;
+      padding: 8px 11px;
+      border-radius: 7px;
+      border: 1px solid;
+      white-space: nowrap;
+    }
+    .node-pipecat { background: #ede9fe; border-color: #c7d2fe; color: #312e81; }
+    .node-talkgo  { background: #ccfbf1; border-color: #99f6e4; color: #134e4a; }
+    .node.edge    { background: #f1f5f9; border-color: var(--line); color: var(--muted); font-style: italic; }
+    .arrow { color: var(--muted); font-weight: 700; font-size: 14px; padding: 0 2px; }
+
+    /* Stat cards */
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 12px;
+      margin: 10px 0 22px;
+    }
+    @media (max-width: 760px) { .stats { grid-template-columns: repeat(2, 1fr); } }
+    .stat {
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 14px 16px;
+    }
+    .stat .v { font-size: 22px; font-weight: 700; color: var(--ink); }
+    .stat .l { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; margin-top: 4px; }
+    .stat.alt-1 { background: var(--pipecat-soft); border-color: #c7d2fe; }
+    .stat.alt-1 .v { color: var(--pipecat-ink); }
+    .stat.alt-2 { background: var(--talkgo-soft); border-color: #99f6e4; }
+    .stat.alt-2 .v { color: var(--talkgo-ink); }
+
+    /* Tables */
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13.5px;
+      margin: 12px 0;
+    }
+    th, td {
+      border: 1px solid var(--line);
+      padding: 10px 12px;
+      vertical-align: top;
+      text-align: left;
+    }
+    th { background: var(--soft); font-weight: 600; color: var(--ink-soft); }
+    tr.row-pipecat td:first-child { background: var(--pipecat-soft); color: var(--pipecat-ink); font-weight: 600; }
+    tr.row-talkgo  td:first-child { background: var(--talkgo-soft);  color: var(--talkgo-ink);  font-weight: 600; }
+
+    /* State machine */
+    .states {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12px;
+      margin: 8px 0 4px;
+    }
+    .state {
+      padding: 6px 10px;
+      border-radius: 6px;
+      background: #fff;
+      border: 1px solid var(--line);
+      white-space: nowrap;
+    }
+    .state.start { background: #dcfce7; border-color: #86efac; color: #065f46; }
+    .state.end   { background: #fee2e2; border-color: #fca5a5; color: #7f1d1d; }
+
+    /* TTS journey */
+    .journey {
+      display: grid;
+      grid-template-columns: 200px 1fr;
+      gap: 0;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      overflow: hidden;
+      margin: 14px 0;
+      background: #fff;
+    }
+    .journey .step-time {
+      background: #f8fafc;
+      padding: 12px 14px;
+      border-right: 1px solid var(--line);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12px;
+      color: var(--muted);
+      border-bottom: 1px solid var(--line);
+    }
+    .journey .step-body {
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--line);
+      font-size: 14px;
+    }
+    .journey .step-body:last-of-type,
+    .journey .step-time:nth-last-of-type(2) { border-bottom: none; }
+    .journey .step-body b { color: var(--ink); }
+
+    /* Footer */
+    footer {
+      max-width: 1280px;
+      margin: 0 auto;
+      padding: 32px;
+      color: var(--muted);
+      font-size: 13px;
+      text-align: center;
+    }
+
+    /* Misc */
+    .kvs {
+      display: grid;
+      grid-template-columns: max-content 1fr;
+      column-gap: 14px;
+      row-gap: 6px;
+      font-size: 14px;
+    }
+    .kvs dt {
+      font-weight: 600;
+      color: var(--ink-soft);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 13px;
+    }
+    .kvs dd { margin: 0; color: var(--ink-soft); }
+
+    details.cite {
+      margin: 6px 0 0;
+      font-size: 12.5px;
+    }
+    details.cite summary {
+      cursor: pointer;
+      color: var(--muted);
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      font-size: 11px;
+    }
+    details.cite[open] summary { color: var(--ink-soft); }
+    details.cite > div {
+      margin-top: 6px;
+      padding: 10px 12px;
+      background: var(--soft);
+      border-radius: 6px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12px;
+      color: var(--ink-soft);
+    }
+
+    .verdict {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin: 14px 0 6px;
+      padding: 12px 14px;
+      background: linear-gradient(120deg, #fffaeb 0%, #fef3c7 100%);
+      border-radius: 10px;
+      border: 1px solid #fde68a;
+    }
+    .verdict.agree {
+      background: linear-gradient(120deg, #f0fdf4 0%, #dcfce7 100%);
+      border-color: #86efac;
+    }
+    .verdict.pushback {
+      background: linear-gradient(120deg, #fef2f2 0%, #fee2e2 100%);
+      border-color: #fca5a5;
+    }
+    .verdict-icon {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-weight: 700;
+      font-size: 13px;
+      letter-spacing: 0.04em;
+    }
+  </style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="hero-inner">
+    <div class="eyebrow">Design Review</div>
+    <h1>Talk-Go × Pipecat</h1>
+    <p class="lede">
+      A side-by-side study of the core voice-pipeline design. What you've adopted from
+      Pipecat, where you've diverged, and what the trade-offs cost. Every claim is tagged
+      so you can tell when I'm quoting Pipecat, describing your code, or offering my own
+      opinion.
+    </p>
+
+    <div class="legend">
+      <span class="legend-item"><span class="tag tag-pipecat">PIPECAT</span> how Pipecat does it</span>
+      <span class="legend-item"><span class="tag tag-talkgo">TALK-GO</span> how your code does it</span>
+      <span class="legend-item"><span class="tag tag-mytake">MY TAKE</span> my opinion / advice</span>
+      <span class="legend-item"><span class="tag tag-agree">AGREE</span> I support your choice</span>
+      <span class="legend-item"><span class="tag tag-pushback">PUSHBACK</span> I'd push back here</span>
+    </div>
+
+    <div class="filter-bar">
+      <span>View:</span>
+      <button data-filter="all" class="active">All</button>
+      <button data-filter="pipecat">Pipecat voice</button>
+      <button data-filter="talkgo">Talk-Go voice</button>
+      <button data-filter="mytake">My take</button>
+      <button data-filter="opinion">Opinions only (mine + agree/pushback)</button>
+    </div>
+  </div>
+</header>
+
+<div class="layout">
+
+  <aside class="toc">
+    <h4>Sections</h4>
+    <a href="#snapshot">0. Snapshot</a>
+    <a href="#topology">1. Pipeline topology</a>
+    <a href="#objects">2. Object model &amp; states</a>
+    <a href="#processor">3. Frame processor anatomy</a>
+    <a href="#routing">4. Routing &amp; direction</a>
+    <a href="#priority">5. System priority</a>
+    <a href="#interrupt">6. Interruption</a>
+    <a href="#tts-drain">7. TTS &amp; EndFrame drain</a>
+    <a href="#lifecycle">8. Lifecycle &amp; shutdown</a>
+    <a href="#crosscutting">9. Cross-cutting (metrics, observers)</a>
+    <a href="#aggregator">10. ContextAggregator</a>
+    <a href="#constraints">11. Constraints summary</a>
+    <a href="#recommendations">12. Recommendations</a>
+  </aside>
+
+  <main>
+
+    <!-- 0. Snapshot -->
+    <section class="block" id="snapshot">
+      <div class="section-eyebrow">Section 0</div>
+      <h2>Snapshot</h2>
+      <p class="tldr">
+        <b>One-liner:</b> Your pipeline is a faithful but compact re-imagining of Pipecat's frame-graph,
+        recast as one goroutine per processor with frames flowing through Go channels. The big trades
+        you've made are in <b>direction handling</b>, <b>system-frame priority</b>, and
+        <b>shutdown semantics</b>. None of them are wrong; all of them are worth knowing.
+      </p>
+
+      <div class="stats">
+        <div class="stat alt-1">
+          <div class="v">10</div>
+          <div class="l">Pipecat processors (incl. Source/Sink, RTVI, aggregators)</div>
+        </div>
+        <div class="stat alt-2">
+          <div class="v">10</div>
+          <div class="l">Talk-Go processors (Source → AudioSrc → STT → Idle → Ctx → TalkTime → LLM → TTS → Playback → Sink)</div>
+        </div>
+        <div class="stat alt-1">
+          <div class="v">2</div>
+          <div class="l">Internal queues per Pipecat processor (priority input + process)</div>
+        </div>
+        <div class="stat alt-2">
+          <div class="v">2</div>
+          <div class="l">Channels per Talk-Go processor (Data + System), plus 1–5 internal channels each</div>
+        </div>
+      </div>
+
+      <div class="compare">
+        <div class="panel p-pipecat">
+          <h4><span class="tag tag-pipecat">Pipecat</span> Mental model</h4>
+          <p>Each processor is a <b>self-contained async object</b> with two internal queues and two
+            asyncio tasks. <code>process_frame(frame, direction)</code> is the single entry point.
+            Frames carry direction explicitly. Priority is enforced by a <code>PriorityQueue</code>.</p>
+          <p>Lifecycle is owned by a separate <code>PipelineTask</code> that pushes <code>StartFrame</code>,
+            waits for <code>EndFrame</code> at the sink, then cleans up.</p>
+        </div>
+        <div class="panel p-talkgo">
+          <h4><span class="tag tag-talkgo">Talk-Go</span> Mental model</h4>
+          <p>Each processor is a <b>single goroutine</b> with a <code>select</code> over Data, System,
+            and one-or-more internal IO channels. Direction is inferred from frame type. Priority is
+            re-implemented as a <i>nested select</i> in every processor.</p>
+          <p>Lifecycle is owned by a <code>Session</code> that queues an <code>EndFrame</code> at the
+            source and reacts when it reaches the sink. No <code>StartFrame</code>, no
+            <code>CancelFrame</code>.</p>
+        </div>
+      </div>
+
+      <div class="voice voice-mytake">
+        <div class="voice-head"><span class="tag tag-mytake">My take</span> Where this review lands</div>
+        <p>You've kept the bones of Pipecat — frames, processors, source/sink edges,
+          upstream/downstream, interrupts, graceful EndFrame — and dropped the parts you don't need yet
+          (Observers, StartFrame/CancelFrame, nested pipelines, paused-state). That's a smart trim.
+          The places I'd revisit are: <b>routing</b> (direction should be on the wire, not inferred),
+          <b>system-frame priority</b> (extract the nested-select helper), and
+          <b>TTSProcessor state</b> (consolidate the boolean salad into a small enum). Everything else
+          is defensible.</p>
+      </div>
+    </section>
+
+    <!-- 1. Topology -->
+    <section class="block" id="topology">
+      <div class="section-eyebrow">Section 1</div>
+      <h2>Pipeline topology</h2>
+      <p class="tldr">
+        Both pipelines are linear chains wrapped in Source/Sink edges. Your ordering deliberately
+        differs from Pipecat's sales-call in two places — <code>UserIdleProcessor</code> position and
+        <code>ContextAggregator</code> shape — and both are worth keeping.
+      </p>
+
+      <h3>Pipecat — <code class="file">bots/sales_call/sales_call.py</code></h3>
+      <div class="pipeline-row">
+        <span class="node edge">(PipelineSource)</span><span class="arrow">→</span>
+        <span class="node node-pipecat">transport.input()</span><span class="arrow">→</span>
+        <span class="node node-pipecat">user_idle</span><span class="arrow">→</span>
+        <span class="node node-pipecat">rtvi</span><span class="arrow">→</span>
+        <span class="node node-pipecat">stt</span><span class="arrow">→</span>
+        <span class="node node-pipecat">aggregator.user()</span><span class="arrow">→</span>
+        <span class="node node-pipecat">llm</span><span class="arrow">→</span>
+        <span class="node node-pipecat">talktime_monitor</span><span class="arrow">→</span>
+        <span class="node node-pipecat">tts</span><span class="arrow">→</span>
+        <span class="node node-pipecat">transport.output()</span><span class="arrow">→</span>
+        <span class="node node-pipecat">aggregator.assistant()</span><span class="arrow">→</span>
+        <span class="node edge">(PipelineSink)</span>
+      </div>
+
+      <h3>Talk-Go — <code class="file">pipeline.go:137</code></h3>
+      <div class="pipeline-row">
+        <span class="node node-talkgo">PipelineSourceProcessor</span><span class="arrow">→</span>
+        <span class="node node-talkgo">AudioSourceProcessor</span><span class="arrow">→</span>
+        <span class="node node-talkgo">STTProcessor</span><span class="arrow">→</span>
+        <span class="node node-talkgo">UserIdleProcessor</span><span class="arrow">→</span>
+        <span class="node node-talkgo">ContextAggregator</span><span class="arrow">→</span>
+        <span class="node node-talkgo">TalkTimeMonitoringProcessor</span><span class="arrow">→</span>
+        <span class="node node-talkgo">LLMProcessor</span><span class="arrow">→</span>
+        <span class="node node-talkgo">TTSProcessor</span><span class="arrow">→</span>
+        <span class="node node-talkgo">PlaybackSinkProcessor</span><span class="arrow">→</span>
+        <span class="node node-talkgo">PipelineSinkProcessor</span>
+      </div>
+
+      <div class="compare">
+        <div class="panel p-pipecat">
+          <h4><span class="tag tag-pipecat">Pipecat</span> Notable shapes</h4>
+          <ul>
+            <li><code>transport.input()</code> emits raw audio frames; <code>transport.output()</code>
+              consumes <code>TTSAudioRawFrame</code>s and writes to Daily, with EndFrame draining
+              built into the output transport's <code>MediaSender</code>.</li>
+            <li><code>aggregator.user()</code> sits <i>before</i> the LLM; <code>aggregator.assistant()</code>
+              sits <i>after</i> the output transport. They share a single context object.</li>
+            <li><code>user_idle</code> sits second-from-the-top, right after the input transport.</li>
+            <li><code>talktime_monitor</code> sits <b>between LLM and TTS</b> in sales_call.</li>
+          </ul>
+          <details class="cite"><summary>Citations</summary><div>
+            sales_call.py lines 297–308 · base_output.py:794–821 (silence on EndFrame) ·
+            user_idle_processor.py — entire file
+          </div></details>
+        </div>
+        <div class="panel p-talkgo">
+          <h4><span class="tag tag-talkgo">Talk-Go</span> Notable shapes</h4>
+          <ul>
+            <li><code>AudioSourceProcessor</code> + <code>PlaybackSinkProcessor</code> together do
+              what <code>transport.input()</code> + <code>transport.output()</code> do in Pipecat,
+              but split across two endpoints of the chain.</li>
+            <li><b>One</b> <code>ContextAggregator</code> sits between STT and LLM. It receives
+              transcripts downstream and commit signals (<code>TTSDoneFrame</code>,
+              <code>BotStartedSpeakingFrame</code>) upstream.</li>
+            <li><code>UserIdleProcessor</code> sits between STT and ContextAggregator (one slot
+              later than Pipecat).</li>
+            <li><code>TalkTimeMonitoringProcessor</code> sits between ContextAggregator and LLM
+              (one slot earlier than Pipecat's equivalent).</li>
+          </ul>
+          <details class="cite"><summary>Citations</summary><div>
+            pipeline.go:137 · context_aggregator.go:142–203 ·
+            user_idle_processor.go:44–79 · talktime_monitoring_processor.go:27–87
+          </div></details>
+        </div>
+      </div>
+
+      <div class="voice voice-agree">
+        <div class="voice-head"><span class="tag tag-agree">Agree</span> Single ContextAggregator</div>
+        <p>Pipecat's split (user before LLM, assistant after transport.output) exists because their
+          context object is shared mutable state and they want each half positioned with the data
+          flowing past it. Your single-aggregator design works because <b>commit happens on upstream
+          <code>TTSDoneFrame</code></b>, which reaches the same processor naturally. You get the same
+          ordering guarantees with half the wiring. Keep it.</p>
+      </div>
+
+      <div class="voice voice-mytake">
+        <div class="voice-head"><span class="tag tag-mytake">My take</span> TalkTime position</div>
+        <p>Sales-call puts <code>talktime_monitor</code> between LLM and TTS so it sees text after
+          generation. You put it between ContextAggregator and LLM. The talktime timer doesn't actually
+          read any frame content — it just reacts to its own <code>time.Timer</code> — so position only
+          affects what it can <i>interrupt</i> cleanly. Your placement lets it cancel the LLM via
+          <code>InterruptFrame</code> downstream, which is what you want. Don't move it.</p>
+      </div>
+    </section>
+
+    <!-- 2. Object model -->
+    <section class="block" id="objects">
+      <div class="section-eyebrow">Section 2</div>
+      <h2>Object model &amp; possible states</h2>
+      <p class="tldr">
+        Pipecat has <b>three</b> orchestration objects with explicit state machines
+        (<code>PipelineTask</code>, <code>Pipeline</code>, <code>FrameProcessor</code>). You have
+        <b>one</b> orchestration object (<code>Session</code>) plus stateless processors. The states
+        you don't have aren't missing — they're either combined or implicit.
+      </p>
+
+      <h3>Pipecat objects</h3>
+      <div class="compare" style="grid-template-columns: 1fr 1fr 1fr;">
+        <div class="panel p-pipecat">
+          <h4>PipelineTask</h4>
+          <p>Lifecycle owner. Holds push queue, observers, clock, task manager, idle &amp; heartbeat
+            monitors.</p>
+          <div class="states">
+            <span class="state start">not-started</span>
+            <span class="arrow">→</span>
+            <span class="state">running</span>
+            <span class="arrow">→</span>
+            <span class="state">cancelling</span>
+            <span class="arrow">→</span>
+            <span class="state end">finished</span>
+          </div>
+          <p style="margin-top:8px"><code>_pipeline_start_event</code>,
+            <code>_pipeline_end_event</code>, <code>_pipeline_finished_event</code> are
+            <code>asyncio.Event</code>s that gate transitions.</p>
+        </div>
+        <div class="panel p-pipecat">
+          <h4>Pipeline</h4>
+          <p>A <code>FrameProcessor</code> itself (composable, nestable). Auto-wraps your processors
+            with <code>PipelineSource</code> + <code>PipelineSink</code>.</p>
+          <div class="states">
+            <span class="state start">unset</span>
+            <span class="arrow">→</span>
+            <span class="state">setup()</span>
+            <span class="arrow">→</span>
+            <span class="state end">cleanup()</span>
+          </div>
+          <p style="margin-top:8px">No runtime state of its own; delegates to children.</p>
+        </div>
+        <div class="panel p-pipecat">
+          <h4>FrameProcessor</h4>
+          <p>Two internal queues, two asyncio tasks.</p>
+          <div class="states">
+            <span class="state start">not-started</span>
+            <span class="arrow">→</span>
+            <span class="state">started</span>
+            <span class="arrow">→</span>
+            <span class="state">cancelling</span>
+            <span class="arrow">→</span>
+            <span class="state end">cleaned-up</span>
+          </div>
+          <p style="margin-top:8px">Sub-states: <code>paused-frames</code>,
+            <code>paused-system-frames</code>. Plus <code>_cancelling</code> flag.</p>
+        </div>
+      </div>
+
+      <h3>Talk-Go objects</h3>
+      <div class="compare" style="grid-template-columns: 1fr 1fr 1fr;">
+        <div class="panel p-talkgo">
+          <h4>Session</h4>
+          <p>Conflates Pipecat's <code>PipelineTask</code> with external lifecycle (HTTP, UI WS,
+            LiveKit room).</p>
+          <div class="states">
+            <span class="state start">alive</span>
+            <span class="arrow">→</span>
+            <span class="state">ending</span>
+            <span class="arrow">→</span>
+            <span class="state end">cleaned-up</span>
+          </div>
+          <p style="margin-top:8px">Idempotency via <code>endOnce</code> &amp; <code>cleanupOnce</code>
+            (<code class="file">pipeline.go:78–85</code>).</p>
+        </div>
+        <div class="panel p-talkgo">
+          <h4>Pipeline</h4>
+          <p>Just a wiring builder. Not a processor; not composable.</p>
+          <div class="states">
+            <span class="state start">stateless</span>
+          </div>
+          <p style="margin-top:8px"><code>Run()</code> spawns goroutines and returns immediately
+            (<code class="file">pipeline.go:22–68</code>).</p>
+        </div>
+        <div class="panel p-talkgo">
+          <h4>FrameProcessor</h4>
+          <p>Interface with a single <code>Process(ProcessorChannels)</code> method.</p>
+          <div class="states">
+            <span class="state start">alive (goroutine running)</span>
+            <span class="arrow">→</span>
+            <span class="state end">stopped (Process returns)</span>
+          </div>
+          <p style="margin-top:8px">No formal state machine; each impl uses ad-hoc boolean flags
+            (<code>isStreaming</code>, <code>interrupted</code>, <code>awaitingTTSDone</code>,
+            <code>pendingEnd</code>, <code>ending</code>, <code>botSpeaking</code>, …).</p>
+        </div>
+      </div>
+
+      <div class="voice voice-mytake">
+        <div class="voice-head"><span class="tag tag-mytake">My take</span> Where Talk-Go saves complexity</div>
+        <p>You've correctly noticed that you don't need:
+          <code>StartFrame</code> (because constructors do init work synchronously),
+          <code>StopFrame</code> (because you only end gracefully),
+          <code>CancelFrame</code> (same; with one 8-second escape hatch in TTS),
+          paused/resumed (nothing pauses processors),
+          and <code>PipelineTask</code> as a separate object (because per-session HTTP handlers wrap
+          it). That's four state machines you've collapsed. The cost is paid in §7 (TTSProcessor)
+          and §8 (lifecycle) — where the absence of those primitives forces local re-implementations.</p>
+      </div>
+
+      <div class="voice voice-pushback">
+        <div class="voice-head"><span class="tag tag-pushback">Pushback</span> Ad-hoc flags in processors</div>
+        <p>I'd flag <code>TTSProcessor</code> specifically. It currently carries
+          <b>five booleans</b> (<code>firstTextReceived</code>, <code>firstSentenceSent</code>,
+          <code>firstAudioReceived</code>, <code>awaitingTTSDone</code>, <code>ttsFlushSent</code>),
+          a pointer (<code>pendingEnd</code>), an atomic, and a timer. That's a state machine wearing
+          a costume. See §7 for the consolidation I'd suggest.</p>
+      </div>
+    </section>
+
+    <!-- 3. Processor anatomy -->
+    <section class="block" id="processor">
+      <div class="section-eyebrow">Section 3</div>
+      <h2>Frame processor anatomy</h2>
+      <p class="tldr">
+        Pipecat's processor is method-driven (one <code>process_frame</code> call per frame,
+        framework runs two tasks behind it). Yours is loop-driven (one goroutine, one big
+        <code>select</code>). The two designs do the same job, but they distribute responsibilities
+        differently.
+      </p>
+
+      <h3>Same job, two shapes</h3>
+      <div class="compare">
+        <div class="panel p-pipecat">
+          <h4><span class="tag tag-pipecat">Pipecat</span> Method-driven</h4>
+<pre><span class="kw">async def</span> <span class="fn">process_frame</span>(<span class="kw">self</span>, frame, direction):
+    <span class="kw">await super</span>().process_frame(frame, direction)
+    <span class="kw">if isinstance</span>(frame, TranscriptionFrame):
+        <span class="com"># do work</span>
+        <span class="kw">await self</span>.push_frame(out, direction)
+    <span class="kw">elif isinstance</span>(frame, EndFrame):
+        <span class="kw">await self</span>.cleanup()
+        <span class="kw">await self</span>.push_frame(frame, direction)</pre>
+          <p>The framework owns the loop, the queues, and the priority. You override one method,
+            it's called once per frame.</p>
+        </div>
+        <div class="panel p-talkgo">
+          <h4><span class="tag tag-talkgo">Talk-Go</span> Loop-driven</h4>
+<pre><span class="kw">func</span> (p *STTProcessor) <span class="fn">Process</span>(ch ProcessorChannels) {
+    <span class="kw">go</span> p.readSTTWebsocket()
+    <span class="kw">go</span> p.writeAudioWebsocket()
+    <span class="kw">for</span> {
+        <span class="kw">select</span> {
+        <span class="kw">case</span> frame := &lt;-ch.System:
+            ch.Send(frame, Downstream)
+        <span class="kw">case</span> frame := &lt;-ch.Data:
+            <span class="kw">switch</span> f := frame.(<span class="kw">type</span>) {
+            <span class="kw">case</span> AudioFrame: ...
+            <span class="kw">case</span> EndFrame:   ...
+            }
+        <span class="kw">case</span> frame := &lt;-p.transcriptFrames:
+            ch.Send(frame, Downstream)
+        }
+    }
+}</pre>
+          <p>You own the loop. Priority is a nested-select pattern you re-implement per processor.
+            Background IO is funneled back through internal channels into the same select.</p>
+        </div>
+      </div>
+
+      <h3>What each processor receives and sends</h3>
+      <div class="compare">
+        <div class="panel p-pipecat">
+          <h4><span class="tag tag-pipecat">Pipecat</span> Input &amp; output</h4>
+          <p><b>Input:</b> the framework's <code>__input_queue</code> is a
+            <code>asyncio.PriorityQueue</code> with two buckets — system frames (HIGH) and others
+            (LOW). The <code>__input_frame_task_handler</code> pulls from it; system frames are
+            processed inline, data frames are forwarded to <code>__process_queue</code>.</p>
+          <p><b>Output:</b> <code>push_frame(frame, direction)</code> walks the
+            <code>_next</code>/<code>_prev</code> pointer set during <code>Pipeline._link_processors</code>
+            and calls the neighbor's <code>queue_frame()</code>.</p>
+          <details class="cite"><summary>Source pointers</summary><div>
+            frame_processor.py:85–133 (FrameProcessorQueue) ·
+            frame_processor.py:612–632 (queue_frame) ·
+            frame_processor.py:909–944 (__internal_push_frame) ·
+            frame_processor.py:1036–1062 (__input_frame_task_handler)
+          </div></details>
+        </div>
+        <div class="panel p-talkgo">
+          <h4><span class="tag tag-talkgo">Talk-Go</span> Input &amp; output</h4>
+          <p><b>Input:</b> two buffered channels per processor — <code>Data</code> (size 100) and
+            <code>System</code> (size 100). Priority is enforced manually inside <code>Process</code>
+            with a nested <code>select</code> (system first; default drops into a wider select).</p>
+          <p><b>Output:</b> a <code>Send</code> closure captured at startup. The pipeline's central
+            router (<code>pipeline.go:35–59</code>) routes <code>Downstream</code> to
+            <code>{sys,data}Chs[i+1]</code> and <code>Upstream</code> to
+            <code>dataChs[i-1]</code>. <code>MetricsFrame</code> is intercepted here and never
+            reaches a processor.</p>
+          <details class="cite"><summary>Source pointers</summary><div>
+            pipeline.go:22–68 · frame_processor.go (ProcessorChannels) ·
+            stt_processor.go:162–192 · context_aggregator.go:142–203
+          </div></details>
+        </div>
+      </div>
+
+      <h3>The shape of "Process" across your processors</h3>
+      <p>Every Process loop has the same skeleton — they vary only in which internal channels they add
+        and which frame types they intercept:</p>
+<pre><span class="kw">for</span> {
+    <span class="kw">select</span> {
+    <span class="kw">case</span> frame := &lt;-ch.System:           <span class="com">// priority</span>
+        <span class="com">// handle interrupt</span>
+    <span class="kw">default</span>:
+        <span class="kw">select</span> {
+        <span class="kw">case</span> frame := &lt;-ch.System:       <span class="com">// duplicate, for fairness</span>
+        <span class="kw">case</span> frame := &lt;-ch.Data:         <span class="com">// normal work</span>
+        <span class="kw">case</span> ev := &lt;-p.internalCh:       <span class="com">// async IO fed back in</span>
+        <span class="kw">case</span> &lt;-ticker.C:                  <span class="com">// playback only</span>
+        <span class="kw">case</span> &lt;-pendingEndTimer.C:         <span class="com">// tts only</span>
+        }
+    }
+}</pre>
+
+      <div class="voice voice-pipecat">
+        <div class="voice-head"><span class="tag tag-pipecat">Pipecat</span> Why two tasks instead of one</div>
+        <p>Pipecat splits ingestion and processing into two tasks so that:
+          (a) System frames can be handled <i>even while a data frame is being processed</i> —
+          the input task pulls from the priority queue and dispatches system frames inline without
+          waiting for the slow-running process task; and
+          (b) On interruption, the process task is <b>cancelled and recreated</b>, which atomically
+          purges queued data frames while keeping <code>UninterruptibleFrame</code>s. You can't do
+          either of those with a single goroutine.</p>
+      </div>
+
+      <div class="voice voice-talkgo">
+        <div class="voice-head"><span class="tag tag-talkgo">Talk-Go</span> Why one goroutine works for you</div>
+        <p>You don't have long-running synchronous work inside a processor — every blocking IO is
+          off-goroutine (websocket reader/writer, RTP track reader). So your <code>select</code> is
+          almost always near-idle and a priority check via nested select gives the same effective
+          behavior as a real priority queue. Interrupts get processed within microseconds of
+          arriving.</p>
+      </div>
+
+      <div class="voice voice-mytake">
+        <div class="voice-head"><span class="tag tag-mytake">My take</span> The duplication smell</div>
+        <p>The nested-select pattern is correct but copy-pasted across <b>seven</b> processors. A
+          single helper — call it <code>nextFrame(ch) (Frame, Direction, bool)</code> — would let
+          every processor read <code>for { f, dir, ok := nextFrame(ch); if !ok { return }; switch f.(type) {…} }</code>.
+          You'd delete ~80 lines without changing behavior. See §5.</p>
+      </div>
+    </section>
+
+    <!-- 4. Routing & direction -->
+    <section class="block" id="routing">
+      <div class="section-eyebrow">Section 4</div>
+      <h2>Frame routing &amp; direction</h2>
+      <p class="tldr">
+        Pipecat carries direction <b>with each frame</b> through the queue tuple. Talk-Go discards
+        direction at the channel boundary; processors reconstruct it from the frame's <i>type</i>.
+        That implicit convention works today, but it's the source of ~30 lines of pass-through
+        boilerplate and silently rules out broadcast frames.
+      </p>
+
+      <h3>Where direction lives</h3>
+      <div class="compare">
+        <div class="panel p-pipecat">
+          <h4><span class="tag tag-pipecat">Pipecat</span> Direction is data</h4>
+<pre><span class="com"># input_queue holds tuples</span>
+<span class="kw">await</span> super().put((PRIORITY, counter, (frame, direction, callback)))
+
+<span class="com"># neighbor pointers</span>
+self._prev: <span class="typ">Optional</span>[<span class="typ">FrameProcessor</span>] = <span class="kw">None</span>
+self._next: <span class="typ">Optional</span>[<span class="typ">FrameProcessor</span>] = <span class="kw">None</span>
+
+<span class="com"># push_frame</span>
+<span class="kw">await</span> self._next.queue_frame(frame, direction)</pre>
+          <p>Each processor knows its neighbors. Direction is always explicit at the call site.</p>
+        </div>
+        <div class="panel p-talkgo">
+          <h4><span class="tag tag-talkgo">Talk-Go</span> Direction is type-inferred</h4>
+<pre><span class="com">// channel holds bare frames; direction is lost</span>
+<span class="kw">type</span> ProcessorChannels <span class="kw">struct</span> {
+    Data   &lt;-<span class="kw">chan</span> Frame
+    System &lt;-<span class="kw">chan</span> Frame
+    Send   <span class="kw">func</span>(frame Frame, dir Direction)
+}
+
+<span class="com">// central router knows positions, not processors</span>
+sendFn := <span class="kw">func</span>(i <span class="kw">int</span>) <span class="kw">func</span>(Frame, Direction) {
+    <span class="kw">return func</span>(frame Frame, dir Direction) {
+        <span class="kw">switch</span> dir {
+        <span class="kw">case</span> Downstream: <span class="com">/* route to i+1 */</span>
+        <span class="kw">case</span> Upstream:   <span class="com">/* route to i-1 */</span>
+        }
+    }
+}</pre>
+          <p>Processors don't know their neighbors. They read frames; whether a frame came from above
+            or below is something they decide from its Go type.</p>
+        </div>
+      </div>
+
+      <h3>The implicit table you're carrying in your head</h3>
+      <p>Today every processor implicitly relies on this:</p>
+      <table>
+        <thead>
+          <tr><th>Frame type</th><th>Always-direction</th><th>Source → destination</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>AudioFrame</code> from AudioSource</td><td>↓ downstream</td><td>AudioSource → STT</td></tr>
+          <tr><td><code>AudioFrame</code> from TTS</td><td>↓ downstream</td><td>TTS → Playback</td></tr>
+          <tr><td><code>TranscriptFrame</code></td><td>↓ downstream</td><td>STT → ContextAggregator</td></tr>
+          <tr><td><code>TextFrame</code>, <code>LLMResponseStart/End</code></td><td>↓ downstream</td><td>LLM → TTS</td></tr>
+          <tr><td><code>LLMMessagesFrame</code></td><td>↓ downstream</td><td>ContextAggregator → LLM</td></tr>
+          <tr><td><code>TTSSpeakFrame</code></td><td>↓ downstream</td><td>Idle/TalkTime → TTS</td></tr>
+          <tr><td><code>InterruptFrame</code></td><td>↓ downstream (system)</td><td>ContextAggregator / TalkTime → TTS/Playback</td></tr>
+          <tr><td><code>EndFrame</code></td><td>↓ downstream</td><td>Source → Sink</td></tr>
+          <tr><td><code>WordTimestampFrame</code></td><td>↑ upstream</td><td>TTS/Playback → ContextAggregator</td></tr>
+          <tr><td><code>TTSDoneFrame</code></td><td>↑ upstream</td><td>Playback → ContextAggregator</td></tr>
+          <tr><td><code>BotStartedSpeakingFrame</code></td><td>↑ upstream</td><td>Playback → UserIdle</td></tr>
+          <tr><td><code>BotStoppedSpeakingFrame</code></td><td>↑ upstream</td><td>Playback → UserIdle</td></tr>
+          <tr><td><code>MetricsFrame</code></td><td>— (intercepted)</td><td>any → metricsHandler</td></tr>
+        </tbody>
+      </table>
+
+      <h3>What this costs you</h3>
+      <p>Every processor between Playback and ContextAggregator has to enumerate every upstream
+        frame type as a pass-through case. From <code class="file">tts_processor.go:644–652</code>,
+        <code class="file">llm_processor.go:148–158</code>, and
+        <code class="file">talktime_monitoring_processor.go:59–66</code>:</p>
+<pre><span class="com">// In TTSProcessor.Process</span>
+<span class="kw">case</span> WordTimestampFrame:
+    ch.Send(f, Upstream)
+<span class="kw">case</span> TTSDoneFrame:
+    ch.Send(f, Upstream)
+<span class="kw">case</span> BotStartedSpeakingFrame:
+    ch.Send(f, Upstream)
+<span class="kw">case</span> BotStoppedSpeakingFrame:
+    ch.Send(f, Upstream)
+<span class="com">// ...and the same four cases in LLMProcessor</span>
+<span class="com">// ...and the same four cases in TalkTimeMonitoringProcessor</span></pre>
+
+      <div class="voice voice-mytake">
+        <div class="voice-head"><span class="tag tag-mytake">My take</span> Put direction on the wire</div>
+        <p>Wrap channel elements in an <code>Envelope{Frame, Direction}</code>. Then the per-processor
+          switch ends with a one-liner default: <code>ch.Send(env.Frame, env.Direction)</code>. The
+          twelve pass-through cases vanish. You also unlock <i>broadcast</i>
+          (one frame, sent both ways from the same call site) and <i>upstream system frames</i>
+          (which your current router silently routes through the data channel instead).</p>
+      </div>
+
+      <div class="voice voice-pipecat">
+        <div class="voice-head"><span class="tag tag-pipecat">Pipecat</span> Reference: broadcast_interruption</div>
+        <p>Pipecat exposes <code>broadcast_frame</code> and <code>broadcast_interruption</code> on
+          <code>FrameProcessor</code> (<code class="file">frame_processor.py:763–768, 790–806</code>).
+          Both push the same frame to <code>_next</code> and <code>_prev</code>. The implementation
+          even sets <code>broadcast_sibling_id</code> on each copy so observers can match the pair.
+          That capability simply isn't expressible in your current router.</p>
+      </div>
+
+      <div class="voice voice-talkgo">
+        <div class="voice-head"><span class="tag tag-talkgo">Talk-Go</span> Why the implicit table works today</div>
+        <p>None of the frame types you've defined currently need to travel in both directions.
+          <code>BotStartedSpeakingFrame</code> only goes up (PlaybackSink emits it; you don't ever
+          push it down). <code>InterruptFrame</code> only goes down. So the convention holds. The
+          first time you want something to broadcast, you'll have to either add a sentinel or
+          migrate to <code>Envelope</code>.</p>
+      </div>
+
+      <div class="verdict agree">
+        <div class="verdict-icon">→</div>
+        <div><b>You chose:</b> make direction explicit. Concrete migration is in §12.</div>
+      </div>
+    </section>
+
+    <!-- 5. System priority -->
+    <section class="block" id="priority">
+      <div class="section-eyebrow">Section 5</div>
+      <h2>System-frame priority</h2>
+      <p class="tldr">
+        Same goal, very different implementations. Pipecat uses a <code>PriorityQueue</code>; you
+        use a nested <code>select</code> in every processor. Both work. The latter is the most
+        duplicated pattern in your codebase.
+      </p>
+
+      <div class="compare">
+        <div class="panel p-pipecat">
+          <h4><span class="tag tag-pipecat">Pipecat</span> PriorityQueue</h4>
+<pre><span class="kw">class</span> <span class="typ">FrameProcessorQueue</span>(<span class="typ">asyncio.PriorityQueue</span>):
+    HIGH_PRIORITY = <span class="num">1</span>
+    LOW_PRIORITY  = <span class="num">2</span>
+
+    <span class="kw">async def</span> <span class="fn">put</span>(<span class="kw">self</span>, item):
+        frame, _, _ = item
+        <span class="kw">if isinstance</span>(frame, SystemFrame):
+            <span class="kw">await super</span>().put((HIGH, ctr, item))
+        <span class="kw">else</span>:
+            <span class="kw">await super</span>().put((LOW, ctr, item))</pre>
+          <p>The queue handles ordering. Each processor sees frames in priority order. Lifecycle
+            handlers don't need to know anything about priority.</p>
+          <details class="cite"><summary>Source</summary><div>frame_processor.py:85–133</div></details>
+        </div>
+        <div class="panel p-talkgo">
+          <h4><span class="tag tag-talkgo">Talk-Go</span> Nested select</h4>
+<pre><span class="kw">for</span> {
+    <span class="kw">select</span> {                            <span class="com">// priority pass</span>
+    <span class="kw">case</span> frame := &lt;-ch.System:
+        handle(frame)
+    <span class="kw">default</span>:
+        <span class="kw">select</span> {                        <span class="com">// fairness pass</span>
+        <span class="kw">case</span> frame := &lt;-ch.System: handle(frame)
+        <span class="kw">case</span> frame := &lt;-ch.Data:   handle(frame)
+        <span class="kw">case</span> ev := &lt;-internal:     handle(ev)
+        }
+    }
+}</pre>
+          <p>This pattern shows up in <code>llm_processor.go:104–177</code>,
+            <code>tts_processor.go:519–672</code>, <code>playback_sink_processor.go:187–276</code>,
+            <code>talktime_monitoring_processor.go:36–86</code>, and three more places.</p>
+        </div>
+      </div>
+
+      <h3>The helper extraction</h3>
+      <p>Sketch — once written, every processor's loop becomes one level flatter:</p>
+<pre><span class="com">// frame_processor.go (helper)</span>
+<span class="kw">func</span> <span class="fn">nextFrame</span>(ch ProcessorChannels) (Frame, Direction, <span class="kw">bool</span>) {
+    <span class="kw">select</span> {
+    <span class="kw">case</span> f, ok := &lt;-ch.System:
+        <span class="kw">if</span> !ok { <span class="kw">return nil</span>, <span class="num">0</span>, <span class="kw">false</span> }
+        <span class="kw">return</span> f.Frame, f.Direction, <span class="kw">true</span>
+    <span class="kw">default</span>:
+        <span class="kw">select</span> {
+        <span class="kw">case</span> f, ok := &lt;-ch.System:
+            <span class="kw">if</span> !ok { <span class="kw">return nil</span>, <span class="num">0</span>, <span class="kw">false</span> }
+            <span class="kw">return</span> f.Frame, f.Direction, <span class="kw">true</span>
+        <span class="kw">case</span> f, ok := &lt;-ch.Data:
+            <span class="kw">if</span> !ok { <span class="kw">return nil</span>, <span class="num">0</span>, <span class="kw">false</span> }
+            <span class="kw">return</span> f.Frame, f.Direction, <span class="kw">true</span>
+        }
+    }
+}
+
+<span class="com">// in each processor</span>
+<span class="kw">for</span> {
+    f, dir, ok := nextFrame(ch)
+    <span class="kw">if</span> !ok { <span class="kw">return</span> }
+    <span class="kw">switch</span> v := f.(<span class="kw">type</span>) {
+    <span class="com">// only the cases this processor cares about</span>
+    <span class="kw">default</span>:
+        ch.Send(f, dir)
+    }
+}</pre>
+      <p>The wrinkle: processors with extra internal channels (TTS's <code>ttsEvents</code>,
+        Playback's <code>ticker</code>, etc.) still need a select. Two ways to handle that:</p>
+      <ol>
+        <li>Keep <code>nextFrame</code> for "vanilla" processors; non-vanilla ones write the select
+          manually but still use a helper for the priority pass.</li>
+        <li>Generalize: <code>nextFrame(ch, extras...)</code> takes additional cases via a slice of
+          <code>reflect.Select</code> cases. (I'd <b>not</b> go this far — too much machinery for
+          three callers.)</li>
+      </ol>
+
+      <div class="verdict agree">
+        <div class="verdict-icon">→</div>
+        <div><b>You chose:</b> extract. Recommended order in §12 — do this first (mechanical, no behavior change).</div>
+      </div>
+    </section>
+
+    <!-- 6. Interruption -->
+    <section class="block" id="interrupt">
+      <div class="section-eyebrow">Section 6</div>
+      <h2>Interruption flow</h2>
+      <p class="tldr">
+        Pipecat broadcasts <code>InterruptionFrame</code> both directions and automatically purges
+        queued data frames (except <code>UninterruptibleFrame</code>s). You send a single downstream
+        <code>InterruptFrame</code> and each processor manually clears its own buffers. There's
+        one subtle invariant you're relying on that Pipecat enforces structurally.
+      </p>
+
+      <div class="compare">
+        <div class="panel p-pipecat">
+          <h4><span class="tag tag-pipecat">Pipecat</span> broadcast_interruption</h4>
+          <ol>
+            <li>Some processor calls <code>broadcast_interruption()</code> on itself.</li>
+            <li>An <code>InterruptionFrame</code> (a <code>SystemFrame</code>) is queued
+              <i>both</i> upstream and downstream.</li>
+            <li>Every processor's <code>process_frame</code> sees the system frame priority-first.
+              The base class calls <code>_start_interruption()</code> which
+              <b>cancels and recreates the process task</b>.</li>
+            <li>The recreate step purges <code>__process_queue</code> — any pending data frames
+              are dropped <i>except</i> <code>UninterruptibleFrame</code>s
+              (<code>EndFrame</code> qualifies).</li>
+            <li>Metrics auto-stop. The interrupt continues propagating.</li>
+          </ol>
+          <details class="cite"><summary>Source pointers</summary><div>
+            frame_processor.py:763–768 (broadcast_interruption) ·
+            frame_processor.py:892–907 (_start_interruption) ·
+            frame_processor.py:995–1012 (__reset_process_queue — keeps UninterruptibleFrame) ·
+            frames.py:1877 (EndFrame is UninterruptibleFrame)
+          </div></details>
+        </div>
+        <div class="panel p-talkgo">
+          <h4><span class="tag tag-talkgo">Talk-Go</span> Downstream InterruptFrame</h4>
+          <ol>
+            <li><code>ContextAggregator.Process</code> detects barge-in (3 interim words while
+              <code>botSpeaking</code>) and calls
+              <code>ch.Send(InterruptFrame{}, Downstream)</code>
+              (<code class="file">context_aggregator.go:160–168</code>).</li>
+            <li>Each downstream processor receives <code>InterruptFrame</code> on its
+              <b>System channel</b>, sees it via the priority pass, manually clears its own state
+              (e.g. <code>p.CancelTTSContext(); clearTTSState(); drainTTSEvents(t.ttsEvents)</code>),
+              and forwards downstream.</li>
+            <li>No upstream propagation. STT/AudioSource keep running undisturbed.</li>
+            <li>Each buffer-owning processor (TTS, Playback) has its own clearing code; there's no
+              automatic purge.</li>
+          </ol>
+          <details class="cite"><summary>Source pointers</summary><div>
+            context_aggregator.go:160–168 · tts_processor.go:519–550 ·
+            playback_sink_processor.go:188–204 · talktime_monitoring_processor.go:38–48
+          </div></details>
+        </div>
+      </div>
+
+      <h3>The invariant you're depending on</h3>
+      <div class="voice voice-pushback">
+        <div class="voice-head"><span class="tag tag-pushback">Pushback</span> EndFrame ↔ InterruptFrame race</div>
+        <p>On <code>InterruptFrame</code>, <code>PlaybackSinkProcessor</code> sets
+          <code>p.playbackQueue = nil</code> (<code class="file">playback_sink_processor.go:192–202</code>).
+          If an <code>EndFrame</code> were already in <code>playbackQueue</code> at that moment, it
+          would be lost.</p>
+        <p>In your current topology this <b>can't actually happen</b>: the only producers of
+          <code>EndFrame</code> are <code>Session.End()</code> (via PipelineSource) and
+          <code>TalkTimeMonitor</code>. Neither runs concurrently with a barge-in interrupt that
+          could reach PlaybackSink. But the invariant is informal. Pipecat encodes it structurally:
+          <code>EndFrame</code> is <code>UninterruptibleFrame</code>, and <code>__reset_process_queue</code>
+          keeps those frames during a purge.</p>
+        <p><b>Cheap fix in your code:</b> when clearing <code>playbackQueue</code>, walk it and
+          preserve any <code>EndFrame</code>:</p>
+<pre><span class="kw">case</span> InterruptFrame:
+    p.interrupted = <span class="kw">true</span>
+    keep := p.playbackQueue[:<span class="num">0</span>]
+    <span class="kw">for</span> _, f := <span class="kw">range</span> p.playbackQueue {
+        <span class="kw">if</span> _, isEnd := f.(EndFrame); isEnd {
+            keep = <span class="kw">append</span>(keep, f)
+        }
+    }
+    p.playbackQueue = keep</pre>
+        <p>No new abstractions, no <code>UninterruptibleFrame</code> mixin needed. Just one targeted
+          safety net.</p>
+      </div>
+
+      <h3>Why one-way interrupt is fine for you</h3>
+      <div class="voice voice-agree">
+        <div class="voice-head"><span class="tag tag-agree">Agree</span> Downstream-only is correct here</div>
+        <p>Pipecat broadcasts because their upstream processors (input transport, VAD) need to react
+          — they may have queued speech frames that should be flushed. In your topology, AudioSource
+          and STT don't queue anything that needs purging on barge-in: STT keeps streaming user
+          speech (that's literally <i>what caused the barge-in</i>), and AudioSource is a thin
+          opus→PCM pipe. So upstream propagation would be a no-op.</p>
+        <p>You correctly handle the one case where upstream-ish reaction is needed —
+          <code>UserIdleProcessor</code> needs to know the bot stopped speaking — via
+          <code>BotStoppedSpeakingFrame</code> traveling upstream from PlaybackSink, not via the
+          interrupt itself.</p>
+      </div>
+    </section>
+
+    <!-- 7. TTS / EndFrame drain -->
+    <section class="block" id="tts-drain">
+      <div class="section-eyebrow">Section 7</div>
+      <h2>TTS &amp; EndFrame drain</h2>
+      <p class="tldr">
+        This is the most complex piece in your codebase, and most of the complexity is
+        <b>intrinsic</b>. The drain has to live in TTS because TTS is the only place that knows when
+        Cartesia's async stream has finished. I'll show why your simpler-looking alternative
+        (move drain to PlaybackSink) doesn't work, then sketch the targeted simplification that does.
+      </p>
+
+      <h3>Why this exists at all</h3>
+      <p>On <code>EndFrame</code>, TTS may be holding:</p>
+      <ul>
+        <li>Unsent text (aggregated tokens waiting for a sentence boundary)</li>
+        <li>In-flight synthesis: text already sent to Cartesia, audio still streaming back over
+          the websocket</li>
+        <li>Buffered PCM not yet packed into a full 20ms opus frame</li>
+        <li>Pending word timestamps not yet emitted (waiting for <code>audioTimePushed</code> to
+          catch up)</li>
+      </ul>
+      <p>All four must drain before <code>EndFrame</code> can propagate downstream — otherwise
+        PlaybackSink would receive <code>EndFrame</code> before the final audio, the silence tail
+        would play before the last syllable, and the call would cut off mid-word.</p>
+
+      <h3>Pipecat's drain — split between TTS service and output transport</h3>
+      <div class="compare">
+        <div class="panel p-pipecat">
+          <h4><span class="tag tag-pipecat">Pipecat TTS service</span></h4>
+          <p>The TTS service (CartesiaTTSService etc.) is responsible for sending unsent text and
+            emitting <code>TTSStartedFrame</code>/<code>TTSAudioRawFrame</code>/<code>TTSStoppedFrame</code>.
+            It does not buffer encoded audio — chunks flow through immediately.</p>
+        </div>
+        <div class="panel p-pipecat">
+          <h4><span class="tag tag-pipecat">Pipecat output transport</span></h4>
+          <p><code>BaseOutputTransport.MediaSender</code> owns an <code>asyncio.Queue</code> of
+            audio frames. On <code>EndFrame</code>, it queues the EndFrame at the back of the audio
+            queue and the audio task drains in order; when it pops the <code>EndFrame</code> it
+            writes <code>audio_out_end_silence_secs</code> of silence and exits
+            (<code class="file">base_output.py:794–821</code>).</p>
+          <p><b>Crucially:</b> <code>EndFrame</code> is <code>UninterruptibleFrame</code> so it
+            survives interruption purges and is never reordered.</p>
+        </div>
+      </div>
+
+      <h3>Why you can't just "move drain to PlaybackSink"</h3>
+      <p>This was my first instinct (and my first message suggested it). On closer inspection it
+        breaks ordering. The boundary between "async Cartesia chunks arriving via websocket" and
+        "ordered downstream frames" is TTS itself. If TTS forwarded <code>EndFrame</code> the moment
+        it received it, the timeline would look like this:</p>
+
+      <div class="journey">
+        <div class="step-time">t = 0ms</div>
+        <div class="step-body">TTS reads <code>EndFrame</code> from Data channel. Forwards it
+          downstream <i>immediately</i>.</div>
+        <div class="step-time">t = 0–500ms</div>
+        <div class="step-body">Cartesia is still streaming chunks for the previous turn. They arrive
+          on the websocket → <code>ttsEvents</code> → main goroutine → forwarded as
+          <code>AudioFrame</code> downstream.</div>
+        <div class="step-time">t = 500ms</div>
+        <div class="step-body">Cartesia sends <code>done</code>. TTS forwards
+          <code>TTSDoneFrame</code> downstream.</div>
+        <div class="step-time">— PlaybackSink sees, in order: —</div>
+        <div class="step-body"><code>EndFrame</code> first, then many <code>AudioFrame</code>s, then
+          <code>TTSDoneFrame</code>. <b>Wrong order.</b> PlaybackSink would play the silence tail
+          before the audio.</div>
+      </div>
+
+      <p>The only fix is for TTS to <i>not forward EndFrame</i> until it has emitted the final
+        <code>TTSDoneFrame</code>. Which is exactly what it does today. So the drain has to stay in
+        TTS.</p>
+
+      <div class="voice voice-pushback">
+        <div class="voice-head"><span class="tag tag-pushback">Pushback (on my earlier suggestion)</span></div>
+        <p>In my first response I floated "move drain to PlaybackSink" as option 4d. I'm retracting
+          it. The structural reason it doesn't work is above. The drain has to live in TTS.</p>
+      </div>
+
+      <h3>What today's TTS state actually means</h3>
+      <p>The flags in <code class="file">tts_processor.go:51–68</code> encode two independent
+        concerns. Disentangling them is the simplification:</p>
+      <table>
+        <thead>
+          <tr><th>Today</th><th>Concern</th><th>What it really represents</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>firstTextReceived</code><br><code>firstSentenceSent</code><br><code>firstAudioReceived</code></td>
+            <td>Metrics one-shots</td>
+            <td>Three booleans gating <code>metrics.Start</code>/<code>Stop</code> calls. Independent of synth lifecycle.</td>
+          </tr>
+          <tr>
+            <td><code>awaitingTTSDone</code></td>
+            <td>Synthesis lifecycle</td>
+            <td>"text sent, audio coming back"</td>
+          </tr>
+          <tr>
+            <td><code>ttsFlushSent</code></td>
+            <td>Synthesis lifecycle</td>
+            <td>"ResetTTSContext sent — Cartesia is finishing up"</td>
+          </tr>
+          <tr>
+            <td><code>pendingEnd *EndFrame</code></td>
+            <td>Shutdown</td>
+            <td>"we received EndFrame but haven't drained yet"</td>
+          </tr>
+          <tr>
+            <td><code>pendingEndTimer / pendingEndTimerC</code></td>
+            <td>Shutdown</td>
+            <td>8s emergency escape if Cartesia never sends <code>done</code></td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h3>Recommended consolidation</h3>
+<pre><span class="kw">type</span> ttsSynth <span class="kw">int</span>
+<span class="kw">const</span> (
+    ttsSynthIdle      ttsSynth = <span class="kw">iota</span>  <span class="com">// no synthesis in flight</span>
+    ttsSynthStreaming                  <span class="com">// text sent, audio coming back</span>
+    ttsSynthClosing                    <span class="com">// ResetTTSContext sent; waiting for last 'done'</span>
+)
+
+<span class="kw">type</span> TTSProcessor <span class="kw">struct</span> {
+    <span class="com">// metrics one-shots stay as-is — they're unrelated</span>
+    firstTextReceived, firstSentenceSent, firstAudioReceived <span class="kw">bool</span>
+
+    <span class="com">// the lifecycle, named</span>
+    synth      ttsSynth
+    pendingEnd *EndFrame
+    endTimer   *time.Timer
+    ...
+}</pre>
+
+      <p>Each event becomes a phase transition:</p>
+      <ul>
+        <li><code>LLMResponseStart</code> / <code>TTSSpeakFrame</code>: <code>ttsSynthIdle → ttsSynthIdle</code> (no change; start aggregating).</li>
+        <li><code>TextFrame</code> ending in punctuation, sent: <code>ttsSynthIdle → ttsSynthStreaming</code>.</li>
+        <li><code>LLMResponseEnd</code>: flush + <code>ResetTTSContext</code>: <code>ttsSynthStreaming → ttsSynthClosing</code>.</li>
+        <li>Cartesia <code>done</code> event: <code>ttsSynthClosing → ttsSynthIdle</code>; forward <code>TTSDoneFrame</code>.</li>
+        <li><code>EndFrame</code>:
+          <ul>
+            <li>If <code>ttsSynthIdle</code>: forward immediately, return.</li>
+            <li>Else: stash in <code>pendingEnd</code>, ensure we're in <code>ttsSynthClosing</code>, start <code>endTimer</code>.</li>
+          </ul>
+        </li>
+        <li><code>InterruptFrame</code>: cancel context; <code>ttsSynth*</code> → <code>ttsSynthIdle</code>; <code>drainTTSEvents</code>.</li>
+      </ul>
+
+      <p>The <code>if pendingEnd != nil { /* drop frames */ }</code> branch can be expressed as
+        <code>if pendingEnd != nil &amp;&amp; !isUpstream(env.Direction) { drop }</code> if you
+        also adopt explicit direction (§4). That alone removes ~15 lines from the Process loop.</p>
+
+      <h3>The whole journey of an EndFrame, with the proposed shape</h3>
+      <div class="journey">
+        <div class="step-time">t = 0</div>
+        <div class="step-body">Caller (Session.End / TalkTimeMonitor) queues <code>EndFrame</code>
+          on PipelineSource.</div>
+        <div class="step-time">t = ε</div>
+        <div class="step-body">EndFrame walks: Source → AudioSource → STT (closes Soniox ws via
+          <code>stop()</code>) → UserIdle (cancels timer) → ContextAggregator → TalkTime → LLM
+          (cancels in-flight HTTP) → reaches TTS.</div>
+        <div class="step-time">t = ε at TTS</div>
+        <div class="step-body">If <code>synth == ttsSynthIdle</code>: forward EndFrame, return.
+          <br>Otherwise: flush <code>currentAggregation</code> if any, send
+          <code>ResetTTSContext</code>, set <code>synth = ttsSynthClosing</code>,
+          stash <code>pendingEnd = &amp;f</code>, start 8s timer.</div>
+        <div class="step-time">t = ε…500ms</div>
+        <div class="step-body">Cartesia keeps streaming chunks. TTS keeps emitting
+          <code>AudioFrame</code> downstream as it always does. PlaybackSink keeps queueing them.</div>
+        <div class="step-time">t ≈ 500ms</div>
+        <div class="step-body">Cartesia sends <code>done</code>. TTS emits final
+          <code>TTSDoneFrame</code>, then forwards the stashed <code>EndFrame</code>, then returns.</div>
+        <div class="step-time">at PlaybackSink</div>
+        <div class="step-body">The queue contains: <code>AudioFrame</code>×N,
+          <code>WordTimestampFrame</code>×M, <code>TTSDoneFrame</code>, <code>EndFrame</code>.
+          Ticker drains them in order at 20ms pace; on hitting <code>EndFrame</code>, writes
+          <code>playbackEndTail</code> of silence, forwards <code>EndFrame</code> downstream.</div>
+        <div class="step-time">at PipelineSink</div>
+        <div class="step-body"><code>onEnd(frame)</code> fires →
+          <code>Session.completeEnd(frame)</code> → UI receives <code>call_ended</code>, ctx
+          cancels, LiveKit disconnects, session removed.</div>
+      </div>
+
+      <div class="voice voice-mytake">
+        <div class="voice-head"><span class="tag tag-mytake">My take</span> Net win, but bounded</div>
+        <p>The consolidation removes ~30 lines from <code>tts_processor.go</code> and makes the
+          state machine readable in a glance. The drain logic itself doesn't get simpler — it can't,
+          because the underlying ordering constraint is fundamental. What gets simpler is
+          <i>reading</i> the code.</p>
+      </div>
+
+      <div class="voice voice-pipecat">
+        <div class="voice-head"><span class="tag tag-pipecat">Pipecat parallel</span></div>
+        <p>Pipecat's equivalent of "<code>ResetTTSContext</code> to elicit a final <code>done</code>"
+          is the TTS service's <code>flush()</code> coroutine called on EndFrame. Their state
+          machine isn't simpler than yours — they just spread it across two classes (service and
+          transport sender) instead of one. The 8s escape hatch is your own; Pipecat relies on
+          <code>CancelFrame</code> to forcibly stop the pipeline after
+          <code>CANCEL_TIMEOUT_SECS = 20</code>.</p>
+      </div>
+    </section>
+
+    <!-- 8. Lifecycle -->
+    <section class="block" id="lifecycle">
+      <div class="section-eyebrow">Section 8</div>
+      <h2>Lifecycle, shutdown, &amp; the missing StartFrame</h2>
+      <p class="tldr">
+        Pipecat has four lifecycle frames (<code>StartFrame</code>, <code>StopFrame</code>,
+        <code>EndFrame</code>, <code>CancelFrame</code>). You have one (<code>EndFrame</code>) plus
+        ctx-cancellation. That collapse is mostly fine, but it shows up in two places:
+        <code>/connect</code> HTTP latency and stuck-shutdown recovery.
+      </p>
+
+      <h3>Lifecycle frames, compared</h3>
+      <table>
+        <thead>
+          <tr><th>Concern</th><th>Pipecat</th><th>Talk-Go</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>"Get ready to receive frames"</td>
+            <td><code>StartFrame</code> (SystemFrame). Initializes each processor; framework
+              creates process task only after this.</td>
+            <td>Implicit. Constructors do init work synchronously inside
+              <code>createSession()</code>.</td>
+          </tr>
+          <tr>
+            <td>"Stop gracefully"</td>
+            <td><code>EndFrame</code> (UninterruptibleFrame). Flows through pipeline; processors
+              cleanup on receipt.</td>
+            <td><code>EndFrame</code>. Same idea, no Uninterruptible mixin.</td>
+          </tr>
+          <tr>
+            <td>"Stop but keep connections"</td>
+            <td><code>StopFrame</code> (UninterruptibleFrame).</td>
+            <td>Not modeled.</td>
+          </tr>
+          <tr>
+            <td>"Stop right now"</td>
+            <td><code>CancelFrame</code> (SystemFrame). Bypasses graceful drain.</td>
+            <td>Not modeled. <code>sessionCtx.Ctx.Cancel()</code> happens after EndFrame reaches sink.</td>
+          </tr>
+          <tr>
+            <td>Stuck shutdown</td>
+            <td>PipelineTask's <code>CANCEL_TIMEOUT_SECS = 20</code> watchdog turns EndFrame into
+              CancelFrame.</td>
+            <td>TTS has <code>ttsPendingEndTimeout = 8s</code>. Nothing else has a watchdog.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h3>The synchronous-construct cost</h3>
+      <p>Today, your <code>handleConnect</code> HTTP handler does this:</p>
+<pre><span class="kw">func</span> <span class="fn">createSession</span>() (<span class="kw">string</span>, *Session) {
+    ...
+    audioSource := NewAudioSourceProcessor(sessionCtx)
+    sessionCtx.Room = joinRoom(roomName, audioSource)   <span class="com">// LiveKit dial: 100–300ms</span>
+    ...
+    sttProcessor      := NewSTTProcessor(sessionCtx)     <span class="com">// Soniox ws dial: 100–200ms</span>
+    ttsProcessor      := NewTTSProcessor(sessionCtx)     <span class="com">// Cartesia ws dial: 100–200ms</span>
+    playbackSink      := NewPlaybackSinkProcessor(...)   <span class="com">// publishes LiveKit track</span>
+    ...
+}</pre>
+      <p>So <code>/connect</code> can take ~700ms of HTTP latency before the browser gets a token.</p>
+
+      <div class="compare">
+        <div class="panel p-pipecat">
+          <h4><span class="tag tag-pipecat">Pipecat</span> When Pipecat connects</h4>
+          <p>Services connect on <code>StartFrame</code> — but Pipecat's bot script awaits
+            <code>transport.connect()</code> before <code>runner.run(task)</code>, so the same
+            cost is paid. The difference is it's not behind an HTTP endpoint, so user-perceived
+            latency lives elsewhere (Daily room creation, WebRTC negotiation).</p>
+        </div>
+        <div class="panel p-talkgo">
+          <h4><span class="tag tag-talkgo">Talk-Go</span> Your three options</h4>
+          <ol>
+            <li><b>Status quo.</b> Simplest. Errors surface synchronously.</li>
+            <li><b>Async connect, no signal.</b> <code>go func() { p.connect() }()</code>
+              in constructors; reader goroutines wait on a "connected" channel.</li>
+            <li><b>StartedFrame signal.</b> Pipeline source emits one as its first frame; STT/TTS
+              listen for it to <code>connect()</code>.</li>
+          </ol>
+        </div>
+      </div>
+
+      <div class="voice voice-mytake">
+        <div class="voice-head"><span class="tag tag-mytake">My take</span> Stay on (1) for now</div>
+        <p>Your <code>/connect</code> latency budget isn't the bottleneck for first-call UX. The
+          browser still has to do LiveKit ICE + SDP exchange after, which dwarfs ~700ms. Option (2)
+          loses the initial audio frames if Soniox is slow; option (3) adds one frame type and a
+          "connecting" sub-state in two processors for a small win. <b>Revisit when you measure</b>
+          <code>/connect → first audio</code> and the constructor-time delay is the limit.</p>
+      </div>
+
+      <h3>The shutdown-resource invariant</h3>
+      <div class="voice voice-pushback">
+        <div class="voice-head"><span class="tag tag-pushback">Pushback</span> Add a defer for safety</div>
+        <p>Your invariant — "resources owned by a processor are closed inside its <code>Process</code>
+          goroutine, only when EndFrame passes through" — is informal. <code>AGENTS.md</code> states
+          it; the code doesn't enforce it. Two places it could fail:</p>
+        <ul>
+          <li>If <code>sessionCtx.Ctx</code> is cancelled before <code>EndFrame</code> reaches a
+            processor, the processor's main <code>Process</code> loop doesn't exit — only inner
+            reader goroutines do. The websocket may hang in <code>ReadMessage</code> until the
+            connection times out.</li>
+          <li>If <code>Process()</code> panics for any reason, the websocket is leaked.</li>
+        </ul>
+        <p>Two minimal changes:</p>
+<pre><span class="kw">func</span> (p *STTProcessor) <span class="fn">Process</span>(ch ProcessorChannels) {
+    <span class="kw">defer</span> p.stop()                                 <span class="com">// idempotent via sync.Once</span>
+    <span class="kw">go</span> p.readSTTWebsocket()
+    <span class="kw">go</span> p.writeAudioWebsocket()
+    <span class="kw">for</span> {
+        <span class="kw">select</span> {
+        <span class="kw">case</span> &lt;-p.sessionCtx.Ctx.Done():            <span class="com">// last-resort exit</span>
+            <span class="kw">return</span>
+        <span class="kw">case</span> ...
+        }
+    }
+}</pre>
+      </div>
+
+      <div class="voice voice-agree">
+        <div class="voice-head"><span class="tag tag-agree">Agree</span> Session over PipelineTask</div>
+        <p>Your <code>Session</code> is what Pipecat's <code>PipelineTask</code> would be in this
+          codebase. The trims you've made — no observers, no heartbeats, no idle monitor at the
+          task level — are correct for what you actually need. Don't unbundle <code>Session</code>
+          into a separate <code>PipelineTask</code>; you'd just create paperwork.</p>
+      </div>
+    </section>
+
+    <!-- 9. Cross-cutting -->
+    <section class="block" id="crosscutting">
+      <div class="section-eyebrow">Section 9</div>
+      <h2>Cross-cutting concerns (metrics, observers)</h2>
+      <p class="tldr">
+        Pipecat's generic answer to "I want to watch frames" is the <code>Observer</code> pattern.
+        You don't have one — you have a single carve-out for <code>MetricsFrame</code>, intercepted
+        inside the router. That's a sharper, simpler design as long as metrics stays the only
+        cross-cutting concern.
+      </p>
+
+      <div class="compare">
+        <div class="panel p-pipecat">
+          <h4><span class="tag tag-pipecat">Pipecat</span> Observers</h4>
+          <p>Each <code>FrameProcessor</code> can hold an <code>Observer</code> reference. On every
+            <code>process_frame</code> and every <code>push_frame</code>, the framework fires
+            <code>observer.on_process_frame(...)</code> / <code>on_push_frame(...)</code>.</p>
+          <p>This is how RTVI events, turn tracking, latency tracking, idle monitoring, and metric
+            aggregation are wired in sales_call. <code>TaskObserver</code> acts as a proxy fanning
+            out to multiple observers.</p>
+          <details class="cite"><summary>Source</summary><div>
+            frame_processor.py:660–687 (observer fan-out) ·
+            pipeline/task_observer.py (proxy) ·
+            sales_call.py:310 (CustomRtviObserver), 322 (observers=[rtvi_observer])
+          </div></details>
+        </div>
+        <div class="panel p-talkgo">
+          <h4><span class="tag tag-talkgo">Talk-Go</span> MetricsFrame intercept</h4>
+          <p>The pipeline's <code>Send</code> closure has a fast-path:</p>
+<pre>sendFn := <span class="kw">func</span>(i <span class="kw">int</span>) <span class="kw">func</span>(Frame, Direction) {
+    <span class="kw">return func</span>(frame Frame, dir Direction) {
+        <span class="kw">if</span> mf, ok := frame.(MetricsFrame); ok {
+            <span class="kw">if</span> p.metricsHandler != <span class="kw">nil</span> {
+                p.metricsHandler(mf)
+            }
+            <span class="kw">return</span>
+        }
+        ...
+    }
+}</pre>
+          <p>One handler, no fan-out, no proxy. <code>UIEventSender</code> handles broadcasting to
+            UI websockets separately (<code class="file">ui_events.go</code>).</p>
+        </div>
+      </div>
+
+      <div class="voice voice-agree">
+        <div class="voice-head"><span class="tag tag-agree">Agree</span> You chose to keep the intercept</div>
+        <p>Sticking with the intercept is the right call <i>at your current scale of cross-cutting
+          concerns</i>. Metrics is the only one. RTVI isn't wired. Turn tracking lives inside
+          ContextAggregator. Idle is its own inline processor. Adding an Observer registry would
+          be over-engineering.</p>
+      </div>
+
+      <div class="voice voice-mytake">
+        <div class="voice-head"><span class="tag tag-mytake">My take</span> Watch for the second one</div>
+        <p>The day you have <i>two</i> cross-cutting concerns (e.g., audit logging of frames + a
+          conversation-persistence side-channel), the intercept pattern starts duplicating. At that
+          point a minimal Observer is cheaper than two intercepts. Until then, leave it.</p>
+      </div>
+    </section>
+
+    <!-- 10. ContextAggregator -->
+    <section class="block" id="aggregator">
+      <div class="section-eyebrow">Section 10</div>
+      <h2>ContextAggregator — owning conversation state</h2>
+      <p class="tldr">
+        Pipecat splits this into a user-side and assistant-side processor. You collapsed them into
+        one. The collapse works because <code>TTSDoneFrame</code> reaches your single aggregator
+        via the upstream path. It's a clean win — but it forces direction inference (§4) onto this
+        processor more than any other.
+      </p>
+
+      <h3>Responsibilities, both versions</h3>
+      <div class="compare">
+        <div class="panel p-pipecat">
+          <h4><span class="tag tag-pipecat">Pipecat — two halves</span></h4>
+          <p><code>LLMUserContextAggregator</code>:</p>
+          <ul>
+            <li>Sits between STT and LLM</li>
+            <li>Aggregates <code>TranscriptionFrame</code>s into a user message</li>
+            <li>Emits <code>LLMMessagesFrame</code> on turn end</li>
+            <li>Owns user-turn strategies (min-words start, speech-timeout stop)</li>
+          </ul>
+          <p><code>LLMAssistantContextAggregator</code>:</p>
+          <ul>
+            <li>Sits after <code>transport.output()</code></li>
+            <li>Receives <code>TextFrame</code> + <code>TTSStoppedFrame</code> downstream
+              (they make it past the output transport)</li>
+            <li>Commits assistant text to history</li>
+          </ul>
+          <p>The two halves share a <code>LLMContext</code> object created at session start.</p>
+        </div>
+        <div class="panel p-talkgo">
+          <h4><span class="tag tag-talkgo">Talk-Go — one processor</span></h4>
+          <p><code>ContextAggregator</code> does all of:</p>
+          <ul>
+            <li>Soniox interim/final transcript merging</li>
+            <li>Live transcript UI events</li>
+            <li>Min-word barge-in detection &amp; <code>InterruptFrame</code> emission</li>
+            <li>User-message commit on <code>&lt;end&gt;</code> token</li>
+            <li>Assistant-spoken-word tracking via upstream <code>WordTimestampFrame</code></li>
+            <li>Assistant-message commit on upstream <code>TTSDoneFrame</code></li>
+            <li><code>botSpeaking</code> state tracking via
+              <code>BotStartedSpeakingFrame</code>/<code>BotStoppedSpeakingFrame</code></li>
+            <li>User-message concatenation if previous turn got barged-in mid-pause</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="voice voice-agree">
+        <div class="voice-head"><span class="tag tag-agree">Agree</span> Single-aggregator design</div>
+        <p>Two reasons this is the right collapse for you:</p>
+        <ol>
+          <li><b>Commit timing.</b> You commit assistant text when <code>TTSDoneFrame</code> arrives
+            upstream from PlaybackSink. That's exactly when Pipecat's assistant aggregator commits
+            (after audio finished playing). Same semantic, half the wiring.</li>
+          <li><b>Barge-in lives next to message accumulation.</b> The min-word check and the
+            "discard below-threshold during bot speech" branch share state with the message list.
+            Splitting them would force one side to ask the other "is the bot speaking?" via more
+            frames.</li>
+        </ol>
+        <p>Don't undo this.</p>
+      </div>
+
+      <div class="voice voice-pipecat">
+        <div class="voice-head"><span class="tag tag-pipecat">Reference</span> Soniox snapshots</div>
+        <p>Worth noting: Pipecat's own <code>CustomSonioxSTTService</code> for Disha already
+          handles the interim-snapshot-vs-final-delta distinction internally and emits clean
+          <code>TranscriptionFrame</code>s. You've pushed that handling into ContextAggregator
+          instead (your STT processor is "dumb", as AGENTS.md describes). Both are valid; yours
+          keeps the STT layer simpler at the cost of putting Soniox-specific logic in the aggregator.</p>
+      </div>
+    </section>
+
+    <!-- 11. Constraints summary -->
+    <section class="block" id="constraints">
+      <div class="section-eyebrow">Section 11</div>
+      <h2>Constraints you've taken on</h2>
+      <p class="tldr">
+        Numbered, with severity. Severity reflects how likely the constraint is to bite you, not
+        how invasive it would be to fix.
+      </p>
+
+      <table>
+        <thead>
+          <tr>
+            <th style="width: 50px">#</th>
+            <th>Constraint</th>
+            <th style="width: 120px">Severity</th>
+            <th style="width: 200px">Mitigation</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>1</td>
+            <td><b>Direction is implicit per frame type.</b> Once a frame is on a channel, you can't
+              tell direction. Broadcast is impossible without changing this.</td>
+            <td><span class="tag tag-mytake">MEDIUM</span></td>
+            <td>Move to <code>Envelope</code> — §4, §12.</td>
+          </tr>
+          <tr>
+            <td>2</td>
+            <td><b>No UninterruptibleFrame analogue.</b> <code>EndFrame</code> in PlaybackSink's
+              <code>playbackQueue</code> would be lost if InterruptFrame arrived afterwards. Not
+              reachable in current topology.</td>
+            <td><span class="tag tag-mytake">LOW</span></td>
+            <td>Walk &amp; preserve EndFrame in interrupt handler. 5-line patch. §6.</td>
+          </tr>
+          <tr>
+            <td>3</td>
+            <td><b>MetricsFrame is hidden from processors.</b> Router intercepts it. No general
+              observer mechanism.</td>
+            <td><span class="tag tag-mytake">LOW</span></td>
+            <td>Fine until you have a second cross-cutting concern. §9.</td>
+          </tr>
+          <tr>
+            <td>4</td>
+            <td><b>No StartFrame.</b> Constructors do synchronous IO; <code>/connect</code> HTTP
+              latency is bounded by Soniox+Cartesia+LiveKit dial times.</td>
+            <td><span class="tag tag-mytake">LOW</span></td>
+            <td>Status quo for now; revisit if measured. §8.</td>
+          </tr>
+          <tr>
+            <td>5</td>
+            <td><b>No CancelFrame.</b> Only graceful EndFrame. Stuck shutdown hangs the whole
+              session.</td>
+            <td><span class="tag tag-mytake">MEDIUM</span></td>
+            <td>TTS has 8s watchdog; others should add <code>defer stop()</code> +
+              <code>case &lt;-ctx.Done()</code>. §8.</td>
+          </tr>
+          <tr>
+            <td>6</td>
+            <td><b>Each processor handles EndFrame manually.</b> Five processors have the same
+              <code>case EndFrame: forward; return</code> block.</td>
+            <td><span class="tag tag-mytake">LOW</span></td>
+            <td>Optional helper; not worth a new abstraction.</td>
+          </tr>
+          <tr>
+            <td>7</td>
+            <td><b>System priority is duplicated nested-select.</b> Pattern shows up in 7 places.</td>
+            <td><span class="tag tag-mytake">MEDIUM</span></td>
+            <td>Extract <code>nextFrame</code> helper. §5, §12.</td>
+          </tr>
+          <tr>
+            <td>8</td>
+            <td><b>External IO multiplexed via internal channels.</b> Each processor has 1–5 extra
+              channels (<code>audioFrames</code>, <code>transcriptFrames</code>,
+              <code>responseFrames</code>, <code>ttsEvents</code>, <code>idleFrames</code>,
+              <code>frames</code>). Adds select arms.</td>
+            <td><span class="tag tag-mytake">LOW</span></td>
+            <td>Intrinsic to "one goroutine per processor" design. Don't change.</td>
+          </tr>
+          <tr>
+            <td>9</td>
+            <td><b>Pipeline isn't a FrameProcessor.</b> Can't nest pipelines.</td>
+            <td><span class="tag tag-mytake">LOW</span></td>
+            <td>You don't have parallel/nested sub-pipelines. Leave.</td>
+          </tr>
+          <tr>
+            <td>10</td>
+            <td><b>Upstream system frames silently lose priority.</b> Router routes upstream to
+              <code>dataChs[i-1]</code> regardless of <code>IsSystem()</code>. No upstream
+              SystemFrame senders today.</td>
+            <td><span class="tag tag-mytake">LOW</span></td>
+            <td>Falls out of Envelope migration (§4).</td>
+          </tr>
+          <tr>
+            <td>11</td>
+            <td><b>TTSProcessor state machine is implicit in five booleans + pointer + timer.</b>
+              200-line Process function.</td>
+            <td><span class="tag tag-mytake">MEDIUM</span></td>
+            <td>Consolidate into <code>ttsSynth</code> enum. §7, §12.</td>
+          </tr>
+          <tr>
+            <td>12</td>
+            <td><b>No "started" gate.</b> Audio can arrive before downstream processors are ready;
+              backpressure relies on the 100-capacity channel buffers.</td>
+            <td><span class="tag tag-mytake">LOW</span></td>
+            <td>Works in practice. Document the assumption.</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <!-- 12. Recommendations -->
+    <section class="block" id="recommendations">
+      <div class="section-eyebrow">Section 12</div>
+      <h2>Recommended order of work</h2>
+      <p class="tldr">
+        Five concrete changes, ordered for minimum churn. Each one stands alone; you can stop after
+        any of them.
+      </p>
+
+      <h3>Step 1 — Extract the priority-select helper</h3>
+      <div class="kvs">
+        <dt>Effort:</dt><dd>~20 lines new, ~80 lines removed</dd>
+        <dt>Behavior change:</dt><dd>None</dd>
+        <dt>Risk:</dt><dd>Very low</dd>
+      </div>
+      <p>Mechanical, no behavior change. Unblocks Step 2 by giving every processor a uniform
+        <code>for { f, dir, ok := nextFrame(ch); ... }</code> shape. See sketch in §5.</p>
+      <div class="voice voice-mytake">
+        <div class="voice-head"><span class="tag tag-mytake">My take</span></div>
+        <p>Do this first. Even if you stop after step 1, your codebase reads a level cleaner.</p>
+      </div>
+
+      <h3>Step 2 — Migrate inter-processor channels to <code>Envelope{Frame, Direction}</code></h3>
+      <div class="kvs">
+        <dt>Effort:</dt><dd>~50 lines changed across 10 files, ~30 lines removed (pass-throughs)</dd>
+        <dt>Behavior change:</dt><dd>None for current frame types</dd>
+        <dt>Risk:</dt><dd>Low if you keep a one-line default case</dd>
+      </div>
+      <p>Replace <code>&lt;-chan Frame</code> with <code>&lt;-chan Envelope</code>. Router wraps
+        in Envelope; processors unpack with <code>f, dir := env.Frame, env.Direction</code>.
+        Default-case becomes <code>ch.Send(env.Frame, env.Direction)</code>. Adds explicit
+        upstream-system-frame routing as a free bonus.</p>
+      <div class="voice voice-pipecat">
+        <div class="voice-head"><span class="tag tag-pipecat">Inspired by</span></div>
+        <p><code>FrameProcessor.queue_frame(frame, direction)</code> — Pipecat carries direction
+          per-call. The Envelope is your Go-shaped version of the same idea.</p>
+      </div>
+
+      <h3>Step 3 — Consolidate TTSProcessor state</h3>
+      <div class="kvs">
+        <dt>Effort:</dt><dd>~30 lines removed, one new enum type</dd>
+        <dt>Behavior change:</dt><dd>None</dd>
+        <dt>Risk:</dt><dd>Medium — touches the most complex file</dd>
+      </div>
+      <p>Replace <code>awaitingTTSDone</code> + <code>ttsFlushSent</code> with a
+        <code>ttsSynth</code> enum (idle/streaming/closing). Keep <code>pendingEnd</code> +
+        <code>endTimer</code> as the shutdown pair. Combine with Step 2 to drop the
+        <code>if pendingEnd != nil { drop }</code> block down to one line. See §7.</p>
+
+      <h3>Step 4 — Safety net for shutdown</h3>
+      <div class="kvs">
+        <dt>Effort:</dt><dd>~10 lines across STT/TTS/Playback</dd>
+        <dt>Behavior change:</dt><dd>Cleaner shutdown when ctx is cancelled out-of-band</dd>
+        <dt>Risk:</dt><dd>Very low</dd>
+      </div>
+      <p>Add <code>defer p.stop()</code> in STT/TTS Process functions, and a
+        <code>case &lt;-sessionCtx.Ctx.Done(): return</code> arm in each Process loop. Walk
+        <code>playbackQueue</code> on interrupt to preserve <code>EndFrame</code>. See §6, §8.</p>
+
+      <h3>Step 5 — Reach for new abstractions only when forced</h3>
+      <div class="kvs">
+        <dt>Effort:</dt><dd>None (a discipline, not a change)</dd>
+      </div>
+      <p>Things <b>not</b> to do until you have a concrete user story:</p>
+      <ul>
+        <li>Don't add <code>StartFrame</code>/<code>CancelFrame</code>/<code>StopFrame</code>.</li>
+        <li>Don't add an Observer registry. The MetricsFrame intercept is fine.</li>
+        <li>Don't split <code>ContextAggregator</code> into user+assistant halves.</li>
+        <li>Don't add a generic <code>UninterruptibleFrame</code> mixin. Targeted EndFrame
+          preservation in PlaybackSink is cheaper.</li>
+        <li>Don't make Pipeline a FrameProcessor itself. Nested pipelines aren't on the horizon.</li>
+      </ul>
+
+      <div class="verdict">
+        <div class="verdict-icon">★</div>
+        <div>
+          <b>Net effect of Steps 1–4:</b> ~140 lines removed, one new type
+          (<code>Envelope</code>), one new enum (<code>ttsSynth</code>), one new helper
+          (<code>nextFrame</code>). No behavior change for any currently-exercised path.
+          Several invariants now structurally enforced rather than informally documented.
+        </div>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<footer>
+  Generated for talk-go × Pipecat (pipecat-ai 0.0.108) · single-page HTML, no dependencies ·
+  views filterable by voice — click the buttons at the top
+</footer>
+
+<script>
+  // Filter by voice tag
+  const body = document.body;
+  document.querySelectorAll('.filter-bar button').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.filter-bar button').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      const f = btn.dataset.filter;
+      body.classList.remove('filter-pipecat', 'filter-talkgo', 'filter-mytake', 'filter-opinion');
+      if (f !== 'all') body.classList.add('filter-' + f);
+    });
+  });
+
+  // TOC active-section highlight on scroll
+  const tocLinks = Array.from(document.querySelectorAll('.toc a'));
+  const sections = tocLinks
+    .map(a => document.querySelector(a.getAttribute('href')))
+    .filter(Boolean);
+
+  function updateActive() {
+    const y = window.scrollY + 120;
+    let active = sections[0];
+    for (const s of sections) {
+      if (s.offsetTop <= y) active = s;
+    }
+    tocLinks.forEach(a => a.classList.remove('active'));
+    const link = tocLinks.find(a => a.getAttribute('href') === '#' + active.id);
+    if (link) link.classList.add('active');
+  }
+  window.addEventListener('scroll', updateActive, { passive: true });
+  updateActive();
+
+  // Smooth scroll for TOC clicks
+  tocLinks.forEach(a => {
+    a.addEventListener('click', e => {
+      e.preventDefault();
+      const target = document.querySelector(a.getAttribute('href'));
+      if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+  });
+</script>
+
+</body>
+</html>

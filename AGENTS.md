@@ -53,7 +53,7 @@ Core pipeline files live under `voicepipelinecore/` unless marked as root-level.
 
 | File | Purpose |
 |------|---------|
-| root `main.go` | Entry point. Loads `.env`, configures logging (both terminal + `app.log`), silences LiveKit/pion logs, serves HTTP (`:3000`). Two HTTP routes only: `/connect` creates a `voicepipelinecore.PipelineTask` + returns LiveKit token; `/` serves `livekit-client.html`. There is **no** custom WebSocket route — UI events ride the LiveKit data channel (see `ui_events.go`) |
+| root `main.go` | Entry point. Loads `.env`, configures logging (both terminal + `app.log`), initializes Disha deps, silences LiveKit/pion logs, serves HTTP (`:3000`). Two HTTP routes only: `/connect` creates a `voicepipelinecore.PipelineTask` + returns LiveKit token; `/` serves `livekit-client.html`. `/connect` keeps the no-body dev path, and routes `conversation_id` requests through `disha.NewBotTask` using `bot_type` (default `sales_call`). There is **no** custom WebSocket route — UI events ride the LiveKit data channel (see `ui_events.go`) |
 | `disha/types.go` | Disha Redis/API payload structs: `conversation_data:{conversation_id}`, `conversation_chunks:{user_id}:{conversation_id}`, update-conversation, post-call, and `/common/enqueue_job` request bodies |
 | `disha/redis_client.go` | Narrow Redis client for Disha integration. Reads `conversation_data:{conversation_id}`, appends JSON chunks to `conversation_chunks:{user_id}:{conversation_id}`, normalizes `DISHA_REDIS_URL` host values, and retries Redis timeouts with Disha-style exponential backoff |
 | `disha/api_client.go` | Disha HTTP client for `PATCH /bot/update_conversation`, `POST /bot/run_post_call_operations`, and `POST /common/enqueue_job`. It sends JSON with a 10s default timeout and no Authorization header, matching Disha's `VoiceBotAPIService` |
@@ -308,7 +308,7 @@ go test -v -run TestUserIdle ./...  # one processor's tests
 ### Known Issues / Gotchas
 
 - Audio can sound choppy if Opus frames aren't paced at 20ms intervals — use `time.Ticker`, not `time.Sleep`
-- The `disha` package is intentionally not wired into `/connect` yet; Phase 5 will route requests with `conversation_id` through the common `disha.Bot` boundary, initially using `SalesCallBot`
+- `/connect` supports the local no-body dev path and the Disha path. When `conversation_id` is supplied by JSON body or query param, it routes through the common `disha.Bot` boundary; `bot_type` is optional and defaults to `sales_call`.
 - Upstream frames (WordTimestampFrame, TTSDoneFrame, BotStarted/StoppedSpeakingFrame) pass through TTS and LLM as forwarding hops to reach ContextAggregator and UserIdleProcessor; the `default: PushFrame(frame, dir)` in each processor handles this
 - Soniox sends transcript snapshots: individual responses duplicate prior non-final tokens and add/refine the current hypothesis. STT should forward token text plus response metadata (`ResponseID`, `Finished`) without owning transcript semantics. ContextAggregator replaces non-final text per response, updates the UI from that latest snapshot, and starts turns only from final tokens ending in `<end>`; `Finished` is logged for debugging but is not the turn boundary
 - Cartesia may send late audio/done messages after context cancellation — `activeContextId` atomic check in TTS reader goroutine drops them

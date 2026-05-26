@@ -17,7 +17,8 @@ Do not commit phase work unless Jaideep explicitly asks. Current exception: Phas
 - **Phase 2 is implemented.** The `disha/` package now has Redis/API payload structs, a narrow Redis client for `conversation_data:{conversation_id}` reads and `conversation_chunks:{user_id}:{conversation_id}` appends, Disha-style Redis timeout retry, explicit `null` `end_reason` JSON support, and tests with miniredis/JSON assertions.
 - **Phase 3 is implemented.** The `disha/` package now has an HTTP API client for `PATCH /bot/update_conversation`, `POST /bot/run_post_call_operations`, and `POST /common/enqueue_job`. It mirrors `VoiceBotAPIService` auth behavior by sending no Authorization header.
 - **Phase 4 is implemented.** The `disha/` package now has a common `Bot` interface, common startup helpers, common call event callbacks, and a single sales-call implementation in `sales_call.go`. `SalesCallBot.BuildOptions` is the testable boundary: it loads Redis state, filters prior chunks, seeds `hello?`, applies remaining sales talk time, wires common call events, persists committed turns through the same callback path, and maps unsupported Disha end reasons to explicit JSON `null`.
-- **Current boundary choice:** Disha business logic still does not live in `voicepipelinecore`. The remaining work should add `/connect` routing in the root binary boundary.
+- **Phase 5 is implemented.** Root `/connect` now preserves the no-body local dev path and routes requests with `conversation_id` through the common `disha.Bot` boundary. `bot_type` can be passed in JSON or query params and defaults to `sales_call`.
+- **Current boundary choice:** Disha business logic still does not live in `voicepipelinecore`.
 
 ---
 

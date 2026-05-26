@@ -15,20 +15,20 @@ import (
 	"github.com/jaideep329/talk-go/voicepipelinecore"
 )
 
-type sessionAPIRequest struct {
+type callAPIRequest struct {
 	Method string
 	Path   string
 	Body   map[string]any
 }
 
-type sessionAPIRecorder struct {
+type callAPIRecorder struct {
 	mu       sync.Mutex
-	requests []sessionAPIRequest
+	requests []callAPIRequest
 }
 
-func newSessionAPIServer(t *testing.T) (*httptest.Server, *sessionAPIRecorder) {
+func newCallAPIServer(t *testing.T) (*httptest.Server, *callAPIRecorder) {
 	t.Helper()
-	recorder := &sessionAPIRecorder{}
+	recorder := &callAPIRecorder{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		raw, err := io.ReadAll(r.Body)
 		if err != nil {
@@ -48,7 +48,7 @@ func newSessionAPIServer(t *testing.T) (*httptest.Server, *sessionAPIRecorder) {
 			t.Errorf("Authorization = %q, want absent", got)
 		}
 		recorder.mu.Lock()
-		recorder.requests = append(recorder.requests, sessionAPIRequest{
+		recorder.requests = append(recorder.requests, callAPIRequest{
 			Method: r.Method,
 			Path:   r.URL.Path,
 			Body:   body,
@@ -61,10 +61,10 @@ func newSessionAPIServer(t *testing.T) (*httptest.Server, *sessionAPIRecorder) {
 	return server, recorder
 }
 
-func (r *sessionAPIRecorder) snapshot() []sessionAPIRequest {
+func (r *callAPIRecorder) snapshot() []callAPIRequest {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	out := make([]sessionAPIRequest, len(r.requests))
+	out := make([]callAPIRequest, len(r.requests))
 	copy(out, r.requests)
 	return out
 }
@@ -86,9 +86,22 @@ func testDeps(redis RedisClient, api *APIClient) Deps {
 	}
 }
 
-func TestBuildSalesCallOptionsAssemblesDishaSession(t *testing.T) {
+func TestNewBotReturnsSalesCallBot(t *testing.T) {
+	bot, err := NewBot(SalesCallBotType)
+	if err != nil {
+		t.Fatalf("NewBot: %v", err)
+	}
+	if bot.BotType() != SalesCallBotType {
+		t.Fatalf("BotType = %q, want %q", bot.BotType(), SalesCallBotType)
+	}
+	if _, ok := bot.(SalesCallBot); !ok {
+		t.Fatalf("bot type = %T, want SalesCallBot", bot)
+	}
+}
+
+func TestSalesCallBotBuildOptionsAssemblesDishaCall(t *testing.T) {
 	redisServer, redisClient := newRedisTestClient(t)
-	apiServer, apiRecorder := newSessionAPIServer(t)
+	apiServer, apiRecorder := newCallAPIServer(t)
 	api := NewAPIClient(apiServer.URL, 10*time.Second, nil)
 	remainingTalkTime := 2.5
 	conversationID := "conv-1"
@@ -113,9 +126,9 @@ func TestBuildSalesCallOptionsAssemblesDishaSession(t *testing.T) {
 		},
 	})
 
-	opts, err := BuildSalesCallOptions(context.Background(), conversationID, testDeps(redisClient, api))
+	opts, err := SalesCallBot{}.BuildOptions(context.Background(), conversationID, testDeps(redisClient, api))
 	if err != nil {
-		t.Fatalf("BuildSalesCallOptions: %v", err)
+		t.Fatalf("SalesCallBot.BuildOptions: %v", err)
 	}
 	if opts.RoomName != "conv-conv-1" {
 		t.Fatalf("RoomName = %q, want conv-conv-1", opts.RoomName)
@@ -212,16 +225,16 @@ func TestBuildSalesCallOptionsAssemblesDishaSession(t *testing.T) {
 	}
 }
 
-func assertRequest(t *testing.T, got sessionAPIRequest, method, path string) {
+func assertRequest(t *testing.T, got callAPIRequest, method, path string) {
 	t.Helper()
 	if got.Method != method || got.Path != path {
 		t.Fatalf("request = %s %s, want %s %s", got.Method, got.Path, method, path)
 	}
 }
 
-func TestBuildSalesCallOptionsSeedsHelloWhenNoPriorChunks(t *testing.T) {
+func TestSalesCallBotBuildOptionsSeedsHelloWhenNoPriorChunks(t *testing.T) {
 	redisServer, redisClient := newRedisTestClient(t)
-	apiServer, _ := newSessionAPIServer(t)
+	apiServer, _ := newCallAPIServer(t)
 	conversationID := "fresh"
 	seedConversationData(t, redisServer, conversationID, ConversationData{
 		Conversation: ConversationRow{
@@ -235,9 +248,9 @@ func TestBuildSalesCallOptionsSeedsHelloWhenNoPriorChunks(t *testing.T) {
 		UserProfile: UserProfileData{UserID: "user-1"},
 	})
 
-	opts, err := BuildSalesCallOptions(context.Background(), conversationID, testDeps(redisClient, NewAPIClient(apiServer.URL, 10*time.Second, nil)))
+	opts, err := SalesCallBot{}.BuildOptions(context.Background(), conversationID, testDeps(redisClient, NewAPIClient(apiServer.URL, 10*time.Second, nil)))
 	if err != nil {
-		t.Fatalf("BuildSalesCallOptions: %v", err)
+		t.Fatalf("SalesCallBot.BuildOptions: %v", err)
 	}
 	if len(opts.InitialMessages) != 2 ||
 		opts.InitialMessages[0].Role != "system" ||
@@ -249,9 +262,9 @@ func TestBuildSalesCallOptionsSeedsHelloWhenNoPriorChunks(t *testing.T) {
 	}
 }
 
-func TestBuildSalesCallOptionsRejectsUnsupportedBotType(t *testing.T) {
+func TestSalesCallBotBuildOptionsRejectsUnsupportedBotType(t *testing.T) {
 	redisServer, redisClient := newRedisTestClient(t)
-	apiServer, _ := newSessionAPIServer(t)
+	apiServer, _ := newCallAPIServer(t)
 	seedConversationData(t, redisServer, "conv-1", ConversationData{
 		Conversation: ConversationRow{
 			ID:      "conv-1",
@@ -261,9 +274,9 @@ func TestBuildSalesCallOptionsRejectsUnsupportedBotType(t *testing.T) {
 		UserProfile: UserProfileData{UserID: "user-1"},
 	})
 
-	_, err := BuildSalesCallOptions(context.Background(), "conv-1", testDeps(redisClient, NewAPIClient(apiServer.URL, 10*time.Second, nil)))
+	_, err := SalesCallBot{}.BuildOptions(context.Background(), "conv-1", testDeps(redisClient, NewAPIClient(apiServer.URL, 10*time.Second, nil)))
 	if err == nil {
-		t.Fatal("BuildSalesCallOptions returned nil error for unsupported bot type")
+		t.Fatal("SalesCallBot.BuildOptions returned nil error for unsupported bot type")
 	}
 }
 

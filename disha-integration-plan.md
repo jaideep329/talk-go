@@ -16,7 +16,7 @@ Do not commit phase work unless Jaideep explicitly asks. Current exception: Phas
 - **Phase 1 + 1.5 are implemented.** Core now has `TaskOptions.InitialMessages`, `TaskOptions.MaxTalkTime`, typed `EndReason`, `CallStats`, FIFO `CallEvents` for lifecycle and committed turns, `callStatsTracker`, and `perTurnMetrics` snapshots. `TaskContext.EndTask` is typed as `func(EndReason)`; there is no legacy string reason mapper.
 - **Phase 2 is implemented.** The `disha/` package now has Redis/API payload structs, a narrow Redis client for `conversation_data:{conversation_id}` reads and `conversation_chunks:{user_id}:{conversation_id}` appends, Disha-style Redis timeout retry, explicit `null` `end_reason` JSON support, and tests with miniredis/JSON assertions.
 - **Phase 3 is implemented.** The `disha/` package now has an HTTP API client for `PATCH /bot/update_conversation`, `POST /bot/run_post_call_operations`, and `POST /common/enqueue_job`. It mirrors `VoiceBotAPIService` auth behavior by sending no Authorization header.
-- **Phase 4 is implemented.** The `disha/` package now has a bot-type-agnostic `CallOperations` interface, `SalesCallOperations`, generic `BuildOptions`/`BuildSession` wrappers, and sales-call-specific setup split across `sales_call.go`, `sales_call_startup.go`, `sales_call_events.go`, `sales_call_operations.go`, and `sales_call_end.go`. `BuildSalesCallOptions` is the testable boundary: it loads Redis state, filters prior chunks, seeds `hello?`, applies remaining sales talk time, wires call events, persists committed turns through the same callback path, and maps unsupported Disha end reasons to explicit JSON `null`.
+- **Phase 4 is implemented.** The `disha/` package now has a common `Bot` interface, common startup helpers, common call event callbacks, and a single sales-call implementation in `sales_call.go`. `SalesCallBot.BuildOptions` is the testable boundary: it loads Redis state, filters prior chunks, seeds `hello?`, applies remaining sales talk time, wires common call events, persists committed turns through the same callback path, and maps unsupported Disha end reasons to explicit JSON `null`.
 - **Current boundary choice:** Disha business logic still does not live in `voicepipelinecore`. The remaining work should add `/connect` routing in the root binary boundary.
 
 ---
@@ -439,7 +439,7 @@ func main() {
 }
 
 // handleConnect — phase 0 version: keeps today's behavior. Phase 5 will
-// upgrade it to read conversation_id and dispatch to disha.BuildSession.
+// upgrade it to read conversation_id and dispatch through the disha.Bot boundary.
 func handleConnect(w http.ResponseWriter, r *http.Request) {
     logger := log.New(log.Writer(), "[room] ", log.Flags())
 
@@ -1087,65 +1087,53 @@ Use `httptest.NewServer` to assert on the captured request bodies for each endpo
 
 ---
 
-## 9. Phase 4 — Disha call operations + session builder
+## 9. Phase 4 — Disha bot interface + call event callbacks
 
-### 9.1 `disha.CallOperations`
+### 9.1 Common Disha helpers
 
-`disha/call_operations.go` defines the bot-type-agnostic operation surface for Disha integrations:
+The Disha package keeps `sales_call.go` as the sales-call entry point, but the reusable behavior lives in common helpers:
 
-```go
-type CallOperations interface {
-    OnBotJoined(at time.Time)
-    OnUserJoined(at time.Time)
-    OnUserFirstSpeech(at time.Time)
-    OnBotFirstSpeech(at time.Time)
-    OnFirstUserAudio(at time.Time)
-    OnUserTurnCommitted(text string, at time.Time)
-    OnAssistantTurnCommitted(text string, at time.Time, metrics voicepipelinecore.TurnMetrics)
-    OnCallEnded(reason voicepipelinecore.EndReason, stats voicepipelinecore.CallStats)
-}
-```
+- `disha/bot.go`: shared `Deps`, `Bot` interface, `NewBot(botType)`, and `NewBotTask`. The connect boundary can use this for any Disha bot type without knowing sales-call details.
+- `disha/call_startup.go`: `collectCallStartup` loads `conversation_data`, validates the expected bot type, resolves user ID, creates the call logger/room name, and returns `CallStartup`. `initialMessagesFromChunks` is common chunk-to-LLM-context conversion.
+- `disha/call_event_callbacks.go`: `CallEventCallbacks` is the shared concrete callback set. It exposes `Events()` to adapt itself to `voicepipelinecore.CallEvents`, updates conversation lifecycle fields, appends committed turns to Redis, runs post-call operations, maps end reasons, and enqueues `/common/enqueue_job` with the current bot type.
 
-`CallEventsForOperations` adapts this interface to `voicepipelinecore.CallEvents`. This keeps the core primitive simple and gives future Disha bot types one interface to implement for lifecycle updates, committed-turn persistence, and end-call work.
+These methods are intentionally not sales-call-specific because other Disha bot types need the same Redis/API lifecycle behavior.
 
-### 9.2 `disha.SalesCallOperations`
+### 9.2 `disha.CallEventCallbacks`
 
-`disha/sales_call_operations.go` implements `CallOperations` for sales calls:
+`disha/call_event_callbacks.go` implements the shared callback surface:
 - `OnBotJoined`, `OnUserJoined`, `OnUserFirstSpeech`, and `OnBotFirstSpeech` call `PATCH /bot/update_conversation`.
-- `OnFirstUserAudio` is a no-op for sales calls today because first-audio timing is sent in the post-call stats payload.
+- `OnFirstUserAudio` is currently a no-op because first-audio timing is sent in the post-call stats payload.
 - `OnUserTurnCommitted` and `OnAssistantTurnCommitted` append Disha `ConversationChunk` JSON to `conversation_chunks:{user_id}:{conversation_id}`. Assistant chunks include per-turn metrics when present.
-- `OnCallEnded` delegates to `sales_call_end.go`, which runs post-call operations and then enqueues `/common/enqueue_job` for Redis-to-Postgres chunk sync.
+- `OnCallEnded` runs post-call operations and then enqueues `/common/enqueue_job` for Redis-to-Postgres chunk sync.
 
 The Redis append is synchronous inside the call-event dispatcher worker. That is intentional: the dispatcher preserves FIFO order for committed-turn writes while keeping the pipeline itself non-blocking. Each Redis write uses a bounded 5s timeout.
 
-### 9.3 Sales-call session split
+### 9.3 Sales-call bot implementation
 
-The implemented split mirrors the shape of Disha's Python `sales_call.py`, but keeps helper responsibilities out of the main setup file:
+The implemented split mirrors the shape of Disha's Python `sales_call.py`: the main sales-call entry point is one file that implements the common `Bot` interface and orchestrates common helpers.
 
-- `disha/session.go`: generic Disha entrypoints and shared `Deps`; `BuildSession`/`BuildOptions` delegate to the sales-call implementation.
-- `disha/sales_call.go`: the high-level sales-call setup. It calls startup collection, creates `SalesCallOperations`, registers call events, and returns `voicepipelinecore.TaskOptions`; `BuildSalesCallSession` is the thin `voicepipelinecore.NewTask` wrapper.
-- `disha/sales_call_operations.go`: implements the common `CallOperations` interface for sales-call Redis/API side effects.
-- `disha/sales_call_startup.go`: collects startup data and dependencies from Redis, validates `sales_call`, builds initial LLM messages, and applies remaining sales talk time.
-- `disha/sales_call_events.go`: registers mid-call callbacks (`bot_joined_at`, `user_joined_at`, `user_first_speech_at`, `bot_first_speech_at`) and delegates call-ended work.
-- `disha/sales_call_end.go`: owns end-call operations: `run_post_call_operations`, Disha end-reason mapping, and `/common/enqueue_job` for chunk sync.
+- `disha/sales_call.go`: defines `SalesCallBot`, implements `BotType()` and `BuildOptions(...)`, calls common startup collection, applies sales-call-specific prompt and talktime rules, creates common `CallEventCallbacks`, and returns `voicepipelinecore.TaskOptions`.
+- `disha/call_startup.go`: common startup data and prior-chunk-to-message conversion.
+- `disha/call_event_callbacks.go`: common callback implementation for lifecycle updates, turn persistence, post-call operations, and chunk sync.
 
-Keep this split: `sales_call.go` should read as the main pipeline/session setup, while startup data, event callbacks, and end-call operations stay in focused files.
+Keep this split: `sales_call.go` should read as the main bot setup, while reusable startup and callback behavior stays in common files.
 
 ### 9.4 Tests
 
-Implemented integration test in `disha/session_test.go`:
+Implemented integration test in `disha/sales_call_test.go`:
 - Stand up `miniredis` and `httptest` servers.
 - Seed `conversation_data:test-id` in miniredis with a valid blob.
-- Mock the `talk-go/voicepipelinecore` boundary: you don't need to start a real pipeline. The test calls `BuildSalesCallOptions`, then synthesizes calling the callbacks (`OnBotJoined`, `OnUserTurnCommitted`, `OnCallEnded`) and asserts:
+- Mock the `talk-go/voicepipelinecore` boundary: you don't need to start a real pipeline. The test calls `SalesCallBot{}.BuildOptions`, then synthesizes calling the callbacks (`OnBotJoined`, `OnUserTurnCommitted`, `OnCallEnded`) and asserts:
   - `httptest` server received `PATCH /bot/update_conversation` with the right body.
   - Redis LIST `conversation_chunks:<uid>:test-id` has the right RPUSHed entries (use miniredis `LRange`).
   - `httptest` server received `POST /bot/run_post_call_operations` and `POST /common/enqueue_job` with the right bodies, in that order.
 
-`BuildSalesCallOptions` is testable without spinning up LiveKit; `BuildSalesCallSession` just calls `BuildSalesCallOptions` and then `voicepipelinecore.NewTask`. The generic `BuildOptions`/`BuildSession` wrappers delegate to the sales-call implementation.
+`SalesCallBot{}.BuildOptions` is testable without spinning up LiveKit. `NewBotTask` is the common helper that calls a bot's `BuildOptions` and then `voicepipelinecore.NewTask`.
 
 ---
 
-## 10. Phase 5 — Wire `/connect` to `disha.BuildSession`
+## 10. Phase 5 — Wire `/connect` to the Disha bot boundary
 
 ### 10.1 New `/connect` handler
 
@@ -1162,7 +1150,8 @@ func handleConnect(w http.ResponseWriter, r *http.Request) {
     var err error
 
     if req.ConversationID != "" {
-        task, err = disha.BuildSession(r.Context(), req.ConversationID, dishaDeps)
+        bot := disha.SalesCallBot{}
+        task, err = disha.NewBotTask(r.Context(), bot, req.ConversationID, dishaDeps)
     } else {
         // Dev/test flow: use the hardcoded prompt, no Disha integration.
         task, err = voicepipelinecore.NewTask(context.Background(), voicepipelinecore.TaskOptions{
@@ -1257,7 +1246,7 @@ After each of these phases, stop work, run `go test -race -count=2 ./...`, summa
 - **End of phase 1 + 1.5**: TaskOptions + FIFO call events + committed-turn callbacks + per-turn metrics aggregation merged. Tests pass. No behavior change visible. *Stop.*
 - **End of phase 2**: Disha types + Redis client merged, with tests. *Stop.*
 - **End of phase 3**: Disha HTTP API client merged, with tests. *Stop.*
-- **End of phase 4**: Disha call operations + BuildSession merged, with tests. *Stop.*
+- **End of phase 4**: Disha bot interface + call event callbacks merged, with tests. *Stop.*
 - **End of phase 5**: `/connect` accepts conversation_id, end-to-end ready for live test. *Stop.*
 - **End of phase 6**: live test passed (or any failures + fixes documented). *Stop.*
 
@@ -1307,7 +1296,7 @@ Also update the file map and pipeline diagram in AGENTS.md to reflect the new pa
 - No Postgres reads or writes from Go anywhere.
 - No fallback to Postgres if Redis is cold — return 502.
 - No RTVI logs port. Send `log_data_s3_key=""` with a TODO for future RTVI/S3 work only if needed.
-- No Langfuse-managed prompt fetch. Hardcoded sales prompt in `disha/session.go` only.
+- No Langfuse-managed prompt fetch. Hardcoded sales prompt in `disha/sales_call.go` only.
 - No bot types other than `sales_call`.
 - No pod lifecycle / GKE / scheduling. We assume the caller (Disha orchestrator) handles that and just hands us a conversation_id.
 - No Daily metrics. We use LiveKit.
@@ -1368,7 +1357,7 @@ After the work is done, ensure these test files exist and pass:
 - `voicepipelinecore/call_stats_tracker_test.go` — new, exercises duration tracking.
 - `disha/redis_client_test.go` — new, miniredis-based.
 - `disha/api_client_test.go` — new, httptest-based.
-- `disha/session_test.go` — integration test of BuildSalesCallOptions + call operations against miniredis + httptest.
+- `disha/sales_call_test.go` — integration test of `SalesCallBot.BuildOptions` + call event callbacks against miniredis + httptest.
 
 Target: `go test -race -count=3 ./...` clean.
 
@@ -1378,7 +1367,7 @@ Target: `go test -race -count=3 ./...` clean.
 
 You are done when:
 1. `voicepipelinecore` package exists, contains all the core pipeline code, has zero imports of `disha/`, `redis/`, or any HTTP client.
-2. `disha` package exists, contains Redis client, HTTP client, call operations, and session builder.
+2. `disha` package exists, contains Redis client, HTTP client, the bot interface, sales-call bot implementation, and call event callbacks.
 3. `main.go` wires both packages, owns the sessions map, handles the dev fallback path.
 4. AGENTS.md updated with the core/integration rule.
 5. All tests pass under `-race -count=3`.

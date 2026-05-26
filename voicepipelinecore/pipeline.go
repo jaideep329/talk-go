@@ -10,8 +10,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	lksdk "github.com/livekit/server-sdk-go/v2"
 )
 
 // captureGoroutineStacks returns a textual dump of every live
@@ -80,7 +78,7 @@ func (p *Pipeline) Stop() {
 type TaskContext struct {
 	Ctx        context.Context
 	Logger     *log.Logger
-	Room       *lksdk.Room
+	Room       *DailyRoom
 	UIEvents   *UIEventSender
 	Metrics    func(MetricsFrame)
 	EndTask    func(reason EndReason)
@@ -95,8 +93,15 @@ type TaskOptions struct {
 	// Logger is required.
 	Logger *log.Logger
 
-	// RoomName is the LiveKit room name. If empty, NewTask mints one
-	// like "room-1234567".
+	// RoomURL is the Daily room URL the bot should join. The room is
+	// created by Disha; NewTask only joins it.
+	RoomURL string
+
+	// RoomToken is the Daily meeting token used by the bot.
+	RoomToken string
+
+	// RoomName is the Daily room name used for logging/session lookup. If
+	// empty, it is derived from RoomURL.
 	RoomName string
 
 	// InitialMessages seeds the LLM conversation context. A nil slice
@@ -136,8 +141,8 @@ type PipelineTask struct {
 }
 
 // NewTask builds a PipelineTask but does not start its processors. The
-// LiveKit room is joined during construction so callers can mint the
-// browser token after receiving the room name.
+// Daily room is joined during construction so the caller knows the bot
+// is present before returning connection details to the browser.
 func NewTask(parentCtx context.Context, opts TaskOptions) (*PipelineTask, error) {
 	if opts.Logger == nil {
 		return nil, errors.New("voicepipelinecore: TaskOptions.Logger is required")
@@ -146,6 +151,9 @@ func NewTask(parentCtx context.Context, opts TaskOptions) (*PipelineTask, error)
 		parentCtx = context.Background()
 	}
 	roomName := opts.RoomName
+	if roomName == "" {
+		roomName = dailyRoomNameFromURL(opts.RoomURL)
+	}
 	if roomName == "" {
 		roomName = fmt.Sprintf("room-%d", rand.IntN(9000000)+1000000)
 	}
@@ -192,7 +200,7 @@ func NewTask(parentCtx context.Context, opts TaskOptions) (*PipelineTask, error)
 
 	pipelineSource := NewPipelineSourceProcessor(taskCtx)
 	audioSource := NewAudioSourceProcessor(taskCtx)
-	room, err := JoinRoom(roomName, taskCtx, audioSource)
+	room, err := JoinDailyRoom(opts.RoomURL, opts.RoomToken, taskCtx, audioSource)
 	if err != nil {
 		if taskCtx.callEvents != nil {
 			taskCtx.callEvents.stopAndDrain()
@@ -201,7 +209,7 @@ func NewTask(parentCtx context.Context, opts TaskOptions) (*PipelineTask, error)
 		return nil, err
 	}
 	taskCtx.Room = room
-	// Hand the room to the UI sender so it can publish DataPackets.
+	// Hand the room to the UI sender so it can publish app messages.
 	// Any events emitted before this point (none today, but
 	// defensive) silently no-op.
 	uiEvents.SetRoom(taskCtx.Room)
@@ -310,10 +318,9 @@ func (t *PipelineTask) runCleanup(frame EndFrame) {
 	// via the shared WaitGroup below.
 	t.Pipeline.Stop()
 
-	// Disconnect the LiveKit room before waiting. AudioSource's
-	// ReadRTP doesn't respect context, so its reader only exits when
-	// the room is closed — disconnecting here unblocks it so the
-	// WaitGroup can drain.
+	// Disconnect the Daily bridge before waiting. This closes the media
+	// callbacks and unblocks the bridge goroutines so the WaitGroup can
+	// drain.
 	if t.TaskCtx.Room != nil {
 		t.TaskCtx.Room.Disconnect()
 	}

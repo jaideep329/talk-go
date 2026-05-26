@@ -9,9 +9,6 @@ import (
 
 	gomp3 "github.com/hajimehoshi/go-mp3"
 	"github.com/hraban/opus"
-	lksdk "github.com/livekit/server-sdk-go/v2"
-	"github.com/pion/webrtc/v4"
-	"github.com/pion/webrtc/v4/pkg/media"
 )
 
 const (
@@ -21,13 +18,13 @@ const (
 	playbackEndTail = 1 * time.Second
 )
 
-// PlaybackSinkProcessor is the bottom of the chain. It owns the LiveKit
-// outbound audio track and a 20ms ticker that paces playback. Frame
+// PlaybackSinkProcessor is the bottom of the chain. It writes raw PCM to
+// the Daily bridge and owns a 20ms ticker that paces playback. Frame
 // ownership is split:
 //   - ProcessFrame (on processLoop / inputLoop) forwards incoming frames
 //     to runPlayback via queueCh.
 //   - runPlayback owns playbackQueue, interrupted, playbackStarted, and
-//     all interaction with botTrack.
+//     all writes to the Daily bridge.
 //
 // On EndFrame, ProcessFrame blocks until runPlayback has drained the
 // queue, written the silence tail, and forwarded EndFrame downstream,
@@ -35,10 +32,8 @@ const (
 type PlaybackSinkProcessor struct {
 	*BaseProcessor
 	taskCtx     *TaskContext
-	botTrack    *lksdk.LocalSampleTrack
 	metrics     *ProcessorMetrics
 	opusDecoder *opus.Decoder
-	opusEncoder *opus.Encoder
 	bgPCM       []int16 // background audio loop buffer (24kHz mono)
 
 	queueCh chan Frame    // ProcessFrame → runPlayback
@@ -83,39 +78,17 @@ func loadBackgroundPCM(path string, logger interface{ Printf(string, ...interfac
 }
 
 func NewPlaybackSinkProcessor(taskCtx *TaskContext) *PlaybackSinkProcessor {
-	botTrack, err := lksdk.NewLocalSampleTrack(webrtc.RTPCodecCapability{
-		MimeType:  webrtc.MimeTypeOpus,
-		ClockRate: 48000,
-		Channels:  2,
-	})
-	if err != nil {
-		taskCtx.Logger.Fatal("failed to create local track:", err)
-	}
-	_, err = taskCtx.Room.LocalParticipant.PublishTrack(botTrack, &lksdk.TrackPublicationOptions{
-		Name: "bot-audio",
-	})
-	if err != nil {
-		taskCtx.Logger.Fatal("failed to publish track:", err)
-	}
-	taskCtx.Logger.Println("Published bot audio track")
-
 	opusDec, err := opus.NewDecoder(24000, 1)
 	if err != nil {
 		taskCtx.Logger.Fatal("failed to create opus decoder:", err)
-	}
-	opusEnc, err := opus.NewEncoder(24000, 1, opus.AppVoIP)
-	if err != nil {
-		taskCtx.Logger.Fatal("failed to create opus encoder:", err)
 	}
 
 	bgPCM := loadBackgroundPCM("background-office-sound.mp3", taskCtx.Logger)
 
 	p := &PlaybackSinkProcessor{
 		taskCtx:     taskCtx,
-		botTrack:    botTrack,
 		metrics:     NewProcessorMetrics("playback"),
 		opusDecoder: opusDec,
-		opusEncoder: opusEnc,
 		bgPCM:       bgPCM,
 		queueCh:     make(chan Frame, 256),
 		endDone:     make(chan struct{}),
@@ -182,7 +155,13 @@ func (p *PlaybackSinkProcessor) handleQueueFrame(f Frame) {
 			p.playbackQueue = append(p.playbackQueue, v)
 		}
 	case EndFrame:
-		p.taskCtx.Logger.Printf("EndFrame queued in PlaybackSink after %d pending playback frames: reason=%q\n", len(p.playbackQueue), v.Reason)
+		if shouldStopPlaybackImmediately(v.Reason) {
+			p.taskCtx.Logger.Printf("EndFrame stopping PlaybackSink immediately, dropping %d pending playback frames: reason=%q\n", len(p.playbackQueue), v.Reason)
+			p.playbackQueue = nil
+			p.interrupted = true
+		} else {
+			p.taskCtx.Logger.Printf("EndFrame queued in PlaybackSink after %d pending playback frames: reason=%q\n", len(p.playbackQueue), v.Reason)
+		}
 		p.playbackQueue = append(p.playbackQueue, v)
 	case LLMResponseStartFrame:
 		p.interrupted = false
@@ -245,8 +224,10 @@ func (p *PlaybackSinkProcessor) tick() bool {
 			p.playbackQueue = p.playbackQueue[1:]
 		case EndFrame:
 			p.playbackQueue = p.playbackQueue[1:]
-			p.writeSilenceTail()
-			p.taskCtx.Logger.Printf("EndFrame leaving PlaybackSink after playback drain: reason=%q\n", f.Reason)
+			if !shouldStopPlaybackImmediately(f.Reason) {
+				p.writeSilenceTail()
+			}
+			p.taskCtx.Logger.Printf("EndFrame leaving PlaybackSink after playback handling: reason=%q\n", f.Reason)
 			p.PushFrame(f, Downstream)
 			return true
 		default:
@@ -254,15 +235,18 @@ func (p *PlaybackSinkProcessor) tick() bool {
 		}
 	}
 mix:
-	opusData := p.mixAndEncode(botPCM)
-	if opusData == nil {
+	pcm := p.mixPCM(botPCM)
+	_ = p.taskCtx.Room.WriteAudioPCM(pcm)
+	return false
+}
+
+func shouldStopPlaybackImmediately(reason string) bool {
+	switch EndReason(reason) {
+	case EndReasonClientDisconnect, EndReasonError:
+		return true
+	default:
 		return false
 	}
-	p.botTrack.WriteSample(media.Sample{
-		Data:     opusData,
-		Duration: 20 * time.Millisecond,
-	}, nil)
-	return false
 }
 
 func (p *PlaybackSinkProcessor) getBgFrame() []int16 {
@@ -280,7 +264,7 @@ func (p *PlaybackSinkProcessor) getBgFrame() []int16 {
 	return frame
 }
 
-func (p *PlaybackSinkProcessor) mixAndEncode(botPCM []int16) []byte {
+func (p *PlaybackSinkProcessor) mixPCM(botPCM []int16) []byte {
 	bgFrame := p.getBgFrame()
 	mixed := make([]int16, framePCM)
 
@@ -300,13 +284,11 @@ func (p *PlaybackSinkProcessor) mixAndEncode(botPCM []int16) []byte {
 		mixed[i] = int16(sample)
 	}
 
-	opusData := make([]byte, 1000)
-	n, err := p.opusEncoder.Encode(mixed, opusData)
-	if err != nil {
-		p.taskCtx.Logger.Println("playback opus encode error:", err)
-		return nil
+	pcmBytes := make([]byte, len(mixed)*2)
+	for i, sample := range mixed {
+		binary.LittleEndian.PutUint16(pcmBytes[i*2:], uint16(sample))
 	}
-	return opusData[:n]
+	return pcmBytes
 }
 
 func (p *PlaybackSinkProcessor) decodeBotFrame(opusData []byte) []int16 {
@@ -325,19 +307,10 @@ func (p *PlaybackSinkProcessor) writeSilenceTail() {
 	}
 	p.taskCtx.Logger.Printf("Writing %s playback silence before EndFrame\n", playbackEndTail)
 
-	silence := make([]int16, framePCM)
+	silence := make([]byte, framePCM*2)
 	frames := int(playbackEndTail / (20 * time.Millisecond))
 	for i := 0; i < frames; i++ {
-		opusData := make([]byte, 1000)
-		n, err := p.opusEncoder.Encode(silence, opusData)
-		if err != nil {
-			p.taskCtx.Logger.Println("playback silence encode error:", err)
-			return
-		}
-		p.botTrack.WriteSample(media.Sample{
-			Data:     opusData[:n],
-			Duration: 20 * time.Millisecond,
-		}, nil)
+		_ = p.taskCtx.Room.WriteAudioPCM(silence)
 		time.Sleep(20 * time.Millisecond)
 	}
 }

@@ -51,7 +51,10 @@ type connectRequest struct {
 
 func handleConnect(w http.ResponseWriter, r *http.Request) {
 	req := readConnectRequest(r)
-	task, err := buildConnectTask(r.Context(), req)
+	// A call outlives the HTTP request that created it. If the task is
+	// derived from r.Context(), the pipeline is cancelled as soon as
+	// /connect returns to Disha's Create Room request.
+	task, err := buildConnectTask(context.Background(), req)
 	if err != nil {
 		log.Printf("failed to create task: %v", err)
 		status := http.StatusInternalServerError

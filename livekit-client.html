@@ -144,6 +144,17 @@
     #remote-audio {
       display: none;
     }
+    @media (max-width: 760px) {
+      header {
+        align-items: flex-start;
+        flex-direction: column;
+        gap: 0.75rem;
+      }
+      .controls {
+        width: 100%;
+        flex-wrap: wrap;
+      }
+    }
   </style>
 </head>
 <body x-data="app()">
@@ -196,7 +207,8 @@
   </div>
 
   <footer>
-    <span x-show="connected" x-text="'Room: ' + roomName"></span>
+    <span x-show="lastError" x-text="lastError"></span>
+    <span x-show="!lastError && connected" x-text="'Room: ' + roomName + (conversationId ? ' | Conversation: ' + conversationId : '')"></span>
   </footer>
 
   <div id="remote-audio"></div>
@@ -209,6 +221,8 @@
     let _room = null;
     const _decoder = new TextDecoder();
     const _encoder = new TextEncoder();
+    const CREATE_ROOM_URL = "http://localhost:8000/bot/create_room";
+    const DISHA_TEST_USER_ID = "d37d59b9-9727-40ea-9de9-8bba729af6e9";
 
     function app() {
       return {
@@ -216,6 +230,8 @@
         connecting: false,
         micEnabled: true,
         roomName: "",
+        conversationId: "",
+        lastError: "",
         turns: [],
         liveText: "",
         assistantLiveText: "",
@@ -237,6 +253,7 @@
 
         async connect() {
           this.connecting = true;
+          this.lastError = "";
           this.turns = [];
           try {
             // Lazy-load LiveKit SDK on first connect
@@ -246,10 +263,26 @@
               RoomEvent = lk.RoomEvent;
             }
 
-            const res = await fetch("/connect");
-            if (!res.ok) throw new Error(res.statusText);
-            const { server_url, token, room_name } = await res.json();
-            this.roomName = room_name;
+            const res = await fetch(CREATE_ROOM_URL, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                user_id: DISHA_TEST_USER_ID,
+                resume_enabled: true,
+              }),
+            });
+            if (!res.ok) {
+              const errorText = await res.text();
+              throw new Error(errorText || res.statusText);
+            }
+            const roomData = await res.json();
+            const serverUrl = roomData.server_url || roomData.room_url;
+            const token = roomData.token;
+            if (!serverUrl || !token) {
+              throw new Error("Create Room did not return LiveKit connection details");
+            }
+            this.roomName = roomData.room_name || "";
+            this.conversationId = roomData.conversation_id || "";
 
             // Connect LiveKit (outside Alpine proxy)
             _room = new Room();
@@ -279,13 +312,18 @@
               }
             });
 
-            await _room.connect(server_url, token);
+            await _room.connect(serverUrl, token);
             await _room.localParticipant.setMicrophoneEnabled(true);
             this.connected = true;
             this.connecting = false;
           } catch (err) {
             console.error("Connect error:", err);
+            this.lastError = err.message || "Connect failed";
             this.connecting = false;
+            if (_room) {
+              _room.disconnect();
+              _room = null;
+            }
           }
         },
 
@@ -316,6 +354,7 @@
           }
           this.connected = false;
           this.roomName = "";
+          this.conversationId = "";
         },
 
         toggleMic() {

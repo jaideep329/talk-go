@@ -5,6 +5,7 @@ go 1.24.4
 require (
 	github.com/alicebob/miniredis/v2 v2.38.0
 	github.com/go-logr/stdr v1.2.2
+	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674
 	github.com/hajimehoshi/go-mp3 v0.3.4
 	github.com/hraban/opus v0.0.0-20251117090126-c76ea7e21bf3
@@ -31,7 +32,6 @@ require (
 	github.com/go-jose/go-jose/v3 v3.0.4 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/google/cel-go v0.26.1 // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/jxskiss/base62 v1.1.0 // indirect
 	github.com/klauspost/compress v1.18.3 // indirect
 	github.com/klauspost/cpuid/v2 v2.3.0 // indirect

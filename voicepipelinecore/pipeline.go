@@ -78,17 +78,16 @@ func (p *Pipeline) Stop() {
 // the caller) sees the EndFrame in pipeline order. Wired by
 // NewTask to PipelineTask.End.
 type TaskContext struct {
-	Ctx           context.Context
-	Logger        *log.Logger
-	Room          *lksdk.Room
-	UIEvents      *UIEventSender
-	Metrics       func(MetricsFrame)
-	EndTask       func(reason EndReason)
-	wg            *sync.WaitGroup
-	callStats     *callStatsTracker
-	callEvents    *callEventDispatcher
-	turnObservers *conversationTurnObserverSet
-	metrics       *perTurnMetrics
+	Ctx        context.Context
+	Logger     *log.Logger
+	Room       *lksdk.Room
+	UIEvents   *UIEventSender
+	Metrics    func(MetricsFrame)
+	EndTask    func(reason EndReason)
+	wg         *sync.WaitGroup
+	callStats  *callStatsTracker
+	callEvents *callEventDispatcher
+	metrics    *perTurnMetrics
 }
 
 // TaskOptions configures one voice session.
@@ -110,9 +109,6 @@ type TaskOptions struct {
 
 	// CallEvents contains one-shot call timeline hooks.
 	CallEvents CallEvents
-
-	// ConversationTurnObservers receive committed user/assistant turns.
-	ConversationTurnObservers []ConversationTurnObserver
 
 	// OnCleanup runs after all processor goroutines have exited. Use
 	// this to remove the task from binary-level registries.
@@ -191,13 +187,16 @@ func NewTask(parentCtx context.Context, opts TaskOptions) (*PipelineTask, error)
 		callStats: callStats,
 		metrics:   turnMetrics,
 	}
-	taskCtx.callEvents = newCallEventDispatcher(logger, &task.wg, opts.CallEvents)
+	taskCtx.callEvents = newCallEventDispatcher(logger, opts.CallEvents)
 	task.TaskCtx = taskCtx
 
 	pipelineSource := NewPipelineSourceProcessor(taskCtx)
 	audioSource := NewAudioSourceProcessor(taskCtx)
 	room, err := JoinRoom(roomName, taskCtx, audioSource)
 	if err != nil {
+		if taskCtx.callEvents != nil {
+			taskCtx.callEvents.stopAndDrain()
+		}
 		cancel()
 		return nil, err
 	}
@@ -206,7 +205,6 @@ func NewTask(parentCtx context.Context, opts TaskOptions) (*PipelineTask, error)
 	// Any events emitted before this point (none today, but
 	// defensive) silently no-op.
 	uiEvents.SetRoom(taskCtx.Room)
-	taskCtx.turnObservers = newConversationTurnObserverSet(taskCtx, opts.ConversationTurnObservers)
 	task.Source = pipelineSource
 
 	sttProcessor := NewSTTProcessor(taskCtx)
@@ -320,8 +318,8 @@ func (t *PipelineTask) runCleanup(frame EndFrame) {
 		t.TaskCtx.Room.Disconnect()
 	}
 
-	if t.TaskCtx.turnObservers != nil {
-		t.TaskCtx.turnObservers.stopAndDrain()
+	if t.TaskCtx.callEvents != nil {
+		t.TaskCtx.callEvents.stopAndDrain()
 	}
 
 	// Bounded wait for stragglers — 10s gives TTS's pending-end deferral

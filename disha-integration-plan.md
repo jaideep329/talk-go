@@ -13,9 +13,11 @@ Do not commit phase work unless Jaideep explicitly asks. Current exception: Phas
 ## Implementation status
 
 - **Phase 0 is implemented.** The reusable core is now `voicepipelinecore/`, root `main.go` only owns the demo HTTP wrapper/session map, UI events use LiveKit data packets, and exported API entry points are `voicepipelinecore.NewTask`, `PipelineTask.Start`, `PipelineTask.End`, `JoinRoom`, and `GenerateToken`.
-- **Phase 1 + 1.5 are implemented.** Core now has `TaskOptions.InitialMessages`, `TaskOptions.MaxTalkTime`, typed `EndReason`, `CallStats`, once-only call events, `callStatsTracker`, explicit stop-and-drain `ConversationTurnObserver` workers, and `perTurnMetrics` snapshots. `TaskContext.EndTask` is typed as `func(EndReason)`; there is no legacy string reason mapper.
+- **Phase 1 + 1.5 are implemented.** Core now has `TaskOptions.InitialMessages`, `TaskOptions.MaxTalkTime`, typed `EndReason`, `CallStats`, FIFO `CallEvents` for lifecycle and committed turns, `callStatsTracker`, and `perTurnMetrics` snapshots. `TaskContext.EndTask` is typed as `func(EndReason)`; there is no legacy string reason mapper.
 - **Phase 2 is implemented.** The `disha/` package now has Redis/API payload structs, a narrow Redis client for `conversation_data:{conversation_id}` reads and `conversation_chunks:{user_id}:{conversation_id}` appends, Disha-style Redis timeout retry, explicit `null` `end_reason` JSON support, and tests with miniredis/JSON assertions.
-- **Current boundary choice:** Disha business logic still does not live in `voicepipelinecore`. The remaining work should add Disha-specific HTTP client, prompt/session assembly, turn persistence observer, and `/connect` routing in the `disha/` package/root binary boundary.
+- **Phase 3 is implemented.** The `disha/` package now has an HTTP API client for `PATCH /bot/update_conversation`, `POST /bot/run_post_call_operations`, and `POST /common/enqueue_job`. It mirrors `VoiceBotAPIService` auth behavior by sending no Authorization header.
+- **Phase 4 is implemented.** The `disha/` package now has a bot-type-agnostic `CallOperations` interface, `SalesCallOperations`, generic `BuildOptions`/`BuildSession` wrappers, and sales-call-specific setup split across `sales_call.go`, `sales_call_startup.go`, `sales_call_events.go`, `sales_call_operations.go`, and `sales_call_end.go`. `BuildSalesCallOptions` is the testable boundary: it loads Redis state, filters prior chunks, seeds `hello?`, applies remaining sales talk time, wires call events, persists committed turns through the same callback path, and maps unsupported Disha end reasons to explicit JSON `null`.
+- **Current boundary choice:** Disha business logic still does not live in `voicepipelinecore`. The remaining work should add `/connect` routing in the root binary boundary.
 
 ---
 
@@ -32,7 +34,7 @@ What we add to `talk-go`:
 
 **Crucially**, the user wants all of this expressed as a clean library/integration split:
 
-> The pipeline must remain free of business logic. All Disha-specific code (Redis, HTTP, conversation IDs, prompts, end-reason policies) lives in a separate package and hooks into the core via callbacks and turn observers. Mirror Pipecat's pattern where `sales_call.py` wires event handlers onto core processors without modifying the core.
+> The pipeline must remain free of business logic. All Disha-specific code (Redis, HTTP, conversation IDs, prompts, end-reason policies) lives in a separate package and hooks into the core via callbacks. Mirror Pipecat's pattern where `sales_call.py` wires event handlers onto core processors without modifying the core.
 
 If you find yourself writing `import "talk-go/disha"` inside the core package, stop and add a callback instead.
 
@@ -75,7 +77,7 @@ user_idle_processor.go       Idle prompt injection
 - `Frame` interface (`frame.go:62-69`): `ID() int64; Name() string; FrameType() FrameType; IsSystem() bool; IsInterruptible() bool`. All concrete frames embed `FrameBase{Meta FrameMeta}` and have `NewXxxFrame(...)` constructors. Tests still allow struct literals (zero meta).
 - `Processor` interface (`processor.go:33`): `Name; Prev; Next; Link; SetPrev; QueueFrame; ProcessFrame; PushFrame; Broadcast; Start; Stop`.
 - `BaseProcessor` (`processor.go:92`): inputSysCh + inputDataCh + procCh + per-processor ctx + interrupt cancel-and-recreate. Every processor embeds `*BaseProcessor`.
-- `TaskContext` was originally `Ctx, Logger, Room, UIEvents, Metrics func(MetricsFrame), EndTask func(reason string), wg *sync.WaitGroup`. It is now in `voicepipelinecore/pipeline.go` with typed `EndTask func(EndReason)` and unexported call-events/call-stats/turn-observer/turn-metrics helpers.
+- `TaskContext` was originally `Ctx, Logger, Room, UIEvents, Metrics func(MetricsFrame), EndTask func(reason string), wg *sync.WaitGroup`. It is now in `voicepipelinecore/pipeline.go` with typed `EndTask func(EndReason)` and unexported call-events/call-stats/turn-metrics helpers.
 - `PipelineTask` (`pipeline.go:64`): owns `TaskCtx, Cancel, Source *PipelineSourceProcessor, Pipeline *Pipeline, RoomName, wg sync.WaitGroup, endRequested, cleanupStarted, cleanupOnce`. `End(reason)` queues an EndFrame at the source. `completeEnd(frame)` runs the cleanup once when the sink sees EndFrame.
 - The global `sessions` map now lives in root `main.go`; `createSession` was replaced by `voicepipelinecore.NewTask`.
 
@@ -178,7 +180,7 @@ Request body:
 
 Notes:
 - Existing Disha `EnqueueJob` does not accept `tracking_type`; `SQSWorkerJobManager.queue_job` defaults to FULL tracking.
-- In non-prod Disha, `queue_job` may execute the function inline instead of enqueueing. Keep the Go call non-fatal on timeout/failure, but do not fire it before turn observer Redis writes have drained.
+- In non-prod Disha, `queue_job` may execute the function inline instead of enqueueing. Keep the Go call non-fatal on timeout/failure, but do not fire it before committed-turn Redis writes have drained.
 
 #### Disha API auth
 Replicate `bots/services/voice_bot_api_service.py`: it does not currently send an Authorization header. Therefore the Go Disha API client should not send one by default. If an auth token is later added, make it optional and send no header when unset.
@@ -270,7 +272,7 @@ From `bots/sales_call/sales_call.py:413-487`:
 2. `POST /bot/run_post_call_operations` (HTTP, 10s timeout).
 3. (Skipped — we don't use Daily transport, so no Daily metrics queue.)
 4. Pipeline shutdown (`task.cancel()` in Python; `Pipeline.Stop()` + `wg.Wait` in Go — already implemented).
-5. After pipeline returns and turn observer Redis writes have drained, enqueue the chunk-sync job via `POST /common/enqueue_job`.
+5. After pipeline returns and committed-turn Redis writes have drained, enqueue the chunk-sync job via `POST /common/enqueue_job`.
 
 If you flip the order, you can race Redis-LIST deletion against in-flight chunk writes.
 
@@ -331,7 +333,7 @@ talk-go/
 │   ├── processor.go
 │   ├── pipeline.go                  # just the Pipeline struct (chain + Start/Stop)
 │   ├── task.go                      # NEW: TaskContext, PipelineTask, TaskOptions, NewTask
-│   ├── conversation_turn_observer.go                  # NEW: ConversationTurnObserver interface + dispatch worker
+│   ├── call_events.go               # CallEvents FIFO dispatcher + lifecycle/turn callbacks
 │   ├── pipeline_edges.go
 │   ├── livekit_room.go              # joinRoom + GenerateToken (capitalized)
 │   ├── ui_events.go
@@ -339,7 +341,7 @@ talk-go/
 │   ├── audio_source_processor.go
 │   ├── stt_processor.go
 │   ├── user_idle_processor.go
-│   ├── context_aggregator.go        # accepts initialMessages + dispatches turn observers
+│   ├── context_aggregator.go        # accepts initialMessages + fires committed-turn call events
 │   ├── talktime_monitoring_processor.go
 │   ├── llm_processor.go
 │   ├── tts_processor.go
@@ -528,29 +530,25 @@ type TaskOptions struct {
     // must mean "end immediately", not "use the default".
     MaxTalkTime *time.Duration
 
-    // CallEvents contains one-shot call timeline hooks.
+    // CallEvents contains call timeline and committed-turn hooks.
     CallEvents CallEvents
 
     // OnCleanup runs after OnCallEnded.
     // Use this to remove the task from binary-level registries.
     OnCleanup func()
-
-    // ConversationTurnObservers receive per-turn data. Each turn observer is dispatched on
-    // its own goroutine with a FIFO queue (capacity 256). The
-    // pipeline never blocks on turn observer work, but per-turn observer call
-    // ordering is preserved.
-    ConversationTurnObservers []ConversationTurnObserver
 }
 
-// CallEvents are nil-safe one-shot call timeline hooks. The first five
-// run in goroutines tracked by the task WaitGroup; OnCallEnded runs
-// synchronously during cleanup after turn observer drain and wg.Wait.
+// CallEvents are nil-safe call timeline hooks. The first five are one-shot.
+// Committed-turn events can fire many times. OnCallEnded runs synchronously
+// during cleanup after the call-event dispatcher drain and wg.Wait.
 type CallEvents struct {
     OnBotJoined       func(at time.Time)                    // after LiveKit Connect succeeds
     OnUserJoined      func(at time.Time)                    // first non-bot LiveKit participant connects
     OnUserFirstSpeech func(at time.Time)                    // first finalized user transcript text
     OnBotFirstSpeech  func(at time.Time)                    // first bot audio frame written to wire
     OnFirstUserAudio  func(at time.Time)                    // first non-silence audio frame received
+    OnUserTurnCommitted func(text string, at time.Time)      // committed user turn
+    OnAssistantTurnCommitted func(text string, at time.Time, metrics TurnMetrics)
     OnCallEnded       func(reason EndReason, stats CallStats) // exactly once, after pipeline drain
 }
 
@@ -579,125 +577,18 @@ type CallStats struct {
 }
 ```
 
-### 5.2 `voicepipelinecore.ConversationTurnObserver`
+### 5.2 `voicepipelinecore.CallEvents` dispatcher
 
-In `voicepipelinecore/conversation_turn_observer.go`:
+Committed turns use the same callback system as lifecycle events. There is no separate turn-listener primitive.
 
-```go
-package voicepipelinecore
+`voicepipelinecore/call_events.go` owns one FIFO dispatcher per task:
+- Lifecycle callbacks (`OnBotJoined`, `OnUserJoined`, `OnFirstUserAudio`, `OnUserFirstSpeech`, `OnBotFirstSpeech`) are once-only.
+- Committed-turn callbacks (`OnUserTurnCommitted`, `OnAssistantTurnCommitted`) can fire many times.
+- The dispatcher has a bounded queue (`cap=512`), recovers callback panics, and preserves callback ordering.
+- `PipelineTask.runCleanup` calls `taskCtx.callEvents.stopAndDrain()` before `wg.Wait()` and before `OnCallEnded`. This guarantees Redis chunk writes queued before EndFrame complete before the Disha chunk-sync job is enqueued.
+- Callback implementations must use bounded I/O timeouts; Disha committed-turn Redis writes use a 5s timeout.
 
-import (
-    "log"
-    "sync"
-    "time"
-)
-
-// ConversationTurnObserver receives per-turn data. Implementations should be
-// safe to call from a single dedicated goroutine (the core gives
-// each turn observer its own worker).
-type ConversationTurnObserver interface {
-    OnUserTurnCommitted(text string, at time.Time)
-    OnAssistantTurnCommitted(text string, at time.Time, m TurnMetrics)
-}
-
-// TurnMetrics are collected during one assistant turn. STT TTFB is
-// intentionally absent — we don't measure it today.
-type TurnMetrics struct {
-    LLMTTFBMs            float64
-    LLMProcessingMs      float64
-    TTSTextAggregationMs float64
-    TTSTTFBMs            float64
-    E2ELatencyMs         float64
-}
-
-// conversationTurnObserverWorker wraps one ConversationTurnObserver with a FIFO queue + goroutine.
-// Constructed by startConversationTurnObserverWorker. The pipeline submits calls via
-// dispatch; the worker drains them in order. On ctx cancellation, the
-// worker drains pending calls best-effort and exits.
-type conversationTurnObserverWorker struct {
-    obs    ConversationTurnObserver
-    queue  chan func(ConversationTurnObserver)
-    logger *log.Logger
-}
-
-const conversationTurnObserverQueueCap = 256
-
-func startConversationTurnObserverWorker(taskCtx *TaskContext, obs ConversationTurnObserver) *conversationTurnObserverWorker {
-    w := &conversationTurnObserverWorker{
-        obs:    obs,
-        queue:  make(chan func(ConversationTurnObserver), conversationTurnObserverQueueCap),
-        logger: taskCtx.Logger,
-    }
-    taskCtx.wg.Add(1)
-    go func() {
-        defer taskCtx.wg.Done()
-        for {
-            select {
-            case <-taskCtx.Ctx.Done():
-                // Best-effort drain so any commits queued just before
-                // shutdown still reach the turn observer.
-                for {
-                    select {
-                    case fn := <-w.queue:
-                        w.run(fn)
-                    default:
-                        return
-                    }
-                }
-            case fn := <-w.queue:
-                w.run(fn)
-            }
-        }
-    }()
-    return w
-}
-
-func (w *conversationTurnObserverWorker) run(fn func(ConversationTurnObserver)) {
-    defer func() {
-        if r := recover(); r != nil {
-            w.logger.Printf("turn observer panic: %v", r)
-        }
-    }()
-    fn(w.obs)
-}
-
-func (w *conversationTurnObserverWorker) dispatch(fn func(ConversationTurnObserver)) {
-    select {
-    case w.queue <- fn:
-    default:
-        w.logger.Printf("turn observer queue full (cap=%d), dropping callback", conversationTurnObserverQueueCap)
-    }
-}
-
-// conversationTurnObserverSet bundles all turn observers for a task. Hung off TaskContext.
-type conversationTurnObserverSet struct {
-    mu      sync.Mutex
-    workers []*conversationTurnObserverWorker
-}
-
-func (s *conversationTurnObserverSet) emitUserTurnCommitted(text string, at time.Time) {
-    s.mu.Lock(); defer s.mu.Unlock()
-    for _, w := range s.workers {
-        w.dispatch(func(o ConversationTurnObserver) { o.OnUserTurnCommitted(text, at) })
-    }
-}
-
-func (s *conversationTurnObserverSet) emitAssistantTurnCommitted(text string, at time.Time, m TurnMetrics) {
-    s.mu.Lock(); defer s.mu.Unlock()
-    for _, w := range s.workers {
-        w.dispatch(func(o ConversationTurnObserver) { o.OnAssistantTurnCommitted(text, at, m) })
-    }
-}
-```
-
-**Observer shutdown requirement:** do not make turn observer workers exit only on `taskCtx.Ctx.Done()`. `PipelineTask.runCleanup` currently waits on the shared `WaitGroup` before cancelling the task context, so a ctx-only turn observer worker would keep the WaitGroup alive until the 10s timeout.
-
-Implement explicit stop-and-drain:
-- `conversationTurnObserverWorker` owns a FIFO `queue chan func(ConversationTurnObserver)`, a `done chan struct{}`, and a small `closing` flag protected by the `conversationTurnObserverSet` mutex.
-- `dispatch` drops new callbacks after closing starts; before then it is non-blocking with cap 256.
-- `conversationTurnObserverSet.stopAndDrain()` closes every worker queue, and each worker ranges the queue until drained, then closes `done`.
-- `PipelineTask.runCleanup` calls `taskCtx.turnObservers.stopAndDrain()` before `wg.Wait()`. This guarantees Redis chunk writes queued before EndFrame complete before `OnCallEnded` enqueues the Redis-to-DB sync job.
-- Observer callback implementations must use bounded I/O timeouts (the Disha Redis turn observer uses 5s per RPUSH) so shutdown cannot hang indefinitely.
+This is intentionally closer to the mental model of Pipecat event handlers than to a generic frame tap. Core emits semantic events; business packages decide what those events mean.
 
 ### 5.3 `voicepipelinecore.PipelineTask` (revised constructor)
 
@@ -724,8 +615,8 @@ Implemented shape:
 - Existing tests were updated for typed `EndReason`.
 - Added coverage:
   - `pipeline_task_test.go`: minimal cleanup path calls `OnCallEnded` with typed reason + `CallStats`.
-  - `conversation_turn_observer_test.go`: stop-and-drain handles queued events and recovers callback panics.
-  - `context_aggregator_test.go`: initial-message seeding, explicit empty initial context, user-first-speech call events, and committed-turn observer emission.
+  - `call_events_test.go`: stop-and-drain handles queued events and recovers callback panics.
+  - `context_aggregator_test.go`: initial-message seeding, explicit empty initial context, user-first-speech call events, and committed-turn call events.
   - `metrics_turn_test.go`, `call_events_test.go`, `call_stats_tracker_test.go`, `audio_source_processor_test.go`: focused coverage for the new helpers.
 
 ---
@@ -773,7 +664,7 @@ The processors fire these:
 
 ### 6.2 Per-turn metrics aggregator
 
-Today `MetricsFrame` is intercepted by `BaseProcessor.PushFrame` and only consumed by the UI handler. We need to also collect them per-turn so the assistant commit can carry them to turn observers.
+Today `MetricsFrame` is intercepted by `BaseProcessor.PushFrame` and consumed by the UI handler. The core also collects them per turn so the assistant commit can carry them to `CallEvents.OnAssistantTurnCommitted`.
 
 Add to `PipelineTask`:
 
@@ -816,8 +707,8 @@ spoken := a.spokenSoFar()
 if spoken != "" {
     // ... existing logging + a.messages append + UIEvents.Send ...
     metricsSnapshot := a.taskCtx.metrics.snapshotAndReset()
-    if a.taskCtx.turnObservers != nil {
-        a.taskCtx.turnObservers.emitAssistantTurnCommitted(spoken, time.Now(), metricsSnapshot)
+    if a.taskCtx.callEvents != nil {
+        a.taskCtx.callEvents.fireAssistantTurnCommitted(spoken, time.Now(), metricsSnapshot)
     }
 }
 ```
@@ -825,12 +716,12 @@ if spoken != "" {
 In `ContextAggregator.addUserMessage(text string)`:
 ```go
 // ... existing concat or append logic ...
-if a.taskCtx.turnObservers != nil {
-    a.taskCtx.turnObservers.emitUserTurnCommitted(text, time.Now())
+if a.taskCtx.callEvents != nil {
+    a.taskCtx.callEvents.fireUserTurnCommitted(text, time.Now())
 }
 ```
 
-**Wiring nuance**: TaskContext does not currently have a back-pointer to the task (and probably shouldn't). Simpler approach: have `task.metrics` and `task.turnObservers` accessible via `TaskContext` indirection. Add `taskCtx.metrics *perTurnMetrics` and `taskCtx.turnObservers *conversationTurnObserverSet` fields populated by `NewTask`. The context aggregator reads them directly.
+**Wiring nuance**: TaskContext does not currently have a back-pointer to the task (and probably shouldn't). Simpler approach: have `task.metrics` and `task.callEvents` accessible via `TaskContext` indirection. Add `taskCtx.metrics *perTurnMetrics` and `taskCtx.callEvents *callEventDispatcher` fields populated by `NewTask`. The context aggregator reads them directly.
 
 ### 6.3 EndReason translation table
 
@@ -848,7 +739,7 @@ if t.onCallEnded != nil {
         FirstUserAudioFrameAt: t.callStats.FirstUserAudioFrameAt(),
         EndedAt:               endedAt,
     }
-    // Run synchronously here after turn observer drain and wg.Wait.
+    // Run synchronously here after call-event drain and wg.Wait.
     t.onCallEnded(t.endReason, stats)
 }
 if t.OnCleanup != nil {
@@ -925,8 +816,8 @@ func (p *callStatsTracker) FirstUserAudioFrameAt() time.Time {
 Unit tests:
 - Test call event helper once-only dispatch directly; test ContextAggregator fires `OnUserFirstSpeech`; test AudioSource marks first audible user audio.
 - Send fake `MetricsFrame`s through, verify the next assistant commit's `TurnMetrics` contains the values.
-- Verify turn observer queue handles burst (200 commits sent rapidly) without dropping.
-- Verify turn observer panic is caught and logged, doesn't crash the task.
+- Verify call-event queue handles burst (200 commits sent rapidly) without dropping.
+- Verify call-event callback panic is caught and logged, doesn't crash the task.
 
 ---
 
@@ -1137,15 +1028,13 @@ import (
 
 type APIClient struct {
     baseURL    string
-    authToken  string
     httpClient *http.Client
     logger     *log.Logger
 }
 
-func NewAPIClient(baseURL, authToken string, timeout time.Duration, logger *log.Logger) *APIClient {
+func NewAPIClient(baseURL string, timeout time.Duration, logger *log.Logger) *APIClient {
     return &APIClient{
         baseURL:    baseURL,
-        authToken:  authToken,
         httpClient: &http.Client{Timeout: timeout},
         logger:     logger,
     }
@@ -1171,11 +1060,6 @@ func (c *APIClient) send(ctx context.Context, method, path string, body any) err
     if err != nil { return fmt.Errorf("new request: %w", err) }
     httpReq.Header.Set("Content-Type", "application/json")
     // Match Disha's Python VoiceBotAPIService today: no auth header.
-    // If Disha adds API auth later, set authToken and send the header
-    // only when it is non-empty.
-    if c.authToken != "" {
-        httpReq.Header.Set("Authorization", "Bearer "+c.authToken)
-    }
 
     resp, err := c.httpClient.Do(httpReq)
     if err != nil { return fmt.Errorf("disha API %s %s: %w", method, path, err) }
@@ -1191,273 +1075,73 @@ func (c *APIClient) send(ctx context.Context, method, path string, body any) err
 
 Env vars for `main.go`:
 - `DISHA_API_URL` (e.g. `http://localhost:8000`)
-- `DISHA_API_AUTH_TOKEN` optional; leave unset to match current `VoiceBotAPIService`
 
 ### 8.2 Tests
 
 Use `httptest.NewServer` to assert on the captured request bodies for each endpoint. Verify:
 - Method, path, and Content-Type.
-- Authorization header should be absent when `authToken == ""`.
+- Authorization header should be absent.
 - Body is the expected JSON shape.
 - Non-2xx response returns error.
 - Context cancellation respected.
 
 ---
 
-## 9. Phase 4 — Disha turn observer + session builder
+## 9. Phase 4 — Disha call operations + session builder
 
-### 9.1 `disha/conversation_turn_observer.go`
+### 9.1 `disha.CallOperations`
+
+`disha/call_operations.go` defines the bot-type-agnostic operation surface for Disha integrations:
 
 ```go
-package disha
-
-import (
-    "context"
-    "log"
-    "time"
-
-    "github.com/google/uuid"
-    "github.com/jaideep329/talk-go/voicepipelinecore"
-)
-
-// ChunkPersistenceObserver implements voicepipelinecore.ConversationTurnObserver
-// and RPUSHes every committed turn to Redis.
-type ChunkPersistenceObserver struct {
-    redis          RedisClient
-    userID         string
-    conversationID string
-    botType        string
-    logger         *log.Logger
-}
-
-func NewChunkPersistenceObserver(redis RedisClient, userID, conversationID, botType string, logger *log.Logger) *ChunkPersistenceObserver {
-    return &ChunkPersistenceObserver{
-        redis: redis, userID: userID, conversationID: conversationID,
-        botType: botType, logger: logger,
-    }
-}
-
-func (o *ChunkPersistenceObserver) OnUserTurnCommitted(text string, at time.Time) {
-    o.append(text, "user", at, voicepipelinecore.TurnMetrics{})
-}
-
-func (o *ChunkPersistenceObserver) OnAssistantTurnCommitted(text string, at time.Time, m voicepipelinecore.TurnMetrics) {
-    o.append(text, "assistant", at, m)
-}
-
-func (o *ChunkPersistenceObserver) append(text, role string, at time.Time, m voicepipelinecore.TurnMetrics) {
-    chunk := ConversationChunk{
-        ID:                uuid.NewString(),
-        Text:              text,
-        Role:              role,
-        BotType:           o.botType,
-        ConversationID:    o.conversationID,
-        UserID:            o.userID,
-        Created:           at.Format(time.RFC3339Nano),
-        IsDebugLog:        false,
-        LLMTtfbMs:         optionalMetric(m.LLMTTFBMs),
-        TTSTtfbMs:         optionalMetric(m.TTSTTFBMs),
-        TextAggregationMs: optionalMetric(m.TTSTextAggregationMs),
-        V2VLatencyMs:      optionalMetric(m.E2ELatencyMs),
-        // All other fields are nil by default — matches Disha schema.
-    }
-    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-    defer cancel()
-    if err := o.redis.AppendChunk(ctx, o.userID, o.conversationID, chunk); err != nil {
-        o.logger.Printf("chunk persist failed conv=%s role=%s: %v", o.conversationID, role, err)
-    }
-}
-
-func optionalMetric(v float64) *float64 {
-    if v == 0 {
-        return nil
-    }
-    return &v
-}
-
-func optionalTime(t time.Time) *time.Time {
-    if t.IsZero() {
-        return nil
-    }
-    return &t
+type CallOperations interface {
+    OnBotJoined(at time.Time)
+    OnUserJoined(at time.Time)
+    OnUserFirstSpeech(at time.Time)
+    OnBotFirstSpeech(at time.Time)
+    OnFirstUserAudio(at time.Time)
+    OnUserTurnCommitted(text string, at time.Time)
+    OnAssistantTurnCommitted(text string, at time.Time, metrics voicepipelinecore.TurnMetrics)
+    OnCallEnded(reason voicepipelinecore.EndReason, stats voicepipelinecore.CallStats)
 }
 ```
 
-Note: the core dispatches `OnUserTurnCommitted`/`OnAssistantTurnCommitted` from a dedicated per-turn observer goroutine that's already non-blocking with respect to the pipeline. The Redis call here is synchronous **within that turn observer goroutine**, which is correct: we want FIFO ordering of chunks in Redis, and the turn observer worker provides that ordering. If a single RPUSH stalls for 5 seconds, only this turn observer's queue backs up — not the pipeline.
+`CallEventsForOperations` adapts this interface to `voicepipelinecore.CallEvents`. This keeps the core primitive simple and gives future Disha bot types one interface to implement for lifecycle updates, committed-turn persistence, and end-call work.
 
-### 9.2 `disha/session.go`
+### 9.2 `disha.SalesCallOperations`
 
-```go
-package disha
+`disha/sales_call_operations.go` implements `CallOperations` for sales calls:
+- `OnBotJoined`, `OnUserJoined`, `OnUserFirstSpeech`, and `OnBotFirstSpeech` call `PATCH /bot/update_conversation`.
+- `OnFirstUserAudio` is a no-op for sales calls today because first-audio timing is sent in the post-call stats payload.
+- `OnUserTurnCommitted` and `OnAssistantTurnCommitted` append Disha `ConversationChunk` JSON to `conversation_chunks:{user_id}:{conversation_id}`. Assistant chunks include per-turn metrics when present.
+- `OnCallEnded` delegates to `sales_call_end.go`, which runs post-call operations and then enqueues `/common/enqueue_job` for Redis-to-Postgres chunk sync.
 
-import (
-    "context"
-    "fmt"
-    "log"
-    "time"
+The Redis append is synchronous inside the call-event dispatcher worker. That is intentional: the dispatcher preserves FIFO order for committed-turn writes while keeping the pipeline itself non-blocking. Each Redis write uses a bounded 5s timeout.
 
-    "github.com/jaideep329/talk-go/voicepipelinecore"
-)
+### 9.3 Sales-call session split
 
-const SalesCallSystemPrompt = `You are an expert health coach named Disha...` // copy from context_aggregator.go:135-138
+The implemented split mirrors the shape of Disha's Python `sales_call.py`, but keeps helper responsibilities out of the main setup file:
 
-// Deps is everything the disha package needs that can't be derived
-// per-session. Created once in main.go and reused.
-type Deps struct {
-    Logger      *log.Logger
-    Redis       RedisClient
-    API         *APIClient
-}
+- `disha/session.go`: generic Disha entrypoints and shared `Deps`; `BuildSession`/`BuildOptions` delegate to the sales-call implementation.
+- `disha/sales_call.go`: the high-level sales-call setup. It calls startup collection, creates `SalesCallOperations`, registers call events, and returns `voicepipelinecore.TaskOptions`; `BuildSalesCallSession` is the thin `voicepipelinecore.NewTask` wrapper.
+- `disha/sales_call_operations.go`: implements the common `CallOperations` interface for sales-call Redis/API side effects.
+- `disha/sales_call_startup.go`: collects startup data and dependencies from Redis, validates `sales_call`, builds initial LLM messages, and applies remaining sales talk time.
+- `disha/sales_call_events.go`: registers mid-call callbacks (`bot_joined_at`, `user_joined_at`, `user_first_speech_at`, `bot_first_speech_at`) and delegates call-ended work.
+- `disha/sales_call_end.go`: owns end-call operations: `run_post_call_operations`, Disha end-reason mapping, and `/common/enqueue_job` for chunk sync.
 
-// BuildSession reads conversation_data from Redis, assembles the
-// initial messages + turn observers + call events, and returns a
-// PipelineTask ready to Start. The caller is responsible for adding it
-// to its sessions registry and calling Start.
-func BuildSession(ctx context.Context, conversationID string, deps Deps) (*voicepipelinecore.PipelineTask, error) {
-    data, err := deps.Redis.GetConversationData(ctx, conversationID)
-    if err != nil {
-        return nil, fmt.Errorf("disha: load conversation_data: %w", err)
-    }
-    if data.Conversation.BotType != "sales_call" {
-        return nil, fmt.Errorf("disha: unsupported bot_type %q (only sales_call supported)", data.Conversation.BotType)
-    }
+Keep this split: `sales_call.go` should read as the main pipeline/session setup, while startup data, event callbacks, and end-call operations stay in focused files.
 
-    initialMessages := buildInitialMessages(data)
-    observer := NewChunkPersistenceObserver(deps.Redis, data.Conversation.UserID, conversationID, "sales_call", deps.Logger)
-    maxTalkTime := salesTalkTimeLimit(data.UserProfile.RemainingSalesCallTalktimeSeconds)
-    callLogger := log.New(log.Writer(), fmt.Sprintf("[conv=%s] ", conversationID), log.Flags()|log.Lmicroseconds)
+### 9.4 Tests
 
-    fireUpdate := func(req UpdateConversationRequest) {
-        ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-        defer cancel()
-        if err := deps.API.UpdateConversation(ctx, req); err != nil {
-            callLogger.Printf("update_conversation failed: %v", err)
-        }
-    }
-
-    opts := voicepipelinecore.TaskOptions{
-        Logger:          callLogger,
-        RoomName:        fmt.Sprintf("conv-%s", conversationID),
-        InitialMessages: initialMessages,
-        MaxTalkTime:     &maxTalkTime,
-        ConversationTurnObservers: []voicepipelinecore.ConversationTurnObserver{observer},
-        CallEvents: voicepipelinecore.CallEvents{
-            OnBotJoined: func(at time.Time) {
-                fireUpdate(UpdateConversationRequest{ConversationID: conversationID, BotJoinedAt: &at})
-            },
-            OnUserJoined: func(at time.Time) {
-                fireUpdate(UpdateConversationRequest{ConversationID: conversationID, UserJoinedAt: &at})
-            },
-            OnUserFirstSpeech: func(at time.Time) {
-                fireUpdate(UpdateConversationRequest{ConversationID: conversationID, UserFirstSpeechAt: &at})
-            },
-            OnBotFirstSpeech: func(at time.Time) {
-                fireUpdate(UpdateConversationRequest{ConversationID: conversationID, BotFirstSpeechAt: &at})
-            },
-            OnCallEnded: func(reason voicepipelinecore.EndReason, stats voicepipelinecore.CallStats) {
-                // Step 2: run_post_call_operations.
-                endReasonStr := mapEndReason(reason)
-                req := PostCallOperationsRequest{
-                    ConversationID:                 conversationID,
-                    EndReason:                      endReasonStr,
-                    TotalUserDuration:              int(stats.TotalUserDurationSec),
-                    FirstUserAudioFramesReceivedAt: optionalTime(stats.FirstUserAudioFrameAt),
-                    EndedAt:                        stats.EndedAt,
-                    LogDataS3Key:                   "", // TODO(rtvi): port turn observer + S3 upload
-                    OnboardingCallDone:             false,
-                }
-                ctx1, cancel1 := context.WithTimeout(context.Background(), 10*time.Second)
-                defer cancel1()
-                if err := deps.API.RunPostCallOperations(ctx1, req); err != nil {
-                    callLogger.Printf("run_post_call_operations failed: %v", err)
-                }
-
-                // Step 5: enqueue chunk sync.
-                jobReq := EnqueueJobRequest{
-                    ModuleName: "services.conversation_chunk_manager",
-                    FuncName:   "sync_conversation_chunks_to_db",
-                    Kwargs: map[string]any{
-                        "user_id":         data.Conversation.UserID,
-                        "conversation_id": conversationID,
-                        "bot_type":        "sales_call",
-                    },
-                    SQSQueue: "p1-fast-l1",
-                }
-                ctx2, cancel2 := context.WithTimeout(context.Background(), 10*time.Second)
-                defer cancel2()
-                if err := deps.API.EnqueueJob(ctx2, jobReq); err != nil {
-                    callLogger.Printf("enqueue_job failed: %v", err)
-                }
-            },
-        },
-    }
-    return voicepipelinecore.NewTask(ctx, opts)
-}
-
-// buildInitialMessages constructs the LLM context from the system
-// prompt plus the resumed chunk history (filtered).
-func buildInitialMessages(data *ConversationData) []voicepipelinecore.Message {
-    msgs := []voicepipelinecore.Message{
-        {Role: "system", Content: SalesCallSystemPrompt},
-    }
-    for _, tuple := range data.Chunks {
-        if len(tuple) < 4 { continue }
-        // tuple = [id, role, text, is_debug_log, additional_data]
-        role, _   := tuple[1].(string)
-        text, _   := tuple[2].(string)
-        isDebug, _ := tuple[3].(bool)
-        if isDebug { continue }
-        if role != "user" && role != "assistant" { continue }
-        msgs = append(msgs, voicepipelinecore.Message{Role: role, Content: text})
-    }
-    if len(msgs) == 1 {
-        // Match Python sales_call.py: when no previous messages exist,
-        // seed a user "hello?" so the first LLM context mirrors the
-        // existing sales bot.
-        msgs = append(msgs, voicepipelinecore.Message{Role: "user", Content: "hello?"})
-    }
-    return msgs
-}
-
-func salesTalkTimeLimit(v *float64) time.Duration {
-    const lifetimeTalkTimeSeconds = 600
-    seconds := float64(lifetimeTalkTimeSeconds)
-    if v != nil {
-        seconds = *v
-        if seconds < 0 {
-            seconds = 0
-        }
-    }
-    return time.Duration(seconds * float64(time.Second))
-}
-
-func mapEndReason(r voicepipelinecore.EndReason) *string {
-    var s string
-    switch r {
-    case voicepipelinecore.EndReasonTalkTimeExhausted:
-        s = "talktime_exhausted"
-    case voicepipelinecore.EndReasonClientDisconnect:
-        return nil
-    case voicepipelinecore.EndReasonUserIdle:
-        s = "user_idle"
-    default:
-        return nil
-    }
-    return &s
-}
-```
-
-### 9.3 Tests
-
-Integration test in `disha/session_test.go`:
+Implemented integration test in `disha/session_test.go`:
 - Stand up `miniredis` and `httptest` servers.
 - Seed `conversation_data:test-id` in miniredis with a valid blob.
-- Mock the `talk-go/voicepipelinecore` boundary: you don't need to start a real pipeline. Instead, write a test that calls `BuildSession`, then synthesizes calling the callbacks (`OnBotJoined`, `OnUserTurnCommitted`, `OnCallEnded`) and asserts:
+- Mock the `talk-go/voicepipelinecore` boundary: you don't need to start a real pipeline. The test calls `BuildSalesCallOptions`, then synthesizes calling the callbacks (`OnBotJoined`, `OnUserTurnCommitted`, `OnCallEnded`) and asserts:
   - `httptest` server received `PATCH /bot/update_conversation` with the right body.
   - Redis LIST `conversation_chunks:<uid>:test-id` has the right RPUSHed entries (use miniredis `LRange`).
   - `httptest` server received `POST /bot/run_post_call_operations` and `POST /common/enqueue_job` with the right bodies, in that order.
 
-You can drive callbacks directly via the `TaskOptions` struct returned indirectly — refactor `BuildSession` to return `(opts TaskOptions, err error)` plus a thin wrapper that calls `NewTask`, so the test can grab opts without spinning up a real LiveKit session. (Better: split `BuildSession` into `BuildOptions` + `BuildSession`. `BuildOptions` is testable; `BuildSession` just calls `NewTask(BuildOptions())`.)
+`BuildSalesCallOptions` is testable without spinning up LiveKit; `BuildSalesCallSession` just calls `BuildSalesCallOptions` and then `voicepipelinecore.NewTask`. The generic `BuildOptions`/`BuildSession` wrappers delegate to the sales-call implementation.
 
 ---
 
@@ -1519,7 +1203,7 @@ func main() {
     dishaDeps = disha.Deps{
         Logger: log.Default(),
         Redis:  disha.NewRedisClient(os.Getenv("DISHA_REDIS_URL"), os.Getenv("DISHA_REDIS_PASSWORD"), 0, log.Default()),
-        API:    disha.NewAPIClient(os.Getenv("DISHA_API_URL"), os.Getenv("DISHA_API_AUTH_TOKEN"), 10*time.Second, log.Default()),
+        API:    disha.NewAPIClient(os.Getenv("DISHA_API_URL"), 10*time.Second, log.Default()),
     }
     defer dishaDeps.Redis.Close()
 
@@ -1570,10 +1254,10 @@ Once phases 0–5 are done:
 After each of these phases, stop work, run `go test -race -count=2 ./...`, summarize what changed, and wait for the user before continuing:
 
 - **End of phase 0**: module renamed, package split done, all existing tests pass, browser dev flow still works. *Stop.*
-- **End of phase 1 + 1.5**: TaskOptions + turn observers + call events + per-turn metrics aggregation merged. Tests pass. No behavior change visible. *Stop.*
+- **End of phase 1 + 1.5**: TaskOptions + FIFO call events + committed-turn callbacks + per-turn metrics aggregation merged. Tests pass. No behavior change visible. *Stop.*
 - **End of phase 2**: Disha types + Redis client merged, with tests. *Stop.*
 - **End of phase 3**: Disha HTTP API client merged, with tests. *Stop.*
-- **End of phase 4**: Disha turn observer + BuildSession merged, with tests. *Stop.*
+- **End of phase 4**: Disha call operations + BuildSession merged, with tests. *Stop.*
 - **End of phase 5**: `/connect` accepts conversation_id, end-to-end ready for live test. *Stop.*
 - **End of phase 6**: live test passed (or any failures + fixes documented). *Stop.*
 
@@ -1598,13 +1282,12 @@ prompt injection, etc.) live in their own package (`disha/`, future:
 `onboarding/`, `followup/`) and hook into the core via:
 
   1. `voicepipelinecore.TaskOptions.CallEvents` (`OnBotJoined`,
-     `OnUserFirstSpeech`, `OnCallEnded`, ...) — for call event moments.
-  2. `voicepipelinecore.ConversationTurnObserver` interface (`OnUserTurnCommitted`,
-     `OnAssistantTurnCommitted`) — for per-turn data hand-off. ConversationTurnObservers
-     are dispatched on dedicated goroutines (one queue per turn observer,
-     FIFO-ordered, capacity 256) so the pipeline never blocks on
-     turn observer work.
-  3. `TaskOptions.InitialMessages` — for prompt + prior-context
+     `OnUserFirstSpeech`, `OnUserTurnCommitted`,
+     `OnAssistantTurnCommitted`, `OnCallEnded`, ...) — for lifecycle
+     moments and committed-turn data hand-off. The dispatcher is
+     FIFO-ordered, bounded, panic-safe, and explicitly drained during
+     cleanup.
+  2. `TaskOptions.InitialMessages` — for prompt + prior-context
      injection.
 
 If you find yourself adding `if conversationID != ""` or
@@ -1623,7 +1306,7 @@ Also update the file map and pipeline diagram in AGENTS.md to reflect the new pa
 
 - No Postgres reads or writes from Go anywhere.
 - No fallback to Postgres if Redis is cold — return 502.
-- No RTVI logs port. Send `log_data_s3_key=""` with `// TODO(rtvi): port turn observer + S3 upload`.
+- No RTVI logs port. Send `log_data_s3_key=""` with a TODO for future RTVI/S3 work only if needed.
 - No Langfuse-managed prompt fetch. Hardcoded sales prompt in `disha/session.go` only.
 - No bot types other than `sales_call`.
 - No pod lifecycle / GKE / scheduling. We assume the caller (Disha orchestrator) handles that and just hands us a conversation_id.
@@ -1680,11 +1363,12 @@ When you need to find something:
 After the work is done, ensure these test files exist and pass:
 
 - `voicepipelinecore/*_test.go` — all existing tests should continue passing.
-- `voicepipelinecore/task_test.go` — new, exercises call events, conversation turn observer dispatch, EndReason translation.
+- `voicepipelinecore/pipeline_task_test.go` — exercises call-ended dispatch and typed `EndReason` cleanup.
+- `voicepipelinecore/call_events_test.go` — exercises FIFO call-event dispatch, stop-and-drain, and panic recovery.
 - `voicepipelinecore/call_stats_tracker_test.go` — new, exercises duration tracking.
 - `disha/redis_client_test.go` — new, miniredis-based.
 - `disha/api_client_test.go` — new, httptest-based.
-- `disha/session_test.go` — new, integration test of BuildSession + turn observer + callbacks against miniredis + httptest.
+- `disha/session_test.go` — integration test of BuildSalesCallOptions + call operations against miniredis + httptest.
 
 Target: `go test -race -count=3 ./...` clean.
 
@@ -1694,7 +1378,7 @@ Target: `go test -race -count=3 ./...` clean.
 
 You are done when:
 1. `voicepipelinecore` package exists, contains all the core pipeline code, has zero imports of `disha/`, `redis/`, or any HTTP client.
-2. `disha` package exists, contains Redis client, HTTP client, turn observer, session builder.
+2. `disha` package exists, contains Redis client, HTTP client, call operations, and session builder.
 3. `main.go` wires both packages, owns the sessions map, handles the dev fallback path.
 4. AGENTS.md updated with the core/integration rule.
 5. All tests pass under `-race -count=3`.

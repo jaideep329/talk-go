@@ -50,9 +50,10 @@ func TestAudioSource_MarksFirstAudibleUserAudioOnce(t *testing.T) {
 	fix := newTestFixture(t)
 	fix.TaskCtx.callStats = newCallStatsTracker()
 	calls := make(chan time.Time, 2)
-	fix.TaskCtx.callEvents = newCallEventDispatcher(fix.Logger, fix.WG, CallEvents{
+	fix.TaskCtx.callEvents = newCallEventDispatcher(fix.Logger, CallEvents{
 		OnFirstUserAudio: func(at time.Time) { calls <- at },
 	})
+	defer fix.TaskCtx.callEvents.stopAndDrain()
 	a := NewAudioSourceProcessor(fix.TaskCtx)
 
 	a.maybeMarkFirstUserAudio([]int16{0, 999, -1000})
@@ -64,9 +65,7 @@ func TestAudioSource_MarksFirstAudibleUserAudioOnce(t *testing.T) {
 
 	a.maybeMarkFirstUserAudio([]int16{0, 1001})
 	a.maybeMarkFirstUserAudio([]int16{2000})
-	if err := waitForWG(fix.WG, 2*time.Second); err != nil {
-		t.Fatalf("waitForWG: %v", err)
-	}
+	fix.TaskCtx.callEvents.stopAndDrain()
 
 	select {
 	case <-calls:

@@ -3,21 +3,20 @@ package voicepipelinecore
 import (
 	"io"
 	"log"
-	"sync"
 	"testing"
 	"time"
 )
 
-func TestLifecycleCallbacksAreOnceAndTracked(t *testing.T) {
-	var wg sync.WaitGroup
+func TestLifecycleCallbacksAreOnceAndDrained(t *testing.T) {
 	logger := log.New(io.Discard, "", 0)
 	calls := make(chan string, 4)
-	l := newCallEventDispatcher(logger, &wg, CallEvents{
+	l := newCallEventDispatcher(logger, CallEvents{
 		OnBotJoined:       func(time.Time) { calls <- "bot_joined" },
 		OnUserJoined:      func(time.Time) { calls <- "user_joined" },
 		OnBotFirstSpeech:  func(time.Time) { calls <- "bot_first_speech" },
 		OnUserFirstSpeech: func(time.Time) { calls <- "user_first_speech" },
 	})
+	defer l.stopAndDrain()
 
 	l.fireBotJoined(time.Now())
 	l.fireBotJoined(time.Now())
@@ -28,9 +27,7 @@ func TestLifecycleCallbacksAreOnceAndTracked(t *testing.T) {
 	l.fireUserFirstSpeech(time.Now())
 	l.fireUserFirstSpeech(time.Now())
 
-	if err := waitForWG(&wg, 2*time.Second); err != nil {
-		t.Fatalf("waitForWG: %v", err)
-	}
+	l.stopAndDrain()
 	close(calls)
 	got := map[string]int{}
 	for name := range calls {
@@ -40,5 +37,56 @@ func TestLifecycleCallbacksAreOnceAndTracked(t *testing.T) {
 		if got[name] != 1 {
 			t.Fatalf("%s callback count = %d, want 1 (all counts: %+v)", name, got[name], got)
 		}
+	}
+}
+
+func TestCallEventsDispatchCommittedTurnsInOrder(t *testing.T) {
+	logger := log.New(io.Discard, "", 0)
+	var got []string
+	l := newCallEventDispatcher(logger, CallEvents{
+		OnUserTurnCommitted: func(text string, at time.Time) {
+			got = append(got, "user:"+text)
+		},
+		OnAssistantTurnCommitted: func(text string, at time.Time, metrics TurnMetrics) {
+			got = append(got, "assistant:"+text)
+			if metrics.LLMTTFBMs != 12 {
+				t.Fatalf("LLMTTFBMs = %.1f, want 12", metrics.LLMTTFBMs)
+			}
+		},
+	})
+
+	l.fireUserTurnCommitted("one", time.Now())
+	l.fireAssistantTurnCommitted("two", time.Now(), TurnMetrics{LLMTTFBMs: 12})
+	l.stopAndDrain()
+
+	want := []string{"user:one", "assistant:two"}
+	if len(got) != len(want) {
+		t.Fatalf("events = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("events = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestCallEventsRecoversAndContinuesAfterCallbackPanic(t *testing.T) {
+	logger := log.New(io.Discard, "", 0)
+	var count int
+	l := newCallEventDispatcher(logger, CallEvents{
+		OnUserTurnCommitted: func(text string, at time.Time) {
+			count++
+			if count == 1 {
+				panic("first callback panic")
+			}
+		},
+	})
+
+	l.fireUserTurnCommitted("first", time.Now())
+	l.fireUserTurnCommitted("second", time.Now())
+	l.stopAndDrain()
+
+	if count != 2 {
+		t.Fatalf("count = %d, want 2", count)
 	}
 }

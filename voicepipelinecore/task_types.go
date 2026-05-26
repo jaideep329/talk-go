@@ -35,15 +35,18 @@ type CallStats struct {
 	EndedAt               time.Time
 }
 
-// CallEvents are one-shot call timeline events exposed to integrations.
-// They describe transport/audio/session milestones, not conversation turns.
+// CallEvents are integration callbacks for call lifecycle and committed
+// conversation turns. The first five are one-shot timeline events;
+// committed-turn events can fire many times.
 type CallEvents struct {
-	OnBotJoined       func(time.Time)
-	OnUserJoined      func(time.Time)
-	OnUserFirstSpeech func(time.Time)
-	OnBotFirstSpeech  func(time.Time)
-	OnFirstUserAudio  func(time.Time)
-	OnCallEnded       func(reason EndReason, stats CallStats)
+	OnBotJoined              func(time.Time)
+	OnUserJoined             func(time.Time)
+	OnUserFirstSpeech        func(time.Time)
+	OnBotFirstSpeech         func(time.Time)
+	OnFirstUserAudio         func(time.Time)
+	OnUserTurnCommitted      func(text string, at time.Time)
+	OnAssistantTurnCommitted func(text string, at time.Time, metrics TurnMetrics)
+	OnCallEnded              func(reason EndReason, stats CallStats)
 }
 
 // TurnMetrics is a per-assistant-turn snapshot assembled from the
@@ -54,12 +57,4 @@ type TurnMetrics struct {
 	TTSTextAggregationMs float64
 	TTSTTFBMs            float64
 	E2ELatencyMs         float64
-}
-
-// ConversationTurnObserver receives committed user/assistant turns
-// without being in the audio pipeline. Implementations should do their
-// own timeouts for external I/O.
-type ConversationTurnObserver interface {
-	OnUserTurnCommitted(text string, at time.Time)
-	OnAssistantTurnCommitted(text string, at time.Time, metrics TurnMetrics)
 }

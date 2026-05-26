@@ -6,15 +6,29 @@ import (
 	"time"
 )
 
+const callEventQueueSize = 512
+
+type callEventTask struct {
+	name string
+	fn   func()
+}
+
 type callEventDispatcher struct {
 	logger *log.Logger
-	wg     *sync.WaitGroup
 
-	onBotJoined       func(time.Time)
-	onUserJoined      func(time.Time)
-	onUserFirstSpeech func(time.Time)
-	onBotFirstSpeech  func(time.Time)
-	onFirstUserAudio  func(time.Time)
+	queue    chan callEventTask
+	done     chan struct{}
+	mu       sync.Mutex
+	closing  bool
+	stopOnce sync.Once
+
+	onBotJoined              func(time.Time)
+	onUserJoined             func(time.Time)
+	onUserFirstSpeech        func(time.Time)
+	onBotFirstSpeech         func(time.Time)
+	onFirstUserAudio         func(time.Time)
+	onUserTurnCommitted      func(text string, at time.Time)
+	onAssistantTurnCommitted func(text string, at time.Time, metrics TurnMetrics)
 
 	botJoinedOnce       sync.Once
 	userJoinedOnce      sync.Once
@@ -23,15 +37,27 @@ type callEventDispatcher struct {
 	firstUserAudioOnce  sync.Once
 }
 
-func newCallEventDispatcher(logger *log.Logger, wg *sync.WaitGroup, events CallEvents) *callEventDispatcher {
-	return &callEventDispatcher{
-		logger:            logger,
-		wg:                wg,
-		onBotJoined:       events.OnBotJoined,
-		onUserJoined:      events.OnUserJoined,
-		onUserFirstSpeech: events.OnUserFirstSpeech,
-		onBotFirstSpeech:  events.OnBotFirstSpeech,
-		onFirstUserAudio:  events.OnFirstUserAudio,
+func newCallEventDispatcher(logger *log.Logger, events CallEvents) *callEventDispatcher {
+	d := &callEventDispatcher{
+		logger:                   logger,
+		queue:                    make(chan callEventTask, callEventQueueSize),
+		done:                     make(chan struct{}),
+		onBotJoined:              events.OnBotJoined,
+		onUserJoined:             events.OnUserJoined,
+		onUserFirstSpeech:        events.OnUserFirstSpeech,
+		onBotFirstSpeech:         events.OnBotFirstSpeech,
+		onFirstUserAudio:         events.OnFirstUserAudio,
+		onUserTurnCommitted:      events.OnUserTurnCommitted,
+		onAssistantTurnCommitted: events.OnAssistantTurnCommitted,
+	}
+	go d.run()
+	return d
+}
+
+func (l *callEventDispatcher) run() {
+	defer close(l.done)
+	for task := range l.queue {
+		l.runSafely(task.name, task.fn)
 	}
 }
 
@@ -40,7 +66,7 @@ func (l *callEventDispatcher) fireBotJoined(at time.Time) {
 		return
 	}
 	l.botJoinedOnce.Do(func() {
-		l.run("OnBotJoined", func() { l.onBotJoined(at) })
+		l.dispatch("OnBotJoined", func() { l.onBotJoined(at) })
 	})
 }
 
@@ -49,7 +75,7 @@ func (l *callEventDispatcher) fireUserJoined(at time.Time) {
 		return
 	}
 	l.userJoinedOnce.Do(func() {
-		l.run("OnUserJoined", func() { l.onUserJoined(at) })
+		l.dispatch("OnUserJoined", func() { l.onUserJoined(at) })
 	})
 }
 
@@ -58,7 +84,7 @@ func (l *callEventDispatcher) fireUserFirstSpeech(at time.Time) {
 		return
 	}
 	l.userFirstSpeechOnce.Do(func() {
-		l.run("OnUserFirstSpeech", func() { l.onUserFirstSpeech(at) })
+		l.dispatch("OnUserFirstSpeech", func() { l.onUserFirstSpeech(at) })
 	})
 }
 
@@ -67,7 +93,7 @@ func (l *callEventDispatcher) fireBotFirstSpeech(at time.Time) {
 		return
 	}
 	l.botFirstSpeechOnce.Do(func() {
-		l.run("OnBotFirstSpeech", func() { l.onBotFirstSpeech(at) })
+		l.dispatch("OnBotFirstSpeech", func() { l.onBotFirstSpeech(at) })
 	})
 }
 
@@ -76,20 +102,37 @@ func (l *callEventDispatcher) fireFirstUserAudio(at time.Time) {
 		return
 	}
 	l.firstUserAudioOnce.Do(func() {
-		l.run("OnFirstUserAudio", func() { l.onFirstUserAudio(at) })
+		l.dispatch("OnFirstUserAudio", func() { l.onFirstUserAudio(at) })
 	})
 }
 
-func (l *callEventDispatcher) run(name string, fn func()) {
-	if l.wg != nil {
-		l.wg.Add(1)
-		go func() {
-			defer l.wg.Done()
-			l.runSafely(name, fn)
-		}()
+func (l *callEventDispatcher) fireUserTurnCommitted(text string, at time.Time) {
+	if l == nil || l.onUserTurnCommitted == nil {
 		return
 	}
-	go l.runSafely(name, fn)
+	l.dispatch("OnUserTurnCommitted", func() { l.onUserTurnCommitted(text, at) })
+}
+
+func (l *callEventDispatcher) fireAssistantTurnCommitted(text string, at time.Time, metrics TurnMetrics) {
+	if l == nil || l.onAssistantTurnCommitted == nil {
+		return
+	}
+	l.dispatch("OnAssistantTurnCommitted", func() { l.onAssistantTurnCommitted(text, at, metrics) })
+}
+
+func (l *callEventDispatcher) dispatch(name string, fn func()) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.closing {
+		return
+	}
+	select {
+	case l.queue <- callEventTask{name: name, fn: fn}:
+	default:
+		if l.logger != nil {
+			l.logger.Printf("call event queue full (cap=%d), dropping %s\n", callEventQueueSize, name)
+		}
+	}
 }
 
 func (l *callEventDispatcher) runSafely(name string, fn func()) {
@@ -99,4 +142,17 @@ func (l *callEventDispatcher) runSafely(name string, fn func()) {
 		}
 	}()
 	fn()
+}
+
+func (l *callEventDispatcher) stopAndDrain() {
+	if l == nil {
+		return
+	}
+	l.stopOnce.Do(func() {
+		l.mu.Lock()
+		l.closing = true
+		close(l.queue)
+		l.mu.Unlock()
+	})
+	<-l.done
 }

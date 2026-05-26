@@ -129,8 +129,8 @@ func (a *ContextAggregator) commitSpokenText(interrupted bool) {
 		if a.taskCtx.metrics != nil {
 			metrics = a.taskCtx.metrics.snapshotAndReset()
 		}
-		if a.taskCtx.turnObservers != nil {
-			a.taskCtx.turnObservers.emitAssistantTurnCommitted(spoken, time.Now(), metrics)
+		if a.taskCtx.callEvents != nil {
+			a.taskCtx.callEvents.fireAssistantTurnCommitted(spoken, time.Now(), metrics)
 		}
 	} else if interrupted {
 		a.taskCtx.Logger.Println("Barge-in interrupted bot before any assistant words were committed")
@@ -154,8 +154,8 @@ func (a *ContextAggregator) addUserMessage(text string) {
 		a.messages = append(a.messages, map[string]string{"role": "user", "content": text})
 		a.taskCtx.UIEvents.Send(UIEvent{Type: UserTranscript, Data: map[string]interface{}{"role": "user", "text": text, "is_final": true}})
 	}
-	if a.taskCtx.turnObservers != nil {
-		a.taskCtx.turnObservers.emitUserTurnCommitted(text, time.Now())
+	if a.taskCtx.callEvents != nil {
+		a.taskCtx.callEvents.fireUserTurnCommitted(text, time.Now())
 	}
 }
 

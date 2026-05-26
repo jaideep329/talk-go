@@ -336,11 +336,20 @@ func TestContextAggregator_TTSDoneCommitsAssistantMessage(t *testing.T) {
 	}
 }
 
-func TestContextAggregator_EmitsObserverCommittedTurnsWithMetrics(t *testing.T) {
+func TestContextAggregator_EmitsCommittedTurnCallEventsWithMetrics(t *testing.T) {
 	fix := newTestFixture(t)
-	obs := &recordingObserver{}
-	fix.TaskCtx.turnObservers = newConversationTurnObserverSet(fix.TaskCtx, []ConversationTurnObserver{obs})
-	defer fix.TaskCtx.turnObservers.stopAndDrain()
+	var users []string
+	var assistants []string
+	var metrics []TurnMetrics
+	fix.TaskCtx.callEvents = newCallEventDispatcher(fix.Logger, CallEvents{
+		OnUserTurnCommitted: func(text string, at time.Time) {
+			users = append(users, text)
+		},
+		OnAssistantTurnCommitted: func(text string, at time.Time, m TurnMetrics) {
+			assistants = append(assistants, text)
+			metrics = append(metrics, m)
+		},
+	})
 	a := NewContextAggregator(fix.TaskCtx)
 
 	fix.TaskCtx.metrics.absorb(NewMetricsFrame([]MetricsData{
@@ -350,30 +359,26 @@ func TestContextAggregator_EmitsObserverCommittedTurnsWithMetrics(t *testing.T) 
 	a.addUserMessage("hello")
 	a.appendWords([]string{"hi", "there"})
 	a.commitSpokenText(false)
-	fix.TaskCtx.turnObservers.stopAndDrain()
+	fix.TaskCtx.callEvents.stopAndDrain()
 
-	if err := waitForWG(fix.WG, 2*time.Second); err != nil {
-		t.Fatalf("waitForWG: %v", err)
+	if len(users) != 1 || users[0] != "hello" {
+		t.Fatalf("user turn events = %v, want [hello]", users)
 	}
-	obs.mu.Lock()
-	defer obs.mu.Unlock()
-	if len(obs.users) != 1 || obs.users[0] != "hello" {
-		t.Fatalf("user turn observer events = %v, want [hello]", obs.users)
+	if len(assistants) != 1 || assistants[0] != "hi there" {
+		t.Fatalf("assistant turn events = %v, want [hi there]", assistants)
 	}
-	if len(obs.assistants) != 1 || obs.assistants[0] != "hi there" {
-		t.Fatalf("assistant turn observer events = %v, want [hi there]", obs.assistants)
-	}
-	if len(obs.metrics) != 1 || obs.metrics[0].LLMTTFBMs != 12 || obs.metrics[0].TTSTTFBMs != 34 {
-		t.Fatalf("assistant metrics = %+v, want llm=12 tts=34", obs.metrics)
+	if len(metrics) != 1 || metrics[0].LLMTTFBMs != 12 || metrics[0].TTSTTFBMs != 34 {
+		t.Fatalf("assistant metrics = %+v, want llm=12 tts=34", metrics)
 	}
 }
 
 func TestContextAggregator_UserFirstSpeechLifecycleFiresOnce(t *testing.T) {
 	fix := newTestFixture(t)
 	calls := make(chan time.Time, 2)
-	fix.TaskCtx.callEvents = newCallEventDispatcher(fix.Logger, fix.WG, CallEvents{
+	fix.TaskCtx.callEvents = newCallEventDispatcher(fix.Logger, CallEvents{
 		OnUserFirstSpeech: func(at time.Time) { calls <- at },
 	})
+	defer fix.TaskCtx.callEvents.stopAndDrain()
 	a := NewContextAggregator(fix.TaskCtx)
 
 	runProcessorTest(t, fix, runConfig{
@@ -386,6 +391,7 @@ func TestContextAggregator_UserFirstSpeechLifecycleFiresOnce(t *testing.T) {
 		},
 		sendEndFrame: true,
 	})
+	fix.TaskCtx.callEvents.stopAndDrain()
 
 	select {
 	case <-calls:

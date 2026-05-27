@@ -473,6 +473,7 @@ func (t *TTSProcessor) sendTextToTTS(text string) bool {
 		t.taskCtx.Logger.Println("failed to send TTS payload:", err)
 		return false
 	}
+	t.taskCtx.UIEvents.BotTranscription(text, time.Now())
 	return true
 }
 

@@ -32,7 +32,12 @@ func (b SalesCallBot) BuildOptions(ctx context.Context, conversationID string, d
 	}
 
 	maxTalkTime := salesTalkTimeLimit(startup.Data.UserProfile.RemainingSalesCallTalktimeSeconds)
-	callbacks := NewCallEventCallbacks(startup, deps.Redis, deps.API)
+	callbacks := NewCallEventCallbacks(
+		startup,
+		deps.Redis,
+		deps.API,
+		NewDebugLogUploaderFromEnv(startup.Logger, startup.ConversationID),
+	)
 
 	return voicepipelinecore.TaskOptions{
 		Logger:   startup.Logger,

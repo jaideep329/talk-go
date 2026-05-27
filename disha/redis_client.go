@@ -24,6 +24,8 @@ var ErrConversationDataNotFound = errors.New("disha: conversation_data not found
 // integration.
 type RedisClient interface {
 	GetConversationData(ctx context.Context, conversationID string) (*ConversationData, error)
+	GetCache(ctx context.Context, key string) ([]byte, bool, error)
+	SetCache(ctx context.Context, key string, value any, expiration time.Duration) error
 	AppendChunk(ctx context.Context, userID, conversationID string, chunk ConversationChunk) error
 	Close() error
 }
@@ -102,6 +104,35 @@ func (c *redisClient) GetConversationData(ctx context.Context, conversationID st
 		return nil, fmt.Errorf("disha: conversation_data malformed for %s: %w", conversationID, err)
 	}
 	return &data, nil
+}
+
+func (c *redisClient) GetCache(ctx context.Context, key string) ([]byte, bool, error) {
+	var raw []byte
+	err := withRedisTimeoutRetry(ctx, func() error {
+		var getErr error
+		raw, getErr = c.rdb.Get(ctx, key).Bytes()
+		return getErr
+	})
+	if errors.Is(err, redis.Nil) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("disha: redis GET %s failed: %w", key, err)
+	}
+	return raw, true, nil
+}
+
+func (c *redisClient) SetCache(ctx context.Context, key string, value any, expiration time.Duration) error {
+	payload, err := json.Marshal(value)
+	if err != nil {
+		return fmt.Errorf("disha: cache marshal failed: %w", err)
+	}
+	if err := withRedisTimeoutRetry(ctx, func() error {
+		return c.rdb.Set(ctx, key, payload, expiration).Err()
+	}); err != nil {
+		return fmt.Errorf("disha: redis SET %s failed: %w", key, err)
+	}
+	return nil
 }
 
 func (c *redisClient) AppendChunk(ctx context.Context, userID, conversationID string, chunk ConversationChunk) error {

@@ -16,23 +16,25 @@ const (
 )
 
 type CallEventCallbacks struct {
-	redis  RedisClient
-	api    *APIClient
-	logger *log.Logger
+	redis            RedisClient
+	api              *APIClient
+	logger           *log.Logger
+	debugLogUploader DebugLogUploader
 
 	conversationID string
 	userID         string
 	botType        string
 }
 
-func NewCallEventCallbacks(startup CallStartup, redis RedisClient, api *APIClient) *CallEventCallbacks {
+func NewCallEventCallbacks(startup CallStartup, redis RedisClient, api *APIClient, debugLogUploader DebugLogUploader) *CallEventCallbacks {
 	return &CallEventCallbacks{
-		redis:          redis,
-		api:            api,
-		logger:         startup.Logger,
-		conversationID: startup.ConversationID,
-		userID:         startup.UserID,
-		botType:        startup.BotType,
+		redis:            redis,
+		api:              api,
+		logger:           startup.Logger,
+		debugLogUploader: debugLogUploader,
+		conversationID:   startup.ConversationID,
+		userID:           startup.UserID,
+		botType:          startup.BotType,
 	}
 }
 
@@ -79,7 +81,9 @@ func (c *CallEventCallbacks) OnAssistantTurnCommitted(text string, at time.Time,
 }
 
 func (c *CallEventCallbacks) OnCallEnded(reason voicepipelinecore.EndReason, stats voicepipelinecore.CallStats) {
-	c.runPostCallOperations(reason, stats)
+	logDataS3Key := uploadDebugLogs(c.logger, c.debugLogUploader, stats.DebugLogs)
+	c.runPostCallOperations(reason, stats, logDataS3Key)
+	c.enqueueDailyMetrics(stats)
 	c.enqueueChunkSync()
 }
 
@@ -119,7 +123,7 @@ func (c *CallEventCallbacks) appendConversationChunk(text, role string, at time.
 	}
 }
 
-func (c *CallEventCallbacks) runPostCallOperations(reason voicepipelinecore.EndReason, stats voicepipelinecore.CallStats) {
+func (c *CallEventCallbacks) runPostCallOperations(reason voicepipelinecore.EndReason, stats voicepipelinecore.CallStats, logDataS3Key string) {
 	if c == nil || c.api == nil {
 		return
 	}
@@ -131,7 +135,7 @@ func (c *CallEventCallbacks) runPostCallOperations(reason voicepipelinecore.EndR
 		TotalUserDuration:              int(stats.TotalUserDurationSec),
 		FirstUserAudioFramesReceivedAt: optionalTime(stats.FirstUserAudioFrameAt),
 		EndedAt:                        stats.EndedAt,
-		LogDataS3Key:                   "",
+		LogDataS3Key:                   logDataS3Key,
 		OnboardingCallDone:             false,
 	}
 	if req.EndedAt.IsZero() {
@@ -139,6 +143,28 @@ func (c *CallEventCallbacks) runPostCallOperations(reason voicepipelinecore.EndR
 	}
 	if err := c.api.RunPostCallOperations(ctx, req); err != nil && c.logger != nil {
 		c.logger.Printf("disha: run_post_call_operations failed conversation=%s user=%s: %v\n", c.conversationID, c.userID, err)
+	}
+}
+
+func (c *CallEventCallbacks) enqueueDailyMetrics(stats voicepipelinecore.CallStats) {
+	if c == nil || c.api == nil || stats.MeetingID == "" || stats.UserSessionID == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), postCallRequestTimeout)
+	defer cancel()
+	req := EnqueueJobRequest{
+		ModuleName: "bots.webhooks",
+		FuncName:   "fetch_and_store_daily_metrics",
+		Kwargs: map[string]any{
+			"conversation_id": c.conversationID,
+			"meeting_id":      stats.MeetingID,
+			"bot_session_id":  stats.BotSessionID,
+			"user_session_id": stats.UserSessionID,
+		},
+		SQSQueue: "p1-fast-l1",
+	}
+	if err := c.api.EnqueueJob(ctx, req); err != nil && c.logger != nil {
+		c.logger.Printf("disha: enqueue Daily metrics failed conversation=%s user=%s: %v\n", c.conversationID, c.userID, err)
 	}
 }
 

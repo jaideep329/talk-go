@@ -86,6 +86,87 @@ func testDeps(redis RedisClient, api *APIClient) Deps {
 	}
 }
 
+func TestCallEndedUploadsDebugLogsAndQueuesDailyMetrics(t *testing.T) {
+	apiServer, apiRecorder := newCallAPIServer(t)
+	api := NewAPIClient(apiServer.URL, 10*time.Second, nil)
+	var uploaded []voicepipelinecore.RTVIDebugLogEntry
+	callbacks := NewCallEventCallbacks(CallStartup{
+		ConversationID: "conv-1",
+		UserID:         "user-1",
+		BotType:        SalesCallBotType,
+		Logger:         log.New(io.Discard, "", 0),
+	}, nil, api, func(_ context.Context, entries []voicepipelinecore.RTVIDebugLogEntry) (string, error) {
+		uploaded = append(uploaded, entries...)
+		return "debug_log_data/conv-1/log_data.json", nil
+	})
+	endedAt := time.Date(2026, 5, 22, 1, 2, 3, 0, time.UTC)
+	callbacks.OnCallEnded(voicepipelinecore.EndReasonClientDisconnect, voicepipelinecore.CallStats{
+		TotalUserDurationSec: 12.9,
+		EndedAt:              endedAt,
+		MeetingID:            "meeting-1",
+		BotSessionID:         "bot-session-1",
+		UserSessionID:        "user-session-1",
+		DebugLogs: []voicepipelinecore.RTVIDebugLogEntry{{
+			Label:     "rtvi-ai",
+			Type:      "server-message",
+			Data:      "Participant left: leftCall",
+			Timestamp: 1.23,
+		}},
+	})
+
+	if len(uploaded) != 1 || uploaded[0].Type != "server-message" {
+		t.Fatalf("uploaded logs = %+v", uploaded)
+	}
+
+	requests := apiRecorder.snapshot()
+	if len(requests) != 3 {
+		t.Fatalf("request count = %d, want 3: %+v", len(requests), requests)
+	}
+	assertRequest(t, requests[0], http.MethodPost, "/bot/run_post_call_operations")
+	if requests[0].Body["log_data_s3_key"] != "debug_log_data/conv-1/log_data.json" {
+		t.Fatalf("post-call log key mismatch: %+v", requests[0].Body)
+	}
+	assertRequest(t, requests[1], http.MethodPost, "/common/enqueue_job")
+	if requests[1].Body["module_name"] != "bots.webhooks" ||
+		requests[1].Body["func_name"] != "fetch_and_store_daily_metrics" ||
+		requests[1].Body["sqs_queue"] != "p1-fast-l1" {
+		t.Fatalf("Daily metrics enqueue mismatch: %+v", requests[1].Body)
+	}
+	kwargs, ok := requests[1].Body["kwargs"].(map[string]any)
+	if !ok ||
+		kwargs["conversation_id"] != "conv-1" ||
+		kwargs["meeting_id"] != "meeting-1" ||
+		kwargs["bot_session_id"] != "bot-session-1" ||
+		kwargs["user_session_id"] != "user-session-1" {
+		t.Fatalf("Daily metrics kwargs mismatch: %+v", requests[1].Body["kwargs"])
+	}
+	assertRequest(t, requests[2], http.MethodPost, "/common/enqueue_job")
+	if requests[2].Body["module_name"] != "services.conversation_chunk_manager" {
+		t.Fatalf("chunk sync enqueue mismatch: %+v", requests[2].Body)
+	}
+}
+
+func TestUploadDebugLogsUsesUploader(t *testing.T) {
+	logs := []voicepipelinecore.RTVIDebugLogEntry{{
+		Label:     "rtvi-ai",
+		Type:      "server-message",
+		Data:      "Participant left: leftCall",
+		Timestamp: 1.23,
+	}}
+	var uploaded []voicepipelinecore.RTVIDebugLogEntry
+	key := uploadDebugLogs(log.New(io.Discard, "", 0), func(_ context.Context, entries []voicepipelinecore.RTVIDebugLogEntry) (string, error) {
+		uploaded = append(uploaded, entries...)
+		return "debug_log_data/conv-1/log_data.json", nil
+	}, logs)
+
+	if key != "debug_log_data/conv-1/log_data.json" {
+		t.Fatalf("debug log key = %q", key)
+	}
+	if len(uploaded) != 1 || uploaded[0].Type != "server-message" {
+		t.Fatalf("uploaded logs = %+v", uploaded)
+	}
+}
+
 func TestNewBotReturnsSalesCallBot(t *testing.T) {
 	bot, err := NewBot(SalesCallBotType)
 	if err != nil {

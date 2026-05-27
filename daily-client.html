@@ -259,6 +259,7 @@
         turns: [],
         liveText: "",
         assistantLiveText: "",
+        currentAssistantText: "",
         pendingMetrics: [],
 
         get statusClass() {
@@ -351,7 +352,7 @@
 
         async disconnect() {
           // Ask the bot to drain gracefully via a Daily app message.
-          // The bot will publish `call_ended` once cleanup completes,
+          // The bot will publish an RTVI call_ended server-message once cleanup completes,
           // and we tear down the call then. If publish fails (call not
           // ready / already gone), just tear down immediately.
           if (_call) {
@@ -385,37 +386,33 @@
         },
 
         handleUIEvent(event) {
-          const d = event.data;
+          if (!event || event.label !== "rtvi-ai") return;
+          const d = event.data || {};
           switch (event.type) {
-            case "user_transcript":
-              this.assistantLiveText = "";
-              this.commitUserTurn(d.text);
-              break;
-
-            case "live_transcript":
-              this.liveText = d.text;
-              break;
-
-            case "assistant_speaking":
-              this.assistantLiveText += (this.assistantLiveText && d.text[0] !== '.' && d.text[0] !== ',' && d.text[0] !== '!' && d.text[0] !== '?' ? " " : "") + d.text;
-              this.scrollToBottom();
-              break;
-
-            case "committed_assistant":
-              if (d.text !== "") {
-                this.turns.push({ role: "assistant", text: d.text, metrics: [...this.pendingMetrics] });
+            case "user-transcription":
+              if (d.final === false) {
+                this.liveText = d.text || "";
+                break;
               }
+              this.liveText = "";
+              this.commitAssistantTurn();
               this.assistantLiveText = "";
-              this.pendingMetrics = [];
-              this.scrollToBottom();
+              if (d.text) this.commitUserTurn(d.text);
               break;
 
-            case "metrics":
-              this.pendingMetrics.push(d);
+            case "bot-transcription":
+              this.appendAssistantText(d.text || "");
               break;
 
-            case "call_ended":
-              this.finishDisconnect();
+            case "bot-started-speaking":
+              break;
+
+            case "bot-stopped-speaking":
+              this.commitAssistantTurn();
+              break;
+
+            case "server-message":
+              this.handleServerMessage(d);
               break;
           }
         },
@@ -423,12 +420,50 @@
         commitUserTurn(text) {
           const last = this.turns[this.turns.length - 1];
           if (last && last.role === "user") {
-            // Update existing user turn (concatenated from multiple endpoints)
-            last.text = text;
+            last.text = this.appendText(last.text, text);
           } else {
             this.turns.push({ role: "user", text: text, metrics: null });
           }
           this.scrollToBottom();
+        },
+
+        appendAssistantText(text) {
+          if (!text) return;
+          this.currentAssistantText = this.appendText(this.currentAssistantText, text);
+          this.assistantLiveText = this.currentAssistantText;
+          this.scrollToBottom();
+        },
+
+        commitAssistantTurn() {
+          const text = this.currentAssistantText.trim();
+          if (text !== "") {
+            this.turns.push({ role: "assistant", text, metrics: [...this.pendingMetrics] });
+          }
+          this.currentAssistantText = "";
+          this.assistantLiveText = "";
+          this.pendingMetrics = [];
+          this.scrollToBottom();
+        },
+
+        handleServerMessage(data) {
+          if (typeof data === "string") {
+            if (data.includes("Interruption received")) this.commitAssistantTurn();
+            return;
+          }
+          if (data.type === "metric") {
+            this.pendingMetrics.push(data);
+            return;
+          }
+          if (data.type === "call_ended") {
+            this.finishDisconnect();
+          }
+        },
+
+        appendText(base, next) {
+          const cleaned = `${next || ""}`.trim();
+          if (!cleaned) return base;
+          if (!base) return cleaned;
+          return /^[.,!?;:]/.test(cleaned) ? `${base}${cleaned}` : `${base} ${cleaned}`;
         },
 
         scrollToBottom() {

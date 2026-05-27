@@ -16,6 +16,8 @@ import (
 // variable so tests can override it to point at an httptest server.
 var llmEndpoint = "https://api.openai.com/v1/chat/completions"
 
+const llmModel = "gpt-4.1"
+
 type LLMProcessor struct {
 	*BaseProcessor
 	taskCtx   *TaskContext
@@ -72,7 +74,7 @@ func (p *LLMProcessor) cancelInFlight() {
 
 func (p *LLMProcessor) runLLM(ctx context.Context, messages []map[string]string) {
 	body := map[string]interface{}{
-		"model":    "gpt-4.1",
+		"model":    llmModel,
 		"stream":   true,
 		"messages": messages,
 	}

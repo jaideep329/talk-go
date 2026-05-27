@@ -77,10 +77,10 @@ func (a *ContextAggregator) resetInterimTranscript() {
 }
 
 func (a *ContextAggregator) sendLiveTranscript(text string) {
-	if a.taskCtx == nil || a.taskCtx.UIEvents == nil {
+	if a.taskCtx == nil {
 		return
 	}
-	a.taskCtx.UIEvents.Send(UIEvent{Type: LiveTranscript, Data: map[string]interface{}{"text": text}})
+	a.taskCtx.UIEvents.UserTranscription(text, false, time.Now())
 }
 
 func (a *ContextAggregator) updateInterimTranscript(f TranscriptFrame) string {
@@ -124,7 +124,6 @@ func (a *ContextAggregator) commitSpokenText(interrupted bool) {
 	if spoken != "" {
 		a.taskCtx.Logger.Printf("Committing to history (interrupted=%v): %s\n", interrupted, spoken)
 		a.messages = append(a.messages, map[string]string{"role": "assistant", "content": spoken})
-		a.taskCtx.UIEvents.Send(UIEvent{Type: CommittedAssistant, Data: map[string]interface{}{"role": "assistant", "text": spoken}})
 		metrics := TurnMetrics{}
 		if a.taskCtx.metrics != nil {
 			metrics = a.taskCtx.metrics.snapshotAndReset()
@@ -132,8 +131,12 @@ func (a *ContextAggregator) commitSpokenText(interrupted bool) {
 		if a.taskCtx.callEvents != nil {
 			a.taskCtx.callEvents.fireAssistantTurnCommitted(spoken, time.Now(), metrics)
 		}
+		if interrupted {
+			a.taskCtx.UIEvents.BotStoppedSpeaking(time.Now())
+		}
 	} else if interrupted {
 		a.taskCtx.Logger.Println("Barge-in interrupted bot before any assistant words were committed")
+		a.taskCtx.UIEvents.BotStoppedSpeaking(time.Now())
 	}
 }
 
@@ -145,17 +148,17 @@ func (a *ContextAggregator) lastMessageRole() string {
 }
 
 func (a *ContextAggregator) addUserMessage(text string) {
+	at := time.Now()
 	if a.lastMessageRole() == "user" {
 		last := a.messages[len(a.messages)-1]
 		last["content"] += " " + text
 		a.taskCtx.Logger.Printf("Concatenated user message: %s\n", last["content"])
-		a.taskCtx.UIEvents.Send(UIEvent{Type: UserTranscript, Data: map[string]interface{}{"role": "user", "text": last["content"], "is_final": true}})
 	} else {
 		a.messages = append(a.messages, map[string]string{"role": "user", "content": text})
-		a.taskCtx.UIEvents.Send(UIEvent{Type: UserTranscript, Data: map[string]interface{}{"role": "user", "text": text, "is_final": true}})
 	}
+	a.taskCtx.UIEvents.UserTranscription(text, true, at)
 	if a.taskCtx.callEvents != nil {
-		a.taskCtx.callEvents.fireUserTurnCommitted(text, time.Now())
+		a.taskCtx.callEvents.fireUserTurnCommitted(text, at)
 	}
 }
 
@@ -191,6 +194,7 @@ func (a *ContextAggregator) ProcessFrame(ctx context.Context, frame Frame, dir D
 		if a.botSpeaking && !a.interruptSent && !f.IsFinal {
 			if len(strings.Fields(interimTranscript)) >= minBargeInWords {
 				a.taskCtx.Logger.Println("Barge-in detected")
+				a.taskCtx.UIEvents.ServerMessage("Interruption received while bot is speaking", time.Now())
 				a.PushFrame(NewInterruptFrame(), Downstream)
 				a.interruptSent = true
 				a.botSpeaking = false

@@ -81,7 +81,6 @@ type testFixture struct {
 	// metricsMu protects metrics from concurrent test reads/writes.
 	metricsMu sync.Mutex
 	metrics   []MetricsFrame
-	uiEvents  []UIEvent
 }
 
 func newTestFixture(t *testing.T) *testFixture {

@@ -195,9 +195,11 @@ func (p *PlaybackSinkProcessor) tick() bool {
 		case AudioFrame:
 			if !p.playbackStarted {
 				p.playbackStarted = true
+				at := time.Now()
 				if p.taskCtx.callEvents != nil {
-					p.taskCtx.callEvents.fireBotFirstSpeech(time.Now())
+					p.taskCtx.callEvents.fireBotFirstSpeech(at)
 				}
+				p.taskCtx.UIEvents.BotStartedSpeaking(at)
 				// Broadcast both ways: upstream lets UserIdleProcessor
 				// cancel its idle timer; downstream is informational for
 				// any future post-Playback consumer. Mirrors Pipecat's
@@ -211,11 +213,11 @@ func (p *PlaybackSinkProcessor) tick() bool {
 			p.playbackQueue = p.playbackQueue[1:]
 			goto mix
 		case WordTimestampFrame:
-			p.taskCtx.UIEvents.Send(UIEvent{Type: AssistantSpeaking, Data: map[string]interface{}{"text": f.Words[0]}})
 			p.PushFrame(f, Upstream)
 			p.playbackQueue = p.playbackQueue[1:]
 		case TTSDoneFrame:
 			p.taskCtx.Logger.Println("Playback complete")
+			p.taskCtx.UIEvents.BotStoppedSpeaking(time.Now())
 			p.PushFrame(f, Upstream)
 			// Broadcast: upstream tells ContextAggregator/UserIdle that
 			// the bot finished speaking; downstream copy is for parity

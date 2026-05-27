@@ -1,0 +1,732 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>talk-go Sales Call — Drop-In Readiness Report</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f6f7f9;
+      --panel: #ffffff;
+      --ink: #1d2430;
+      --muted: #647084;
+      --line: #d9dee7;
+      --soft: #eef2f7;
+      --accent: #0f766e;
+      --accent-soft: #dcf5f1;
+      --warn: #a15c00;
+      --warn-soft: #fff2d7;
+      --bad: #b42318;
+      --bad-soft: #ffe7e4;
+      --good: #137333;
+      --good-soft: #e3f5e8;
+      --info: #2458a6;
+      --info-soft: #e6eefb;
+      --shadow: 0 12px 30px rgba(22, 34, 51, 0.08);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.55;
+    }
+
+    header {
+      background: #18212f;
+      color: #f8fafc;
+      padding: 42px 32px 36px;
+      border-bottom: 4px solid var(--accent);
+    }
+
+    main { max-width: 1180px; margin: 0 auto; padding: 28px 24px 80px; }
+
+    h1, h2, h3, h4 { margin: 0; line-height: 1.25; }
+    h1 { font-size: 32px; max-width: 920px; }
+    h2 { font-size: 22px; margin: 0 0 14px; }
+    h3 { font-size: 17px; margin: 22px 0 8px; }
+    h4 { font-size: 15px; margin: 14px 0 6px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+    p { margin: 0 0 12px; }
+
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      background: var(--soft);
+      color: #263244;
+      padding: 2px 5px;
+      border-radius: 4px;
+      font-size: 0.92em;
+    }
+    pre {
+      background: #11161f;
+      color: #e5e7eb;
+      padding: 14px 16px;
+      border-radius: 8px;
+      overflow-x: auto;
+      font-size: 13px;
+      line-height: 1.55;
+    }
+    pre code { background: transparent; color: inherit; padding: 0; }
+
+    .lede { max-width: 920px; margin-top: 14px; color: #cbd5e1; font-size: 17px; }
+    .meta { margin-top: 22px; display: flex; flex-wrap: wrap; gap: 10px; color: #dbeafe; font-size: 13px; }
+    .meta span { background: rgba(255,255,255,0.08); padding: 5px 12px; border-radius: 999px; }
+
+    section { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 24px 26px; margin-top: 22px; box-shadow: var(--shadow); }
+
+    .verdict-banner {
+      background: linear-gradient(120deg, #18212f 0%, #2a3f55 100%);
+      color: #f8fafc;
+      padding: 22px 26px;
+      border-radius: 12px;
+      margin-top: 22px;
+      border: 1px solid #2a3a52;
+    }
+    .verdict-banner h2 { color: #fff; font-size: 24px; }
+    .verdict-banner p { color: #d4dbe6; margin-top: 10px; }
+    .verdict-tag { display: inline-block; padding: 4px 10px; border-radius: 6px; font-size: 12px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; margin-right: 8px; }
+    .verdict-tag.ready { background: var(--good-soft); color: var(--good); }
+    .verdict-tag.partial { background: var(--warn-soft); color: var(--warn); }
+    .verdict-tag.gap { background: var(--bad-soft); color: var(--bad); }
+
+    table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 14px; }
+    th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+    th { background: var(--soft); font-weight: 600; }
+    tr:last-child td { border-bottom: none; }
+    td.status { white-space: nowrap; width: 110px; }
+    .pill { display: inline-block; padding: 3px 9px; border-radius: 999px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
+    .pill.ok { background: var(--good-soft); color: var(--good); }
+    .pill.warn { background: var(--warn-soft); color: var(--warn); }
+    .pill.bad { background: var(--bad-soft); color: var(--bad); }
+    .pill.info { background: var(--info-soft); color: var(--info); }
+    .pill.todo { background: #eef2f7; color: #475569; }
+
+    .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    @media (max-width: 820px) { .grid2 { grid-template-columns: 1fr; } }
+
+    .callout { border-left: 4px solid var(--accent); background: var(--accent-soft); padding: 12px 16px; border-radius: 0 8px 8px 0; margin: 14px 0; }
+    .callout.warn { border-color: var(--warn); background: var(--warn-soft); }
+    .callout.bad { border-color: var(--bad); background: var(--bad-soft); }
+    .callout.info { border-color: var(--info); background: var(--info-soft); }
+    .callout strong { display: block; margin-bottom: 4px; font-size: 13px; text-transform: uppercase; letter-spacing: 0.05em; }
+
+    ul { margin: 8px 0; padding-left: 22px; }
+    li { margin-bottom: 4px; }
+    li > code { font-size: 12.5px; }
+
+    .toc { columns: 2 220px; column-gap: 24px; }
+    .toc a { color: var(--info); text-decoration: none; }
+    .toc a:hover { text-decoration: underline; }
+
+    .twoColCmp { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    @media (max-width: 820px) { .twoColCmp { grid-template-columns: 1fr; } }
+    .twoColCmp h4 { margin-top: 0; }
+    .twoColCmp .col { background: var(--soft); padding: 14px 16px; border-radius: 8px; border: 1px solid var(--line); }
+    .twoColCmp .col.python { background: #f5f0e6; border-color: #ecd9b7; }
+    .twoColCmp .col.go { background: #e9f5f1; border-color: #c9e4dc; }
+    .twoColCmp .col h4 { color: #18212f; font-size: 12px; }
+
+    footer { text-align: center; padding: 32px 16px; color: var(--muted); font-size: 13px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>talk-go Sales Call — Drop-In Readiness Report</h1>
+    <p class="lede">A side-by-side review of the current <code>talk-go</code> implementation against Disha-Backend's
+      <code>bots/sales_call/sales_call.py</code> and every surrounding operation: post-call persistence, worker
+      machine lifecycle, signal handling, and the conversation context surface. Use this to decide whether talk-go
+      can replace the Python sales-call worker today, and to scope the remaining work if not.</p>
+    <div class="meta">
+      <span>Generated: Wed 27 May 2026</span>
+      <span>talk-go @ <code>/Users/jaideepsingh/Projects/talk-go</code></span>
+      <span>disha-backend @ <code>/Users/jaideepsingh/Projects/disha-backend</code></span>
+      <span>Pipecat reference: <code>pipecat-ai==0.0.108</code></span>
+    </div>
+  </header>
+
+  <main>
+    <div class="verdict-banner">
+      <h2>Verdict — Not yet a 1:1 drop-in for production sales calls</h2>
+      <p>
+        <span class="verdict-tag ready">Pipeline shape: ready</span>
+        <span class="verdict-tag partial">Persistence: partial</span>
+        <span class="verdict-tag gap">Prompt / LLM: gap</span>
+        <span class="verdict-tag gap">User-experience polish: gap</span>
+      </p>
+      <p>The Pipecat-style frame pipeline, Disha API contract, Redis chunk shape, worker lifecycle, signal
+        handling and SQS-job wiring are all faithfully mirrored. What's missing is the
+        <em>business surface</em> of the Python bot: the dynamic Langfuse prompts gated on
+        <code>campaign_pricing_experiment_flag</code>, the Grok-4.1-fast Azure LLM (talk-go still uses
+        <code>gpt-4.1</code>), the Hindi <code>PhoneticTextFilter</code> for Cartesia, the
+        <code>resume_message</code>/<code>unprocessed_chat_context</code> path, and a handful of bug-shaped
+        behavioural differences (idle never ends the call, talktime starts on construction not first user
+        speech, no Sentry, no GKE <code>safe-to-evict</code> annotation, etc). Concretely &mdash; pointing
+        Disha&rsquo;s <code>create_room</code> at talk-go today will <strong>connect, talk and persist</strong>,
+        but with the wrong prompt, the wrong LLM, an English voice for a Hindi user, no abuse recovery, and a
+        few edge cases that may keep a pod alive longer than it should.</p>
+    </div>
+
+    <section>
+      <h2>Contents</h2>
+      <ol class="toc">
+        <li><a href="#scope">1. Scope &amp; method</a></li>
+        <li><a href="#summary">2. One-line summary per surface</a></li>
+        <li><a href="#bot">3. Inside the bot: <code>sales_call.py</code> vs <code>SalesCallBot</code></a></li>
+        <li><a href="#pipeline">4. Pipeline parity (frames, processors, ordering)</a></li>
+        <li><a href="#persistence">5. Persistence &amp; post-call operations</a></li>
+        <li><a href="#worker">6. Worker machine &amp; pod lifecycle</a></li>
+        <li><a href="#signal">7. Signal handling &amp; graceful shutdown</a></li>
+        <li><a href="#observability">8. Observability (UI events, Sentry, logging)</a></li>
+        <li><a href="#config">9. Config &amp; environment variables</a></li>
+        <li><a href="#gaps">10. Detailed gap list (must / should / nice)</a></li>
+        <li><a href="#cutover">11. Cutover plan if you decide to ship</a></li>
+      </ol>
+    </section>
+
+    <section id="scope">
+      <h2>1. Scope &amp; method</h2>
+      <p>I read the current <code>talk-go</code> tree (sources <em>and</em> tests, plus <code>AGENTS.md</code>),
+        then walked the Python sales-call from <code>bots/sales_call/sales_call.py</code> outward into:</p>
+      <ul>
+        <li><code>bots/onboarding_call/onboarding_call_init_manager.py</code> &mdash; the cache + DB fetch for conversation data &amp; user profile.</li>
+        <li><code>bots/followup_call/fetch_conversation.py</code> &mdash; the shared loader that builds the resume-message + unprocessed-chat-context.</li>
+        <li><code>bots/onboarding_call/conversation_persistence_processor.py</code> &mdash; per-turn Redis writes + S3 upload + chunk-sync enqueue.</li>
+        <li><code>bots/onboarding_call/custom_rtvi_observer.py</code> &mdash; RTVI debug-log capture &amp; first-speech timestamping.</li>
+        <li><code>bots/onboarding_call/custom_daily_transport.py</code> &mdash; Daily join retry + first-audio timestamp.</li>
+        <li><code>bots/onboarding_call/custom_soniox_stt.py</code>, <code>phonetic_text_filter.py</code>, <code>metrics_tracker.py</code>, <code>talktime_monitor.py</code>.</li>
+        <li><code>bots/bot_worker_manager.py</code>, <code>bots/signal_handler.py</code>, <code>bots/gke_pod_manager.py</code> (worker registration, pod safe-to-evict, cleanup), <code>bots/views.py</code>/<code>urls.py</code> (worker HTTP API).</li>
+        <li><code>bots/services/voice_bot_api_service.py</code> &mdash; <code>/bot/update_conversation</code>, <code>/bot/run_post_call_operations</code> contract.</li>
+        <li><code>services/conversation_chunk_manager.py</code> + <code>services/conversation_chunks_cache.py</code> &mdash; Redis key shape, sync job.</li>
+        <li><code>common/sqs_queue_mapping_manager.py</code> &mdash; queue names.</li>
+      </ul>
+      <p>For each component I asked three questions: does talk-go reach byte-for-byte parity, does it reach
+        semantic parity (good enough), or is it missing? Behavioural differences are weighted by user impact (does
+        it change what the sales user hears) and by ops impact (does it leak a pod, lose a metric, etc).</p>
+    </section>
+
+    <section id="summary">
+      <h2>2. One-line summary per surface</h2>
+      <table>
+        <thead><tr><th>Surface</th><th>Status</th><th>Comment</th></tr></thead>
+        <tbody>
+          <tr><td>Pipeline shape (STT &rarr; aggregator &rarr; LLM &rarr; TTS &rarr; playback)</td>
+              <td class="status"><span class="pill ok">Parity</span></td>
+              <td>Pipecat-style <code>BaseProcessor</code>, broadcast frames, EndFrame-driven shutdown, min-words barge-in, word-timestamp interleaving &mdash; all in.</td></tr>
+          <tr><td>Daily transport (join, audio in/out, app messages)</td>
+              <td class="status"><span class="pill ok">Parity</span></td>
+              <td>via Python <code>daily_bridge.py</code> sidecar; Daily app messages used for both UI events and inbound <code>end_call</code>.</td></tr>
+          <tr><td>STT (Soniox)</td>
+              <td class="status"><span class="pill ok">Parity</span></td>
+              <td>Same model (<code>stt-rt-v4</code>), 16 kHz s16le, <code>language_hints=["hi"]</code>, lazy connect + reconnect.</td></tr>
+          <tr><td>TTS (Cartesia)</td>
+              <td class="status"><span class="pill warn">Mostly</span></td>
+              <td>Same voice ID and model (<code>sonic-3</code>) but <strong>no Hindi <code>PhoneticTextFilter</code></strong> and no <code>language=hi</code> param on the request.</td></tr>
+          <tr><td>LLM</td>
+              <td class="status"><span class="pill bad">Gap</span></td>
+              <td>Hard-coded <code>gpt-4.1</code> via OpenAI direct. Python uses <strong>Grok-4.1-fast-non-reasoning via Azure</strong>. No <code>CustomOpenAILLMService</code> (no LLM logging, no switching service, no entity tracing).</td></tr>
+          <tr><td>System prompt</td>
+              <td class="status"><span class="pill bad">Gap</span></td>
+              <td>Hard-coded English 2-sentence stub in <code>SalesCallBot</code>. Python pulls from Langfuse (<code>sales_call/main_sys-*</code>), chosen by <code>campaign_pricing_experiment_flag</code>, with <code>patient_info</code> + <code>current_datetime</code> variables.</td></tr>
+          <tr><td>Resume / continued conversations</td>
+              <td class="status"><span class="pill bad">Gap</span></td>
+              <td>No <code>resume_message</code>, no <code>unprocessed_chat_context</code> merge.</td></tr>
+          <tr><td>Talk time monitoring</td>
+              <td class="status"><span class="pill warn">Mostly</span></td>
+              <td>Same source (<code>remaining_sales_call_talktime_seconds</code>), same default (<code>LIFETIME_TALKTIME_LIMIT_SECONDS=600</code>), but timer starts at <code>Start</code> not on <code>UserStartedSpeakingFrame</code>.</td></tr>
+          <tr><td>User idle</td>
+              <td class="status"><span class="pill warn">Mostly</span></td>
+              <td>7 s timeout (Python 5 s), prompts <code>"Hello?"</code> up to 7 times (Python 6). <strong>Does not end the call after the cap</strong>; Python cancels the task.</td></tr>
+          <tr><td>Update-conversation timestamps</td>
+              <td class="status"><span class="pill ok">Parity</span></td>
+              <td><code>bot_joined_at</code>, <code>user_joined_at</code>, <code>user_first_speech_at</code>, <code>bot_first_speech_at</code> wired via <code>CallEvents</code> &rarr; <code>/bot/update_conversation</code>.</td></tr>
+          <tr><td>Per-turn Redis chunk persistence</td>
+              <td class="status"><span class="pill warn">Mostly</span></td>
+              <td>Same key shape and JSON layout, but <code>stt_ttfb_ms</code>, <code>current_agenda</code>, <code>main_agent_system_prompt_langfuse_key</code>, <code>system_message_params_s3_key</code>, <code>conversation_state_s3_key</code> are always <code>null</code>.</td></tr>
+          <tr><td>Post-call operations</td>
+              <td class="status"><span class="pill ok">Parity</span></td>
+              <td>Same endpoint, same payload, same end-reason mapping (<code>user_idle</code>, <code>talktime_exhausted</code>, else <code>null</code>).</td></tr>
+          <tr><td>S3 debug-log upload</td>
+              <td class="status"><span class="pill ok">Parity</span></td>
+              <td>Same object key <code>debug_log_data/{cid}/log_data.json</code>, RTVI entries shaped like Python's <code>rtvi-ai</code> log.</td></tr>
+          <tr><td>Daily metrics SQS enqueue</td>
+              <td class="status"><span class="pill ok">Parity</span></td>
+              <td>Same module/func/queue (<code>bots.webhooks.fetch_and_store_daily_metrics</code> on <code>p1-fast-l1</code>).</td></tr>
+          <tr><td>Chunk-sync SQS enqueue</td>
+              <td class="status"><span class="pill ok">Parity</span></td>
+              <td>Same module/func/queue (<code>services.conversation_chunk_manager.sync_conversation_chunks_to_db</code> on <code>p1-fast-l1</code>).</td></tr>
+          <tr><td>Worker HTTP API</td>
+              <td class="status"><span class="pill ok">Parity</span></td>
+              <td><code>/bot/create_worker_room</code>, <code>has_active_session</code>, <code>health_check</code>, <code>readiness_check</code>, <code>pre_stop_check</code>, <code>mark_machine_reserved</code>, <code>trigger_exit</code> all present.</td></tr>
+          <tr><td>Worker registration (<code>register_worker_pod_db_ops</code>)</td>
+              <td class="status"><span class="pill ok">Parity</span></td>
+              <td>Same Redis idempotency key, same SQS module/func/queue.</td></tr>
+          <tr><td>Worker call-cleanup enqueue</td>
+              <td class="status"><span class="pill ok">Parity</span></td>
+              <td><code>bots.signal_handler.cleanup_state</code> on <code>p0-fast-l1</code>, fires when a call ends.</td></tr>
+          <tr><td>SIGTERM handling</td>
+              <td class="status"><span class="pill ok">Parity</span></td>
+              <td>Writes <code>pod_sigterm:{pod}</code>, enqueues <code>on_graceful_shutdown_initiated</code>, keeps active pod alive.</td></tr>
+          <tr><td>Pod <code>safe-to-evict=false</code> on call start</td>
+              <td class="status"><span class="pill bad">Missing</span></td>
+              <td>Python sets the GKE annotation when a call begins; talk-go does not. Cluster autoscaler can evict a busy pod.</td></tr>
+          <tr><td>Sentry / structured error reporting</td>
+              <td class="status"><span class="pill bad">Missing</span></td>
+              <td>No Sentry capture for any failure path. Production silently swallows recoverable errors.</td></tr>
+          <tr><td>Per-conversation log file</td>
+              <td class="status"><span class="pill warn">Different</span></td>
+              <td>Python's <code>setup_custom_logging(conversation_id, "sales_call")</code> writes a separate file per call to CloudWatch. talk-go writes one <code>app.log</code> with a conversation prefix on the logger.</td></tr>
+          <tr><td><code>/connect</code> with <code>conversation_id</code></td>
+              <td class="status"><span class="pill ok">Parity</span></td>
+              <td>Routes through <code>disha.NewBotTask</code>; defaults <code>bot_type</code> to <code>sales_call</code>. Uses a background context so the task survives the HTTP return.</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="bot">
+      <h2>3. Inside the bot &mdash; <code>sales_call.py</code> vs <code>SalesCallBot</code></h2>
+
+      <h3>3.1 Entry &amp; conversation load</h3>
+      <div class="twoColCmp">
+        <div class="col python">
+          <h4>Python: <code>run_bot(room_url, token, conversation_id)</code></h4>
+          <ul>
+            <li>Calls <code>fetch_conversation('sales_call', conversation_id)</code> which:
+              <ul>
+                <li>Reads <code>conversation_data:{cid}</code> from Redis (DB fallback).</li>
+                <li>Loads <code>UserProfile</code> from cache or DB.</li>
+                <li>Pulls <code>unprocessed_chat_context</code> (cache or DB) and appends to <code>short_term_memory</code>.</li>
+                <li>Constructs <code>resume_message</code> if <code>resumed_from_chunk_id</code> is set.</li>
+                <li>Returns 21 fields including <code>patient_info</code>, <code>profile_id</code>, <code>direction</code>, <code>gender</code>, <code>campaign_pricing_experiment_flag</code>, <code>phone</code>, <code>compiled_call_flow_s3_key</code>, etc.</li>
+              </ul>
+            </li>
+            <li>Calls <code>get_sales_call_user_profile_data</code> for <code>remaining_sales_call_talktime_seconds</code>; defaults to <code>LIFETIME_TALKTIME_LIMIT_SECONDS</code> when null.</li>
+          </ul>
+        </div>
+        <div class="col go">
+          <h4>Go: <code>SalesCallBot.BuildOptions</code></h4>
+          <ul>
+            <li><code>collectCallStartup</code> reads <code>conversation_data:{cid}</code> from Redis only (no DB fallback) and validates <code>bot_type</code>.</li>
+            <li>Resolves <code>user_id</code> from <code>conversation.user_id</code> or <code>user_profile.user_id</code>.</li>
+            <li>Reads only <code>remaining_sales_call_talktime_seconds</code>; everything else in the rich Python payload is ignored.</li>
+            <li><strong>No <code>unprocessed_chat_context</code>, no <code>resume_message</code>, no <code>patient_info</code>, no <code>direction</code>, no <code>campaign_pricing_experiment_flag</code>.</strong></li>
+          </ul>
+        </div>
+      </div>
+      <div class="callout warn">
+        <strong>Why this matters</strong>
+        A sales-call user who retries within 5 minutes will land in talk-go without the &ldquo;hanji to aap keh
+        rhe the&rdquo; resume preamble. New users will not get coupon-experiment prompts. Health context from
+        <code>unprocessed_chat_context</code> (e.g. a chat message they just sent) never reaches the LLM.
+      </div>
+
+      <h3>3.2 STT</h3>
+      <div class="twoColCmp">
+        <div class="col python"><h4>Python</h4>
+          <code>CustomSonioxSTTService(api_key=…, vad_force_turn_endpoint=False, params=SonioxInputParams(language_hints=[Language.HI]))</code> &mdash; subclass adds tenacity retry on initial connect and exits with sys.exit(1) when exhausted; emits Sentry.</div>
+        <div class="col go"><h4>Go</h4>
+          <code>STTProcessor</code> dials directly to <code>wss://stt-rt.soniox.com</code> with <code>model: "stt-rt-v4"</code>, <code>language_hints: ["hi"]</code>, <code>enable_endpoint_detection: true</code>, <code>max_endpoint_delay_ms: 300</code>. Lazy connect, automatic reconnect on read error. No Sentry; logs warnings only.</div>
+      </div>
+      <p>Functionally equivalent for the happy path. Difference: <strong>connect failures retry forever in Go</strong>
+        (every 1 s); Python gives up after 3 tries and exits. In Go a permanently bad API key produces an infinitely
+        retrying pod that still consumes a worker slot.</p>
+
+      <h3>3.3 LLM</h3>
+      <div class="twoColCmp">
+        <div class="col python"><h4>Python</h4>
+          <code>CustomOpenAILLMService(model="grok-4-1-fast-non-reasoning", api_key=GROK_4_1_FNR_EASTUS_API_KEY, base_url="https://eastusresourcegroup.openai.azure.com/openai/v1", deployment="cureai-grok4fnr-eastus", switch_llm_config=True, model_group='grok-4.1-fast-sales')</code>. Carries <code>user_id</code>+<code>entity_id</code> for LLM logging, with automatic switching via <code>LLMSwitchingService</code> on errors, temperature=0, prompt metadata persisted to chunks.</div>
+        <div class="col go"><h4>Go</h4>
+          <code>LLMProcessor</code> uses <strong>hard-coded <code>llmModel = "gpt-4.1"</code></strong> against <code>https://api.openai.com/v1/chat/completions</code> with <code>OPENAI_API_KEY</code>. No temperature control, no Langfuse linkage, no fallback model, no per-call entity tracing.</div>
+      </div>
+      <div class="callout bad">
+        <strong>Hard blocker for drop-in</strong>
+        Switching the production sales-call from Grok-4.1-fast (an Azure deployment that&rsquo;s actively price-
+        and quality-tuned for sales) to OpenAI <code>gpt-4.1</code> will change every conversion-rate, latency,
+        and cost number. <code>LLMSwitchingService</code> also handles model failover; without it any Grok
+        outage today would have nowhere to switch to. This must be parameterised before cutover.
+      </div>
+
+      <h3>3.4 TTS</h3>
+      <div class="twoColCmp">
+        <div class="col python"><h4>Python</h4>
+          <code>CartesiaTTSService(api_key=cartesia_api_key, voice_id="95d51f79-c397-46f9-b49a-23763d3eaa2d", model="sonic-3", params=InputParams(language=Language.HI), text_filters=[PhoneticTextFilter()])</code>. <code>cartesia_api_key</code> comes <em>from the conversation row</em>, allowing per-user keys.</div>
+        <div class="col go"><h4>Go</h4>
+          Same voice ID and model literal-embedded in <code>tts_processor.go</code>. <strong>No <code>language</code> param</strong>, <strong>no phonetic dictionary preprocessing</strong>, single <code>CARTESIA_API_KEY</code> env var for every call.</div>
+      </div>
+      <p>Hindi pronunciation will be noticeably worse without <code>PhoneticTextFilter</code> &mdash; the phonetic
+        dictionary maps brand names, drug names, and Devanagari spellings into Latin-letter spellings Cartesia
+        pronounces correctly. The <code>language=hi</code> hint also nudges Cartesia&rsquo;s prosody.</p>
+
+      <h3>3.5 Conversation context &amp; initial messages</h3>
+      <div class="twoColCmp">
+        <div class="col python"><h4>Python</h4>
+          <ol>
+            <li>If <code>previous_messages</code>: rebuild as <code>{role, content}</code> filtering <code>is_debug_log</code> and <code>additional_data</code>.</li>
+            <li>Prepend system prompt with <code>patient_info</code>+<code>current_datetime</code> substitution.</li>
+            <li>If <code>resume_message</code>: append a fresh system message.</li>
+            <li>Otherwise (fresh call): seed with system prompt + <code>{user: "hello?"}</code>.</li>
+          </ol>
+          Wraps the result in <code>LLMContext</code> with <code>system_message_prompt_key</code>, <code>prompt_metadata</code>, <code>system_message_params</code> &mdash; these are persisted with every chunk.
+        </div>
+        <div class="col go"><h4>Go</h4>
+          <code>initialMessagesFromChunks(SalesCallSystemPrompt, startup.Data.Chunks, {user:"hello?"})</code> exactly mirrors steps 1, 2 (with the hard-coded English prompt), and 4. <strong>No resume_message step.</strong> No <code>system_message_prompt_key</code> on chunks &mdash; the Redis-to-DB sync will write <code>null</code> there.</div>
+      </div>
+
+      <h3>3.6 Talk-time monitor</h3>
+      <div class="twoColCmp">
+        <div class="col python"><h4>Python</h4>
+          <code>TalktimeMonitor</code> arms its timer <em>only after the first <code>UserStartedSpeakingFrame</code></em>. On timeout: pushes <code>TTSSpeakFrame("Your allocated talk time has been exhausted. Thank you for your time.")</code>, calls <code>on_talktime_exhausted</code> (PATCH <code>/update_conversation</code> with <code>end_reason</code>, send RTVI <code>talktime_exhausted</code>, perform_cleanup).</div>
+        <div class="col go"><h4>Go</h4>
+          <code>TalkTimeMonitoringProcessor</code> arms its timer in <code>Start</code> (<em>before</em> the user joins). On timeout: pushes <code>InterruptFrame</code> + <code>TTSSpeakFrame("Your talk time is exhausted now. Ending the call.")</code> then calls <code>taskCtx.EndTask(EndReasonTalkTimeExhausted)</code>. Sends <code>server-message</code> RTVI <code>talktime_exhausted</code>. End reason maps correctly to Disha.</div>
+      </div>
+      <div class="callout warn">
+        <strong>Behavioural diff</strong>
+        Because Go starts the timer at construction, the user&rsquo;s talktime budget begins counting before
+        they actually speak (or even join). For users with 30 seconds left this can be the difference between
+        a successful upsell and an empty pod. Move the timer arm into <code>ContextAggregator</code>&rsquo;s
+        first user-message branch (or react to a future <code>UserStartedSpeakingFrame</code>).
+      </div>
+
+      <h3>3.7 User idle</h3>
+      <div class="twoColCmp">
+        <div class="col python"><h4>Python</h4>
+          <code>UserIdleProcessor</code> from Pipecat with <code>timeout=5.0</code>, callback <code>handle_idle</code> that pushes <code>TTSSpeakFrame("hello?", append_to_context=True)</code> up to 6 times and then calls <code>task.cancel()</code> with <code>user_idle_timeout_triggered=True</code> &rarr; end_reason <code>user_idle</code> on the post-call. Plus a global <code>idle_timeout_secs=120</code> on the <code>PipelineTask</code> with <code>cancel_on_idle_timeout=True</code> as a hard safety net.</div>
+        <div class="col go"><h4>Go</h4>
+          <code>UserIdleProcessor</code>: 7 s timeout, max 7 prompts. On reaching the cap it just <em>stops prompting</em> &mdash; <strong>it does not call <code>taskCtx.EndTask(EndReasonUserIdle)</code></strong>. No equivalent of the 120 s no-frames-at-all safety net.</div>
+      </div>
+      <div class="callout bad">
+        <strong>Bug-shaped gap</strong>
+        A user who silently joins and never speaks will hold the pod for the full talktime budget (default
+        600 s) before the talk-time exhaustion path kicks in &mdash; and they will hear &ldquo;Hello?&rdquo;
+        seven times. Python kills the call after ~30 s of silence (5 s &times; 6). Easy fix: when
+        <code>idlePromptCount</code> reaches the cap call <code>p.taskCtx.EndTask(EndReasonUserIdle)</code>.
+      </div>
+
+      <h3>3.8 RTVI &amp; client messages</h3>
+      <div class="twoColCmp">
+        <div class="col python"><h4>Python</h4>
+          <code>CustomRTVIProcessor</code> + <code>CustomRtviObserver</code> emit <code>rtvi-ai</code> entries for <code>bot-transcription</code>, <code>user-transcription</code>, <code>bot-started/stopped-speaking</code>, <code>server-message</code> (metrics, llm_call_result, interruption, talktime_exhausted, participant-left). Also handles inbound <code>{type:"ping"}</code> and responds with <code>"pong"</code> via <code>send_server_response</code>.</div>
+        <div class="col go"><h4>Go</h4>
+          <code>UIEventSender</code> emits all the outbound types above through Daily app messages and snapshots them into the S3 debug log. Inbound side handles <code>{type:"end_call"}</code> only &mdash; no <code>ping</code>/<code>pong</code>.</div>
+      </div>
+      <p>If your client relies on pong-based keepalive (look at <code>daily-client.html</code>), it will time out
+        against talk-go. The Disha-shipped browser client does send pings periodically.</p>
+    </section>
+
+    <section id="pipeline">
+      <h2>4. Pipeline parity (frames, processors, ordering)</h2>
+      <p>Both run the same logical chain:</p>
+      <pre><code>transport.input() &rarr; user_idle &rarr; rtvi &rarr; stt &rarr; user_aggregator &rarr; llm &rarr; talktime &rarr; tts &rarr; transport.output() &rarr; assistant_aggregator
+</code></pre>
+      <p>The Go ordering folds the user and assistant aggregators into one <code>ContextAggregator</code> that lives
+        between STT and TalkTime &mdash; functionally equivalent because the Go aggregator commits on
+        <code>TTSDoneFrame</code> arriving upstream from <code>PlaybackSink</code>. Differences worth flagging:</p>
+      <ul>
+        <li><strong>Min-words barge-in</strong> &mdash; both use <code>min_words=3</code>. ✓</li>
+        <li><strong>SpeechTimeoutUserTurnStopStrategy</strong> (Python <code>user_speech_timeout=0.05</code>) &mdash; talk-go relies on Soniox's <code>&lt;end&gt;</code> token directly; functionally similar but the 50 ms guard does not exist.</li>
+        <li><strong>Back-channel discard</strong> &mdash; talk-go implements <em>both</em> branches (in-progress and at-bot-turn-end), matching Pipecat <code>reset_aggregation</code>. ✓</li>
+        <li><strong>InterruptFrame purges procCh keeping <code>!IsInterruptible()</code></strong> &mdash; mirror of Pipecat <code>UninterruptibleFrame</code> mixin. ✓</li>
+        <li><strong>WordTimestampFrame interleaving</strong> &mdash; both interleave words with audio frames at PlaybackSink; talk-go uses Cartesia <code>add_timestamps</code>. ✓</li>
+        <li><strong>EndFrame-driven cleanup</strong> &mdash; both route shutdown through the source so STT/AudioSource/UserIdle/ContextAggregator see it in pipeline order. ✓</li>
+        <li><strong>Custom Daily transport join retry (3&times;)</strong> &mdash; Python implements <code>CustomDailyTransportClient.join</code> with 3 retries. talk-go's <code>JoinDailyRoom</code> dials the bridge once with a 20 s join timeout. Add retry if Daily intermittently rejects joins.</li>
+        <li><strong>Background office sound mixer</strong> &mdash; Python plays <code>background-office-sound.mp3</code> at volume 0.5 via Pipecat's <code>CustomSoundMixer</code>. talk-go has the mp3 file checked in but, on current reading, doesn't wire it into <code>PlaybackSinkProcessor</code>. Verify before shipping; users notice a quiet bot.</li>
+      </ul>
+    </section>
+
+    <section id="persistence">
+      <h2>5. Persistence &amp; post-call operations</h2>
+
+      <h3>5.1 Per-turn chunk shape</h3>
+      <table>
+        <thead><tr><th>Field</th><th>Python</th><th>Go</th><th>Status</th></tr></thead>
+        <tbody>
+          <tr><td><code>id</code> (uuid)</td><td>✓</td><td>✓ <code>uuid.NewString()</code></td><td><span class="pill ok">Same</span></td></tr>
+          <tr><td><code>text</code></td><td>✓</td><td>✓</td><td><span class="pill ok">Same</span></td></tr>
+          <tr><td><code>role</code></td><td><code>user</code>/<code>assistant</code></td><td>same</td><td><span class="pill ok">Same</span></td></tr>
+          <tr><td><code>bot_type</code></td><td><code>sales_call</code></td><td>same</td><td><span class="pill ok">Same</span></td></tr>
+          <tr><td><code>conversation_id</code>, <code>user_id</code></td><td>✓</td><td>✓</td><td><span class="pill ok">Same</span></td></tr>
+          <tr><td><code>current_agenda</code></td><td>From <code>conversation_state</code> or <code>system_message_params['agenda']</code></td><td>Always <code>nil</code></td><td><span class="pill warn">Lossy</span></td></tr>
+          <tr><td><code>stt_ttfb_ms</code></td><td>From MetricsTracker</td><td>Always <code>nil</code></td><td><span class="pill warn">Lossy</span></td></tr>
+          <tr><td><code>llm_ttfb_ms</code>, <code>tts_ttfb_ms</code>, <code>v2v_latency_ms</code>, <code>text_aggregation_ms</code></td><td>From MetricsTracker (assistant only)</td><td>From <code>TurnMetrics</code> (assistant only)</td><td><span class="pill ok">Same</span></td></tr>
+          <tr><td><code>created</code></td><td>ISO 8601</td><td>RFC 3339Nano</td><td><span class="pill ok">Compatible</span></td></tr>
+          <tr><td><code>is_debug_log</code></td><td><code>false</code> for normal turns</td><td>same</td><td><span class="pill ok">Same</span></td></tr>
+          <tr><td><code>additional_data</code></td><td>function-call payloads etc</td><td>Always omitted (<code>nil</code>)</td><td><span class="pill ok">Same for sales-call</span></td></tr>
+          <tr><td><code>main_agent_system_prompt_langfuse_key</code></td><td><code>"sales_call/main_sys-3day_v2_v17"</code> etc</td><td>Always <code>nil</code></td><td><span class="pill warn">Lossy</span></td></tr>
+          <tr><td><code>system_message_params_s3_key</code></td><td>S3 key per chunk</td><td>Always <code>nil</code></td><td><span class="pill warn">Lossy</span></td></tr>
+          <tr><td><code>conversation_state_s3_key</code></td><td>S3 key when <code>conversation_state</code> set (sales-call doesn't, so usually null)</td><td>Always <code>nil</code></td><td><span class="pill ok">Same in practice</span></td></tr>
+        </tbody>
+      </table>
+      <p>The lossy fields (<code>stt_ttfb_ms</code>, <code>current_agenda</code>,
+        <code>main_agent_system_prompt_langfuse_key</code>) are read downstream by analytics dashboards but do not
+        affect call behaviour. Decide whether you can live with them being null in talk-go-produced data, or wire
+        them up before cutover.</p>
+
+      <h3>5.2 Storage paths</h3>
+      <ul>
+        <li>Redis key &mdash; <code>conversation_chunks:{user_id}:{conversation_id}</code>, RPUSH JSON. ✓</li>
+        <li>S3 debug log &mdash; <code>debug_log_data/{conversation_id}/log_data.json</code> via SigV4 PUT (talk-go uses its own SigV4 implementation, not the AWS SDK). ✓</li>
+        <li>Post-call &mdash; <code>POST /bot/run_post_call_operations</code> with the full struct including <code>ended_at</code>, <code>first_user_audio_frames_received_at</code>, <code>total_user_duration</code>, <code>log_data_s3_key</code>. ✓</li>
+        <li>Chunk-sync &mdash; enqueued through Disha's <code>/common/enqueue_job</code> with module <code>services.conversation_chunk_manager</code>, func <code>sync_conversation_chunks_to_db</code>, queue <code>p1-fast-l1</code>. ✓</li>
+        <li>Daily metrics &mdash; enqueued through <code>/common/enqueue_job</code> with module <code>bots.webhooks</code>, func <code>fetch_and_store_daily_metrics</code>, queue <code>p1-fast-l1</code>, kwargs <code>conversation_id, meeting_id, bot_session_id, user_session_id</code>. ✓</li>
+        <li>Voice-Bot-API <strong>fallback to SQS</strong> &mdash; Python's <code>VoiceBotAPIService._call_api_with_fallback</code> queues to SQS when the API call fails. talk-go's <code>APIClient</code> just logs and returns. ✗</li>
+      </ul>
+      <div class="callout warn">
+        <strong>Missing fallback path</strong>
+        If Disha&rsquo;s API is briefly down during a call end, talk-go will lose the post-call write &mdash;
+        Python would have queued it. Add a small queue-on-failure step in <code>CallEventCallbacks</code> (or
+        keep this in the &ldquo;accept the gap&rdquo; column if you trust the API&rsquo;s uptime).
+      </div>
+
+      <h3>5.3 End-reason mapping</h3>
+      <ul>
+        <li><code>EndReasonTalkTimeExhausted</code> &rarr; <code>"talktime_exhausted"</code>. ✓</li>
+        <li><code>EndReasonUserIdle</code> &rarr; <code>"user_idle"</code>. ✓ (but never fires today, see 3.7)</li>
+        <li><code>EndReasonClientDisconnect</code>, <code>EndReasonError</code>, <code>EndReasonUnspecified</code> &rarr; <code>nil</code>. ✓ (matches Python &mdash; the DB enum only accepts the two values above; everything else is null/end_reason omitted).</li>
+      </ul>
+    </section>
+
+    <section id="worker">
+      <h2>6. Worker machine &amp; pod lifecycle</h2>
+
+      <h3>6.1 HTTP surface</h3>
+      <table>
+        <thead><tr><th>Endpoint</th><th>Python</th><th>talk-go</th><th>Notes</th></tr></thead>
+        <tbody>
+          <tr><td><code>POST /bot/create_worker_room</code></td><td>✓</td><td>✓</td><td>Same payload (<code>room_url</code>, <code>token</code>, <code>bot_token</code>, <code>conversation_id</code>, <code>bot_worker_type</code>). Both return immediately and start the bot in background.</td></tr>
+          <tr><td><code>GET /bot/has_active_session</code></td><td>✓</td><td>✓</td><td>Same JSON shape.</td></tr>
+          <tr><td><code>GET /bot/health_check</code></td><td>✓</td><td>✓</td><td><code>{status: "healthy"}</code>.</td></tr>
+          <tr><td><code>GET /bot/readiness_check</code></td><td>✓</td><td>✓</td><td>503 when active or reserved, otherwise <code>ready</code>.</td></tr>
+          <tr><td><code>GET /bot/pre_stop_check</code></td><td>✓</td><td>✓ (aliased to health_check)</td><td>OK to alias; Python's pre_stop is also just <code>"healthy"</code>.</td></tr>
+          <tr><td><code>POST /bot/mark_machine_reserved</code></td><td>✓ also sets <code>safe_to_evict=false</code></td><td>✓ (no annotation patch)</td><td><strong>talk-go does not patch the pod annotation.</strong></td></tr>
+          <tr><td><code>POST /bot/trigger_exit</code></td><td>✓ <code>os._exit(0)</code></td><td>✓ delayed 50 ms then <code>os.Exit(0)</code></td><td>Same intent.</td></tr>
+          <tr><td><code>POST /bot/create_room</code></td><td>✓ (admin/user-facing, not worker)</td><td>not implemented</td><td>Not needed on a worker pod; main Disha still owns this.</td></tr>
+          <tr><td><code>POST /bot/create_fly_room</code>, <code>/trigger_call</code>, <code>/request_callback</code>, <code>/update_conversation</code> etc.</td><td>✓</td><td>not implemented</td><td>These are Disha's main-app surface, not worker-pod surface. Out of scope for a worker drop-in.</td></tr>
+        </tbody>
+      </table>
+      <p>For a Disha-style worker pod, <strong>talk-go covers the full surface that <code>bots.urls</code> exposes
+        on the worker side</strong>.</p>
+
+      <h3>6.2 Pod registration</h3>
+      <p>Python and talk-go both check <code>HOSTNAME</code>+<code>POD_UID</code>+<code>FLY_APP_NAME</code> (talk-go
+        also accepts <code>GKE_DEPLOYMENT_NAME</code>), check Redis <code>registered_pod:{pod}:{uid}</code>,
+        enqueue <code>bots.gke_pod_manager.register_worker_pod_db_ops</code> on <code>fifo-p0-fast-l1</code>, then
+        write the idempotency key for 24 h. <strong>Order: enqueue first, write key after</strong> &mdash; matches
+        Python.</p>
+      <p>Python additionally captures <code>pod_ip</code> via <code>subprocess.check_output(['hostname','-i'])</code>;
+        talk-go uses <code>POD_IP</code> env, then <code>os.Hostname()</code>+<code>net.LookupIP</code>, then
+        <code>net.InterfaceAddrs</code>. Robust either way.</p>
+
+      <h3>6.3 In-call lifecycle</h3>
+      <table>
+        <thead><tr><th>Step</th><th>Python</th><th>talk-go</th></tr></thead>
+        <tbody>
+          <tr><td>Mark <code>worker_active=true</code></td><td><code>BotWorkerManager.create_bot_task</code></td><td><code>worker.tryStart()</code></td></tr>
+          <tr><td>Set pod <code>safe-to-evict=false</code></td><td>✓ <code>GKEPodManager.set_safe_to_evict</code></td><td><strong>✗ Not implemented</strong></td></tr>
+          <tr><td>Run the bot</td><td><code>await run_bot(...)</code></td><td><code>task.Start()</code></td></tr>
+          <tr><td>On bot finish: clear flags</td><td><code>worker_active=False; worker_reserved=False; worker_task=None</code></td><td><code>worker.finish()</code> (same three flags)</td></tr>
+          <tr><td>Enqueue <code>cleanup_state</code></td><td>✓ on <code>p0-fast-l1</code></td><td>✓ on <code>p0-fast-l1</code></td></tr>
+        </tbody>
+      </table>
+
+      <h3>6.4 Why <code>safe-to-evict</code> matters</h3>
+      <p>GKE Autopilot uses the
+        <code>cluster-autoscaler.kubernetes.io/safe-to-evict</code> annotation to decide whether a pod can be
+        evicted during scale-down. Python flips it to <code>false</code> at two moments: when the pod is
+        <em>reserved</em>, and when the pod becomes <em>active</em> for a call. talk-go does neither &mdash; if
+        the autoscaler hits the pod during a call, the call dies abruptly. Even adding the annotation only at
+        reservation time would catch most cases (the reservation comes from Disha's
+        <code>reserve_worker_pod</code> before <code>create_worker_room</code>, so the Go pod is
+        <code>reserved</code> for several seconds before the user joins).</p>
+    </section>
+
+    <section id="signal">
+      <h2>7. Signal handling &amp; graceful shutdown</h2>
+      <p>Both implementations follow the same protocol:</p>
+      <ol>
+        <li>First <code>SIGTERM</code> &mdash; ignore duplicates, write Redis key <code>pod_sigterm:{pod}</code> with 2 h TTL, enqueue <code>bots.signal_handler.on_graceful_shutdown_initiated</code> on <code>fifo-p0-fast-l1</code>.</li>
+        <li>Idle pod &rarr; exit immediately so Kubernetes rollouts don&rsquo;t stall.</li>
+        <li>Active/reserved pod &rarr; stay alive; Disha&rsquo;s state-manager job decides whether to cleanup.</li>
+        <li><code>SIGINT</code> &rarr; immediate exit for local dev parity.</li>
+      </ol>
+      <p>talk-go&rsquo;s <code>registerCleanupHandlers</code> matches this. Differences:</p>
+      <ul>
+        <li>Python has an <code>atexit</code> handler that emits a Sentry <code>"Abrupt machine kill detected"</code>
+          message when shutdown wasn&rsquo;t graceful. talk-go has no equivalent.</li>
+        <li>Python uses <code>os.write(2, ...)</code> for signal-safe logging (avoids reentrancy into buffered
+          I/O); Go&rsquo;s <code>log</code> package is already safe enough that this is not needed.</li>
+      </ul>
+    </section>
+
+    <section id="observability">
+      <h2>8. Observability</h2>
+      <table>
+        <thead><tr><th>Surface</th><th>Python</th><th>talk-go</th></tr></thead>
+        <tbody>
+          <tr><td>Per-conversation log file</td><td><code>setup_custom_logging(conversation_id)</code> writes <code>logs/{cid}.log</code>, CloudWatch ships it.</td><td>Single <code>app.log</code> with <code>[conv=...]</code> prefix on the logger.</td></tr>
+          <tr><td>Sentry exception capture</td><td>Everywhere &mdash; failed Redis writes, failed post-call, S3 upload, signal handlers, etc.</td><td><strong>None</strong>.</td></tr>
+          <tr><td>RTVI debug log (S3 upload)</td><td>✓ <code>logs_data</code> on <code>CustomRtviObserver</code></td><td>✓ <code>UIEventSender.Snapshot()</code></td></tr>
+          <tr><td>Per-turn metrics in chunk</td><td>✓ via MetricsTracker</td><td>✓ via <code>TurnMetrics</code> (minus <code>stt_ttfb_ms</code>)</td></tr>
+          <tr><td>RTVI <code>llm_call_result</code> server-message</td><td>✓</td><td>✓</td></tr>
+          <tr><td>RTVI <code>metric</code> server-message</td><td>via Pipecat metrics observer</td><td>✓ explicit (one per metric)</td></tr>
+          <tr><td>Goroutine/thread stacks on shutdown timeout</td><td>n/a (asyncio)</td><td>✓ <code>captureGoroutineStacks</code> when 10 s WG-wait expires</td></tr>
+        </tbody>
+      </table>
+      <div class="callout bad">
+        <strong>Sentry is non-negotiable in production</strong>
+        Python wraps <em>every</em> non-trivial operation in <code>try/except + sentry_sdk.capture_exception</code>.
+        Without that, a Disha API outage during call-end will be invisible to your on-call. Wire in
+        <a href="https://github.com/getsentry/sentry-go" target="_blank">sentry-go</a> before treating this as
+        production-ready.
+      </div>
+    </section>
+
+    <section id="config">
+      <h2>9. Config &amp; environment variables</h2>
+      <p>talk-go's runtime config:</p>
+      <pre><code>SONIOX_API_KEY            # STT
+OPENAI_API_KEY            # LLM (talk-go uses OpenAI direct)
+CARTESIA_API_KEY          # TTS — single key for all calls
+DISHA_API_URL / API_BASE_URL
+DISHA_REDIS_URL
+DISHA_REDIS_PASSWORD
+REDIS_DB
+DAILY_BRIDGE_PYTHON       # path to Python venv for the daily_bridge.py sidecar
+PORT / FAST_API_PORT      # default 3000; GKE uses 7860
+HOSTNAME                  # set by k8s
+POD_UID, POD_IP           # set by k8s
+FLY_APP_NAME / GKE_DEPLOYMENT_NAME
+ACCESS_KEY_ID, SECRET_KEY_ID, AWS_MAIN_REGION, AWS_BUCKET_NAME  # debug-log S3 upload
+</code></pre>
+      <p>Missing relative to Python (because the model/prompt are hard-coded):</p>
+      <ul>
+        <li><code>GROK_4_1_FNR_EASTUS_API_KEY</code> &mdash; talk-go doesn&rsquo;t use Grok.</li>
+        <li>Langfuse credentials &mdash; talk-go doesn&rsquo;t fetch prompts.</li>
+        <li>Per-user <code>cartesia_api_key</code> from <code>conversation_data</code> &mdash; talk-go reads only <code>CARTESIA_API_KEY</code> env.</li>
+      </ul>
+      <p>You will want to add <code>SENTRY_DSN</code>, <code>ENVIRONMENT</code> and probably
+        <code>TALK_GO_DEPLOYMENT_NAME</code>+<code>ARTIFACT_REPOSITORY_NAME</code> if you go to staging.</p>
+    </section>
+
+    <section id="gaps">
+      <h2>10. Detailed gap list</h2>
+
+      <h3>10.1 Must-fix before cutover (correctness or user-experience)</h3>
+      <table>
+        <thead><tr><th>#</th><th>Gap</th><th>Where</th><th>Effort</th></tr></thead>
+        <tbody>
+          <tr><td>M1</td><td>Sales prompt is a 2-line English stub instead of the live Langfuse prompts gated on <code>campaign_pricing_experiment_flag</code>.</td><td><code>disha/sales_call.go</code></td><td>Medium &mdash; need a Langfuse client + variable substitution + a way to pin <code>system_message_prompt_key</code> in chunks.</td></tr>
+          <tr><td>M2</td><td>LLM is OpenAI <code>gpt-4.1</code>; production uses Grok-4.1-fast on Azure via <code>CustomOpenAILLMService</code> with switching.</td><td><code>voicepipelinecore/llm_processor.go</code></td><td>Medium &mdash; thread model/base_url/api_key/deployment through TaskOptions; add a switching layer.</td></tr>
+          <tr><td>M3</td><td>Cartesia has no <code>PhoneticTextFilter</code> and no <code>language=hi</code>.</td><td><code>voicepipelinecore/tts_processor.go</code></td><td>Small &mdash; fetch the phonetic dict from S3 at startup and run a regex replace before <code>sendTextToTTS</code>; add <code>language: "hi"</code> to the payload.</td></tr>
+          <tr><td>M4</td><td>UserIdle never ends the call after the prompt cap; Python cancels the task.</td><td><code>voicepipelinecore/user_idle_processor.go</code></td><td>Tiny &mdash; on max prompts call <code>p.taskCtx.EndTask(EndReasonUserIdle)</code> before returning.</td></tr>
+          <tr><td>M5</td><td>Talktime monitor starts at <code>Start</code>, not at first user speech.</td><td><code>voicepipelinecore/talktime_monitoring_processor.go</code></td><td>Small &mdash; introduce a <code>UserStartedSpeakingFrame</code> equivalent or gate <code>runTimer</code> on first <code>TranscriptFrame.IsFinal</code>.</td></tr>
+          <tr><td>M6</td><td>No <code>resume_message</code> for interrupted-and-resumed conversations.</td><td><code>disha/call_startup.go</code></td><td>Small &mdash; reproduce <code>fetch_conversation</code>&rsquo;s 5-min branch; append a system message before pushing to LLM.</td></tr>
+          <tr><td>M7</td><td>No <code>safe-to-evict=false</code> annotation on the GKE pod when a call begins.</td><td><code>worker_api.go</code> + a small k8s client.</td><td>Small &mdash; PATCH the pod via the in-cluster API; gate on <code>HOSTNAME</code> being set.</td></tr>
+          <tr><td>M8</td><td>No Sentry. Every recoverable error path is invisible in production.</td><td>Cross-cutting</td><td>Small &mdash; <code>sentry-go</code> init in <code>main</code>, wrap the call-event dispatcher and API client failure paths.</td></tr>
+          <tr><td>M9</td><td>Cartesia API key is one global env var; Python takes it from the conversation row (per-user / per-campaign).</td><td><code>disha/sales_call.go</code> &amp; <code>tts_processor.go</code></td><td>Small &mdash; surface <code>CartesiaAPIKey</code> on <code>TaskOptions</code> and pass through.</td></tr>
+        </tbody>
+      </table>
+
+      <h3>10.2 Should-fix (operational hygiene / data quality)</h3>
+      <table>
+        <thead><tr><th>#</th><th>Gap</th><th>Effort</th></tr></thead>
+        <tbody>
+          <tr><td>S1</td><td>No fallback-to-SQS when <code>/bot/update_conversation</code> or <code>/bot/run_post_call_operations</code> fails. Match Python's <code>VoiceBotAPIService._call_api_with_fallback</code>.</td><td>Small</td></tr>
+          <tr><td>S2</td><td>STT connect retries forever on auth failure. Cap at e.g. 5 retries then call <code>taskCtx.EndTask(EndReasonError)</code>.</td><td>Tiny</td></tr>
+          <tr><td>S3</td><td>Daily bridge has no equivalent of Python's 3-attempt <code>join</code> retry. Add a small retry around <code>JoinDailyRoom</code> or inside the bridge script.</td><td>Tiny</td></tr>
+          <tr><td>S4</td><td>Background office mp3 is checked in but doesn't appear to be mixed into outbound audio at <code>PlaybackSinkProcessor</code>. Confirm by listening; wire it up if missing.</td><td>Small</td></tr>
+          <tr><td>S5</td><td>Per-conversation log file like Python's loguru sink (CloudWatch picks up <code>logs/{cid}.log</code>). Use a TaskContext-scoped <code>io.Writer</code>.</td><td>Small</td></tr>
+          <tr><td>S6</td><td>Persist <code>main_agent_system_prompt_langfuse_key</code>, <code>system_message_params_s3_key</code>, <code>stt_ttfb_ms</code> on chunk writes for analytics parity.</td><td>Small (depends on M1)</td></tr>
+          <tr><td>S7</td><td>Add inbound <code>ping</code>/<code>pong</code> over Daily app messages for browser keepalive.</td><td>Tiny</td></tr>
+          <tr><td>S8</td><td>Global 120 s "no relevant frames" idle timeout (Python's <code>cancel_on_idle_timeout</code>). Hard safety net.</td><td>Small</td></tr>
+          <tr><td>S9</td><td><code>atexit</code>-style alert on abrupt shutdown (Sentry message). Once M8 is in.</td><td>Tiny</td></tr>
+        </tbody>
+      </table>
+
+      <h3>10.3 Nice-to-have (cosmetic / future-proofing)</h3>
+      <ul>
+        <li>Persist <code>direction</code> (incoming/outgoing) on the conversation update path &mdash; talk-go ignores it today.</li>
+        <li>Surface <code>FLY_MACHINE_ID</code>/<code>HOSTNAME</code> on Sentry tags once Sentry is in.</li>
+        <li>Carry <code>prompt_metadata</code> through to chunks so prompt-eval tooling works against talk-go output.</li>
+        <li>OpenTelemetry tracing parity with Pipecat's <code>OPENTELEMETRY_AVAILABLE</code> (currently disabled in Python too &mdash; can stay parked).</li>
+        <li>Match Python's exact idle-prompt text (<code>"hello?"</code> lowercase) and idle timeout (5 s) to keep A/B comparisons clean.</li>
+      </ul>
+    </section>
+
+    <section id="cutover">
+      <h2>11. Cutover plan if you decide to ship</h2>
+      <ol>
+        <li><strong>Stage in dual-write mode first.</strong> Keep Python sales-call serving 100% of traffic. Point Disha's <code>create_room</code> for a tiny user cohort (1%) at the talk-go staging deployment. Capture chunk persistence and post-call rows side-by-side and compare conversion rate and v2v latency for a week.</li>
+        <li><strong>Close M1–M9.</strong> These are the bare minimum to put a real Hindi sales user on talk-go without regressing.</li>
+        <li><strong>Wire Sentry (M8) and the SQS fallback (S1).</strong> Without these two, you will see a smaller crater than reality during incidents.</li>
+        <li><strong>Run a 1-hour bake</strong> on staging with synthetic users (no real Cartesia/Grok billing impact if you mock) to confirm zero goroutine leaks &mdash; the captureGoroutineStacks dump should never fire on a clean run.</li>
+        <li><strong>Promote behind a per-user feature flag</strong> that flips <code>CreateRoom</code> in Disha to call talk-go for selected users. Roll out 1% &rarr; 10% &rarr; 50% &rarr; 100% over a week with conversion-rate guardrails.</li>
+        <li><strong>Decommission Python sales-call</strong> only after talk-go has served 100% sales traffic for two weeks with no regressions on (a) chunk persistence completeness, (b) call success rate, (c) p99 v2v latency, (d) Sentry error count.</li>
+      </ol>
+      <div class="callout info">
+        <strong>Where talk-go is genuinely better</strong>
+        Independent of parity, the Go pipeline has cleaner cancellation semantics than the Pipecat 0.0.108 build
+        (explicit per-processor <code>procCtx</code>, EndFrame survives interrupt purges via
+        <code>IsInterruptible()</code>, single-shared WaitGroup with bounded wait + goroutine dump on timeout).
+        Replacing the Python sales-call is not a downgrade once M1&ndash;M9 are in. The
+        <em>process model</em> &mdash; one binary per pod, no asyncio scheduler under load &mdash; should give
+        you a measurable v2v p99 improvement on busy machines.
+      </div>
+    </section>
+
+    <section>
+      <h2>Appendix &mdash; files I read to produce this report</h2>
+      <h4>talk-go</h4>
+      <pre><code>main.go
+worker_api.go
+signal_handler.go
+disha/sales_call.go
+disha/bot.go
+disha/call_startup.go
+disha/call_event_callbacks.go
+disha/api_client.go
+disha/redis_client.go
+disha/types.go
+disha/worker_jobs.go
+disha/s3_uploader.go
+voicepipelinecore/pipeline.go
+voicepipelinecore/task_types.go
+voicepipelinecore/context_aggregator.go
+voicepipelinecore/llm_processor.go
+voicepipelinecore/tts_processor.go
+voicepipelinecore/stt_processor.go
+voicepipelinecore/user_idle_processor.go
+voicepipelinecore/talktime_monitoring_processor.go
+voicepipelinecore/daily_room.go
+AGENTS.md
+</code></pre>
+      <h4>disha-backend</h4>
+      <pre><code>bots/sales_call/sales_call.py
+bots/signal_handler.py
+bots/bot_worker_manager.py
+bots/views.py
+bots/urls.py
+bots/talktime_monitor.py
+bots/gke_pod_manager.py
+bots/services/voice_bot_api_service.py
+bots/followup_call/fetch_conversation.py
+bots/onboarding_call/onboarding_call_init_manager.py
+bots/onboarding_call/conversation_persistence_processor.py
+bots/onboarding_call/custom_rtvi_observer.py
+bots/onboarding_call/custom_daily_transport.py
+bots/onboarding_call/custom_soniox_stt.py
+bots/onboarding_call/metrics_tracker.py
+bots/onboarding_call/phonetic_text_filter.py
+services/conversation_chunk_manager.py
+services/conversation_chunks_cache.py
+common/sqs_queue_mapping_manager.py
+</code></pre>
+    </section>
+  </main>
+
+  <footer>
+    Report produced by Composer for Jaideep &middot; sales-call-drop-in-report.html
+  </footer>
+</body>
+</html>

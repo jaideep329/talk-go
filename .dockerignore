@@ -1,0 +1,11 @@
+.git
+.idea
+.env
+.prod.env
+app.log
+*.log
+Dockerfile
+k8s/
+deploy.sh
+sales-call-parity-report.html
+pipeline-design-review.html

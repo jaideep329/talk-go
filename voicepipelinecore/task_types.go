@@ -33,6 +33,10 @@ type CallStats struct {
 	TotalUserDurationSec  float64
 	FirstUserAudioFrameAt time.Time
 	EndedAt               time.Time
+	MeetingID             string
+	BotSessionID          string
+	UserSessionID         string
+	DebugLogs             []RTVIDebugLogEntry
 }
 
 // CallEvents are integration callbacks for call lifecycle and committed

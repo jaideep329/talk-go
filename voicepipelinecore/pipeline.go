@@ -162,6 +162,8 @@ func NewTask(parentCtx context.Context, opts TaskOptions) (*PipelineTask, error)
 	uiEvents := NewUIEventSender(logger)
 	callStats := newCallStatsTracker()
 	turnMetrics := &perTurnMetrics{}
+	var llmMetricMu sync.Mutex
+	var lastLLMTTFBMs float64
 
 	// task is created first (with zero-value WaitGroup) so taskCtx can
 	// hold a pointer to it.
@@ -177,11 +179,29 @@ func NewTask(parentCtx context.Context, opts TaskOptions) (*PipelineTask, error)
 		turnMetrics.absorb(mf)
 		for _, d := range mf.Data {
 			logger.Printf("Metric [%s] %s: %.1fms\n", d.Processor, d.Label, d.ValueMs)
-			uiEvents.Send(UIEvent{Type: Metrics, Data: map[string]interface{}{
+			if d.Processor == "llm" {
+				llmMetricMu.Lock()
+				if d.Label == MetricTTFB {
+					lastLLMTTFBMs = d.ValueMs
+				}
+				if d.Label == MetricProcessing {
+					uiEvents.ServerMessage(map[string]any{
+						"type":     "llm_call_result",
+						"status":   "completed",
+						"model":    llmModel,
+						"ttfb_ms":  lastLLMTTFBMs,
+						"total_ms": d.ValueMs,
+					}, time.Now())
+					lastLLMTTFBMs = 0
+				}
+				llmMetricMu.Unlock()
+			}
+			uiEvents.ServerMessage(map[string]any{
+				"type":      "metric",
 				"processor": d.Processor,
 				"label":     string(d.Label),
 				"value_ms":  d.ValueMs,
-			}})
+			}, time.Now())
 		}
 	}
 
@@ -312,7 +332,7 @@ func (t *PipelineTask) runCleanup(frame EndFrame) {
 	reason := normalizeEndReason(EndReason(frame.Reason))
 	t.setEndReason(reason)
 	t.TaskCtx.Logger.Printf("EndFrame reached pipeline sink, cleaning up task: %s\n", reason)
-	t.TaskCtx.UIEvents.Send(UIEvent{Type: CallEnded, Data: map[string]interface{}{"reason": reason}})
+	t.TaskCtx.UIEvents.ServerMessage(map[string]any{"type": "call_ended", "reason": reason}, time.Now())
 
 	// Stop signals cancellation to all processors; the actual wait happens
 	// via the shared WaitGroup below.
@@ -347,12 +367,14 @@ func (t *PipelineTask) runCleanup(frame EndFrame) {
 	if t.callStats != nil {
 		t.callStats.MarkUserLeft(endedAt)
 	}
+	stats := CallStats{EndedAt: endedAt}
+	if t.callStats != nil {
+		stats.TotalUserDurationSec = t.callStats.TotalDurationSec(endedAt)
+		stats.FirstUserAudioFrameAt = t.callStats.FirstUserAudioFrameAt()
+	}
+	stats.MeetingID, stats.BotSessionID, stats.UserSessionID = t.TaskCtx.UIEvents.DailySession()
+	stats.DebugLogs = t.TaskCtx.UIEvents.Snapshot()
 	if t.onCallEnded != nil {
-		stats := CallStats{EndedAt: endedAt}
-		if t.callStats != nil {
-			stats.TotalUserDurationSec = t.callStats.TotalDurationSec(endedAt)
-			stats.FirstUserAudioFrameAt = t.callStats.FirstUserAudioFrameAt()
-		}
 		func() {
 			defer func() {
 				if r := recover(); r != nil {

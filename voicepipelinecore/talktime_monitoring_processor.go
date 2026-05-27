@@ -47,6 +47,7 @@ func (p *TalkTimeMonitoringProcessor) runTimer() {
 		return
 	}
 	p.taskCtx.Logger.Printf("Talk time exceeded after %s, sending closing prompt then ending task\n", p.maxTalkTime)
+	p.taskCtx.UIEvents.ServerMessage(map[string]any{"type": "talktime_exhausted"}, time.Now())
 	p.PushFrame(NewInterruptFrame(), Downstream)
 	p.PushFrame(NewTTSSpeakFrame(talkTimeExceededPrompt), Downstream)
 	// Route EndFrame through the task source instead of pushing it

@@ -204,16 +204,24 @@ func (r *DailyRoom) readStderr(stderr io.Reader) {
 func (r *DailyRoom) handleEvent(event dailyBridgeEvent) {
 	switch event.Event {
 	case "joined":
+		at := time.Now()
 		r.log("[%s] Bot joined Daily room meeting_id=%s participant_id=%s", r.roomName, event.MeetingID, event.ParticipantID)
+		if r.taskCtx != nil {
+			r.taskCtx.UIEvents.SetDailyMeeting(event.MeetingID, event.ParticipantID)
+		}
 		if r.taskCtx != nil && r.taskCtx.callEvents != nil {
-			r.taskCtx.callEvents.fireBotJoined(time.Now())
+			r.taskCtx.callEvents.fireBotJoined(at)
 		}
 		r.finishJoin(nil)
 	case "participant_joined":
 		r.markUserJoined(event.ParticipantID)
 	case "participant_left":
+		at := time.Now()
 		r.markUserLeft(event.ParticipantID)
 		r.log("[%s] Daily participant %q left, requesting EndFrame: %s", r.roomName, event.ParticipantID, event.Reason)
+		if r.taskCtx != nil {
+			r.taskCtx.UIEvents.ServerMessage("Participant left: "+event.Reason, at)
+		}
 		r.endTask(EndReasonClientDisconnect)
 	case "audio":
 		raw, err := base64.StdEncoding.DecodeString(event.Data)
@@ -262,6 +270,7 @@ func (r *DailyRoom) markUserJoined(participantID string) {
 	if r.taskCtx == nil {
 		return
 	}
+	r.taskCtx.UIEvents.SetUserSessionID(participantID)
 	if r.taskCtx.callStats != nil {
 		r.taskCtx.callStats.MarkUserJoined(at)
 	}

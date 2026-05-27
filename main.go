@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"strconv"
@@ -21,6 +22,7 @@ var (
 	sessions   = map[string]*voicepipelinecore.PipelineTask{}
 	sessionsMu sync.Mutex
 	dishaDeps  disha.Deps
+	worker     workerRuntime
 )
 
 func main() {
@@ -30,12 +32,22 @@ func main() {
 	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
 	dishaDeps = newDishaDeps()
 	defer closeDishaDeps(dishaDeps)
+	registerCleanupHandlers()
+	registerWorkerPodIfConfigured()
 	http.HandleFunc("/connect", handleConnect)
+	http.HandleFunc("/bot/create_worker_room", requireMethod(http.MethodPost, handleCreateWorkerRoom))
+	http.HandleFunc("/bot/has_active_session", requireMethod(http.MethodGet, handleHasActiveSession))
+	http.HandleFunc("/bot/health_check", requireMethod(http.MethodGet, handleHealthCheck))
+	http.HandleFunc("/bot/readiness_check", requireMethod(http.MethodGet, handleReadinessCheck))
+	http.HandleFunc("/bot/pre_stop_check", requireMethod(http.MethodGet, handleHealthCheck))
+	http.HandleFunc("/bot/mark_machine_reserved", requireMethod(http.MethodPost, handleMarkMachineReserved))
+	http.HandleFunc("/bot/trigger_exit", requireMethod(http.MethodPost, handleTriggerExit))
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		http.ServeFile(w, r, "daily-client.html")
 	})
-	log.Println("HTTP server listening on :3000")
-	if err := http.ListenAndServe(":3000", nil); err != nil {
+	addr := serverAddr()
+	log.Println("HTTP server listening on", addr)
+	if err := http.ListenAndServe(addr, nil); err != nil {
 		log.Fatal("HTTP server error:", err)
 	}
 }
@@ -54,7 +66,7 @@ func handleConnect(w http.ResponseWriter, r *http.Request) {
 	// A call outlives the HTTP request that created it. If the task is
 	// derived from r.Context(), the pipeline is cancelled as soon as
 	// /connect returns to Disha's Create Room request.
-	task, err := buildConnectTask(context.Background(), req)
+	task, err := prepareTask(context.Background(), req, nil)
 	if err != nil {
 		log.Printf("failed to create task: %v", err)
 		status := http.StatusInternalServerError
@@ -64,16 +76,6 @@ func handleConnect(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to create task", status)
 		return
 	}
-
-	task.OnCleanup = func() {
-		sessionsMu.Lock()
-		delete(sessions, task.RoomName)
-		sessionsMu.Unlock()
-	}
-
-	sessionsMu.Lock()
-	sessions[task.RoomName] = task
-	sessionsMu.Unlock()
 
 	task.Start()
 
@@ -158,6 +160,37 @@ func buildConnectTask(ctx context.Context, req connectRequest) (*voicepipelineco
 	return voicepipelinecore.NewTask(ctx, opts)
 }
 
+func prepareTask(ctx context.Context, req connectRequest, onCleanup func(*voicepipelinecore.PipelineTask)) (*voicepipelinecore.PipelineTask, error) {
+	task, err := buildConnectTask(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	previousCleanup := task.OnCleanup
+	task.OnCleanup = func() {
+		unregisterTask(task)
+		if previousCleanup != nil {
+			previousCleanup()
+		}
+		if onCleanup != nil {
+			onCleanup(task)
+		}
+	}
+	registerTask(task)
+	return task, nil
+}
+
+func registerTask(task *voicepipelinecore.PipelineTask) {
+	sessionsMu.Lock()
+	defer sessionsMu.Unlock()
+	sessions[task.RoomName] = task
+}
+
+func unregisterTask(task *voicepipelinecore.PipelineTask) {
+	sessionsMu.Lock()
+	defer sessionsMu.Unlock()
+	delete(sessions, task.RoomName)
+}
+
 func newDishaDeps() disha.Deps {
 	logger := log.New(log.Writer(), "[disha] ", log.Flags())
 	return disha.Deps{
@@ -168,7 +201,7 @@ func newDishaDeps() disha.Deps {
 			redisDBFromEnv(),
 			logger,
 		),
-		API: disha.NewAPIClient(os.Getenv("DISHA_API_URL"), 10*time.Second, logger),
+		API: disha.NewAPIClient(firstNonEmpty(os.Getenv("DISHA_API_URL"), os.Getenv("API_BASE_URL")), 10*time.Second, logger),
 	}
 }
 
@@ -193,10 +226,27 @@ func redisDBFromEnv() int {
 	return db
 }
 
+func serverAddr() string {
+	port := strings.TrimSpace(os.Getenv("PORT"))
+	if port == "" {
+		port = strings.TrimSpace(os.Getenv("FAST_API_PORT"))
+	}
+	if port == "" {
+		port = "3000"
+	}
+	if strings.HasPrefix(port, ":") {
+		return port
+	}
+	return ":" + port
+}
+
 func loadEnv(path string) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		log.Fatal("failed to read .env:", err)
+		if !errors.Is(err, os.ErrNotExist) {
+			log.Fatal("failed to read .env:", err)
+		}
+		return
 	}
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
@@ -210,4 +260,79 @@ func loadEnv(path string) {
 			}
 		}
 	}
+}
+
+func registerWorkerPodIfConfigured() {
+	reg, ok, err := workerPodRegistrationFromEnv()
+	if err != nil {
+		log.Fatal("worker registration config error:", err)
+	}
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := disha.RegisterWorkerPod(ctx, dishaDeps, reg); err != nil {
+		log.Fatal("worker pod registration failed:", err)
+	}
+	log.Printf("registered worker pod: pod_name=%s app_name=%s\n", reg.PodName, reg.AppName)
+}
+
+func workerPodRegistrationFromEnv() (disha.WorkerPodRegistration, bool, error) {
+	podName := strings.TrimSpace(os.Getenv("HOSTNAME"))
+	podUID := strings.TrimSpace(os.Getenv("POD_UID"))
+	appName := firstNonEmpty(os.Getenv("FLY_APP_NAME"), os.Getenv("GKE_DEPLOYMENT_NAME"))
+	if podName == "" || podUID == "" || appName == "" {
+		return disha.WorkerPodRegistration{}, false, nil
+	}
+	podIP := strings.TrimSpace(os.Getenv("POD_IP"))
+	if podIP == "" {
+		var err error
+		podIP, err = detectPodIP()
+		if err != nil {
+			return disha.WorkerPodRegistration{}, false, err
+		}
+	}
+	return disha.WorkerPodRegistration{
+		PodIP:   podIP,
+		PodName: podName,
+		PodUID:  podUID,
+		AppName: appName,
+	}, true, nil
+}
+
+func detectPodIP() (string, error) {
+	hostname, err := os.Hostname()
+	if err == nil && hostname != "" {
+		if ips, lookupErr := net.LookupIP(hostname); lookupErr == nil {
+			for _, ip := range ips {
+				if v4 := ip.To4(); v4 != nil && !v4.IsLoopback() {
+					return v4.String(), nil
+				}
+			}
+		}
+	}
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return "", err
+	}
+	for _, addr := range addrs {
+		ipNet, ok := addr.(*net.IPNet)
+		if !ok {
+			continue
+		}
+		if v4 := ipNet.IP.To4(); v4 != nil && !v4.IsLoopback() {
+			return v4.String(), nil
+		}
+	}
+	return "", errors.New("no non-loopback pod IP found")
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
 }

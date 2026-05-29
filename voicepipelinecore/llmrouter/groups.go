@@ -1,0 +1,202 @@
+// Package llmrouter is the live-call LLM resilience layer for the voice
+// pipeline. It selects the fastest healthy endpoint within a model group
+// (using endpoint health written to Redis by Disha's Python poller),
+// speaks to every provider in OpenAI Chat-Completions format over plain
+// HTTP (no provider SDKs), blacklists endpoints that error during a live
+// call, and triggers a re-poll when an endpoint errors or is slow.
+//
+// It implements voicepipelinecore.LLMClient structurally (the Stream
+// method) without importing voicepipelinecore, so the core pipeline
+// package stays free of Redis/provider concerns. Callers select a group
+// by name; the registry of groups and endpoints lives here.
+//
+// This is the Go port of Disha's bots/onboarding_call/custom_llm_service.py
+// + bots/llm_switching_service.py + services/openai_config_manager.py,
+// scoped to the model groups the sales call needs.
+package llmrouter
+
+// provider identifies how to build the HTTP request and auth header for
+// an endpoint. All providers are spoken in OpenAI Chat-Completions
+// format; the only differences are the base URL and the auth header
+// (Azure uses an api-key header, everyone else uses Bearer).
+type provider string
+
+const (
+	providerOpenAI         provider = "openai"
+	providerAzure          provider = "azure"
+	providerGrok           provider = "grok"
+	providerVertex         provider = "vertex"
+	providerOpenRouter     provider = "openrouter"
+	providerGoogleAIStudio provider = "google_ai_studio"
+)
+
+// endpointConfig is one selectable LLM endpoint. The Key must match the
+// Python OpenAIModels enum value because it forms the Redis health key
+// (live_call_modal_health:{Key}) the Python poller writes.
+type endpointConfig struct {
+	Key       string
+	Provider  provider
+	Model     string
+	Region    string
+	APIKeyEnv string // env var holding the API key (Bearer / azure api-key)
+
+	// EndpointEnv holds the OpenAI-compatible base URL for grok/azure
+	// endpoints (e.g. https://<resource>.openai.azure.com/openai/v1).
+	EndpointEnv string
+	// BaseURL is a literal base URL for providers whose URL is fixed
+	// (openai/openrouter/google_ai_studio).
+	BaseURL string
+
+	// Vertex-only: the OpenAI-compatible Vertex endpoint is derived from
+	// project + location, and the Bearer token is minted from a service
+	// account (see vertex_token.go).
+	VertexProject  string
+	VertexLocation string
+
+	// Temperature/MaxTokens override the router default when non-nil.
+	Temperature *float64
+	MaxTokens   *int
+}
+
+// modelGroup is an ordered set of interchangeable endpoints plus a
+// last-resort fallback config key.
+type modelGroup struct {
+	Configs  []string
+	Fallback string
+}
+
+const (
+	groupGrokSales = "grok-4.1-fast-sales"
+	groupGPT41     = "gpt-4.1" // the cross-group fallback target (FALLBACK_MODEL_GROUP)
+
+	grokModel  = "grok-4-1-fast-non-reasoning"
+	gpt41Model = "gpt-4.1"
+)
+
+// endpointConfigs is the Go port of OPEN_AI_MODEL_CONFIG, scoped to the
+// configs reachable from the sales model group and its gpt-4.1 fallback.
+var endpointConfigs = map[string]endpointConfig{
+	// --- grok-4.1-fast-non-reasoning, Azure-hosted (OpenAI-compatible) ---
+	"grok_4_1_fnr_eastus": {
+		Key: "grok_4_1_fnr_eastus", Provider: providerGrok, Model: grokModel, Region: "us",
+		APIKeyEnv: "GROK_4_1_FNR_EASTUS_API_KEY", EndpointEnv: "GROK_4_1_FNR_EASTUS_ENDPOINT",
+	},
+	"grok_4_1_fnr_eastus2": {
+		Key: "grok_4_1_fnr_eastus2", Provider: providerGrok, Model: grokModel, Region: "us",
+		APIKeyEnv: "GROK_4_1_FNR_EASTUS2_API_KEY", EndpointEnv: "GROK_4_1_FNR_EASTUS2_ENDPOINT",
+	},
+	"grok_4_1_fnr_westus": {
+		Key: "grok_4_1_fnr_westus", Provider: providerGrok, Model: grokModel, Region: "us",
+		APIKeyEnv: "GROK_4_1_FNR_WESTUS_API_KEY", EndpointEnv: "GROK_4_1_FNR_WESTUS_ENDPOINT",
+	},
+	"grok_4_1_fnr_westus2": {
+		Key: "grok_4_1_fnr_westus2", Provider: providerGrok, Model: grokModel, Region: "us",
+		APIKeyEnv: "GROK_4_1_FNR_WESTUS2_API_KEY", EndpointEnv: "GROK_4_1_FNR_WESTUS2_ENDPOINT",
+	},
+	"grok_4_1_fnr_westcentralus": {
+		Key: "grok_4_1_fnr_westcentralus", Provider: providerGrok, Model: grokModel, Region: "us",
+		APIKeyEnv: "GROK_4_1_FNR_WESTCENTRALUS_API_KEY", EndpointEnv: "GROK_4_1_FNR_WESTCENTRALUS_ENDPOINT",
+	},
+
+	// --- Vertex grok (OpenAI-compatible endpoint, OAuth Bearer token) ---
+	"vertex_dishaai_grok_4_1_fast_non_reasoning": {
+		Key: "vertex_dishaai_grok_4_1_fast_non_reasoning", Provider: providerVertex,
+		Model: "xai/grok-4.1-fast-non-reasoning", Region: "us",
+		VertexProject: "gen-lang-client-0439239631", VertexLocation: "global",
+	},
+
+	// --- gpt-4.1 fallback group (Azure + OpenAI) ---
+	"azure_gpt_4_1_us_east": {
+		Key: "azure_gpt_4_1_us_east", Provider: providerAzure, Model: gpt41Model, Region: "us",
+		APIKeyEnv: "AZURE_OPENAI_US_EAST_API_KEY", EndpointEnv: "AZURE_OPENAI_US_EAST_ENDPOINT",
+	},
+	"azure_gpt_4_1_us_east_2": {
+		Key: "azure_gpt_4_1_us_east_2", Provider: providerAzure, Model: gpt41Model, Region: "us",
+		APIKeyEnv: "AZURE_OPENAI_US_EAST_2_API_KEY", EndpointEnv: "AZURE_OPENAI_US_EAST_2_ENDPOINT",
+	},
+	"azure_gpt_4_1_us_north_central": {
+		Key: "azure_gpt_4_1_us_north_central", Provider: providerAzure, Model: gpt41Model, Region: "us",
+		APIKeyEnv: "AZURE_OPENAI_US_NORTH_CENTRAL_API_KEY", EndpointEnv: "AZURE_OPENAI_US_NORTH_CENTRAL_ENDPOINT",
+	},
+	"azure_gpt_4_1_us_south_central": {
+		Key: "azure_gpt_4_1_us_south_central", Provider: providerAzure, Model: gpt41Model, Region: "us",
+		APIKeyEnv: "AZURE_OPENAI_US_SOUTH_CENTRAL_API_KEY", EndpointEnv: "AZURE_OPENAI_US_SOUTH_CENTRAL_ENDPOINT",
+	},
+	"azure_gpt_4_1_us_west": {
+		Key: "azure_gpt_4_1_us_west", Provider: providerAzure, Model: gpt41Model, Region: "us",
+		APIKeyEnv: "AZURE_OPENAI_US_WEST_API_KEY", EndpointEnv: "AZURE_OPENAI_US_WEST_ENDPOINT",
+	},
+	"azure_gpt_4_1_us_west_3": {
+		Key: "azure_gpt_4_1_us_west_3", Provider: providerAzure, Model: gpt41Model, Region: "us",
+		APIKeyEnv: "AZURE_OPENAI_US_WEST_3_API_KEY", EndpointEnv: "AZURE_OPENAI_US_WEST_3_ENDPOINT",
+	},
+	"azure_gpt_4_1_south_india": {
+		Key: "azure_gpt_4_1_south_india", Provider: providerAzure, Model: gpt41Model, Region: "south_india",
+		APIKeyEnv: "AZURE_OPENAI_SOUTH_INDIA_API_KEY", EndpointEnv: "AZURE_OPENAI_SOUTH_INDIA_ENDPOINT",
+	},
+	"openai_gpt_4_1": {
+		Key: "openai_gpt_4_1", Provider: providerOpenAI, Model: gpt41Model, Region: "us",
+		APIKeyEnv: "OPENAI_API_KEY",
+	},
+	"openai_gpt_4_1_priority": {
+		Key: "openai_gpt_4_1_priority", Provider: providerOpenAI, Model: gpt41Model, Region: "us",
+		APIKeyEnv: "OPENAI_PRIORITY_API_KEY",
+	},
+}
+
+// modelGroups is the Go port of MODEL_GROUPS, scoped to what the sales
+// call needs. The Vertex grok config is a first-class member of the
+// sales group, so it participates in normal health-based selection
+// (mirrors Python, where it is the most stable endpoint).
+var modelGroups = map[string]modelGroup{
+	groupGrokSales: {
+		Configs: []string{
+			"grok_4_1_fnr_eastus",
+			"grok_4_1_fnr_eastus2",
+			"grok_4_1_fnr_westus",
+			"grok_4_1_fnr_westus2",
+			"grok_4_1_fnr_westcentralus",
+			"vertex_dishaai_grok_4_1_fast_non_reasoning",
+		},
+		Fallback: "vertex_dishaai_grok_4_1_fast_non_reasoning",
+	},
+	groupGPT41: {
+		Configs: []string{
+			"azure_gpt_4_1_us_east",
+			"azure_gpt_4_1_us_east_2",
+			"azure_gpt_4_1_us_north_central",
+			"azure_gpt_4_1_us_south_central",
+			"azure_gpt_4_1_us_west",
+			"azure_gpt_4_1_us_west_3",
+			"azure_gpt_4_1_south_india",
+			"openai_gpt_4_1",
+			"openai_gpt_4_1_priority",
+		},
+		Fallback: "openai_gpt_4_1_priority",
+	},
+}
+
+// fallbackModelGroup is FALLBACK_MODEL_GROUP from Python: when a group
+// has no available endpoints, selection falls back to this group.
+const fallbackModelGroup = groupGPT41
+
+// groupConfigsForRegion returns the configs in a group filtered by
+// region, mirroring LLMSwitchingService.get_model_configs_for_group.
+func groupConfigsForRegion(group, region string) ([]endpointConfig, bool) {
+	g, ok := modelGroups[group]
+	if !ok {
+		return nil, false
+	}
+	out := make([]endpointConfig, 0, len(g.Configs))
+	for _, key := range g.Configs {
+		cfg, ok := endpointConfigs[key]
+		if !ok {
+			continue
+		}
+		if region != "" && cfg.Region != region {
+			continue
+		}
+		out = append(out, cfg)
+	}
+	return out, true
+}

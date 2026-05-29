@@ -152,8 +152,6 @@ func NewPipelineTask(parentCtx context.Context, cfg TaskConfig) (*PipelineTask, 
 	uiEvents := NewUIEventSender(logger)
 	callStats := newCallStatsTracker()
 	turnMetrics := &perTurnMetrics{}
-	var llmMetricMu sync.Mutex
-	var lastLLMTTFBMs float64
 
 	// task is created first (with zero-value WaitGroup) so taskCtx can
 	// hold a pointer to it.
@@ -165,27 +163,14 @@ func NewPipelineTask(parentCtx context.Context, cfg TaskConfig) (*PipelineTask, 
 		callStats:   callStats,
 	}
 
+	// The llm_call_result RTVI event is emitted by the LLMProcessor
+	// itself (it knows the real model that served the turn). Here we only
+	// fan metrics into the per-turn snapshot and the generic metric
+	// server-message stream.
 	metricsHandler := func(mf MetricsFrame) {
 		turnMetrics.absorb(mf)
 		for _, d := range mf.Data {
 			logger.Printf("Metric [%s] %s: %.1fms\n", d.Processor, d.Label, d.ValueMs)
-			if d.Processor == "llm" {
-				llmMetricMu.Lock()
-				if d.Label == MetricTTFB {
-					lastLLMTTFBMs = d.ValueMs
-				}
-				if d.Label == MetricProcessing {
-					uiEvents.ServerMessage(map[string]any{
-						"type":     "llm_call_result",
-						"status":   "completed",
-						"model":    llmModel,
-						"ttfb_ms":  lastLLMTTFBMs,
-						"total_ms": d.ValueMs,
-					}, time.Now())
-					lastLLMTTFBMs = 0
-				}
-				llmMetricMu.Unlock()
-			}
 			uiEvents.ServerMessage(map[string]any{
 				"type":      "metric",
 				"processor": d.Processor,

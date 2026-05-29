@@ -140,7 +140,7 @@
       machine lifecycle, signal handling, and the conversation context surface. Use this to decide whether talk-go
       can replace the Python sales-call worker today, and to scope the remaining work if not.</p>
     <div class="meta">
-      <span>Generated: 29 May 2026 (re-verified against current main)</span>
+      <span>Generated: 29 May 2026 (re-verified against branch <code>llm-model-switching</code>)</span>
       <span>talk-go @ <code>/Users/jaideepsingh/Projects/talk-go</code></span>
       <span>disha-backend @ <code>/Users/jaideepsingh/Projects/disha-backend</code></span>
       <span>Pipecat reference: <code>pipecat-ai==0.0.108</code></span>
@@ -149,33 +149,37 @@
 
   <main>
     <div class="verdict-banner">
-      <h2>Verdict — Closer to a drop-in; LLM swap is the remaining blocker</h2>
+      <h2>Verdict — Behaviourally a drop-in; only operational hardening remains</h2>
       <p>
         <span class="verdict-tag ready">Pipeline shape: ready</span>
         <span class="verdict-tag ready">Prompt / phonetics / resume: ready</span>
         <span class="verdict-tag ready">Lifecycle behaviour: ready</span>
-        <span class="verdict-tag gap">LLM: gap (next)</span>
+        <span class="verdict-tag ready">LLM (Grok switching): ready</span>
         <span class="verdict-tag partial">Operational polish: partial</span>
       </p>
-      <p>The user-facing call behaviour is now at parity. Closed since the original report: dynamic
-        Langfuse prompt selection by <code>campaign_pricing_experiment_flag</code> (Redis-only document
-        store); the phonetic dictionary loaded from S3 — its filtering logic now owned by the core TTS
-        processor, with only the dictionary crossing the boundary; <code>language=hi</code> on Cartesia;
-        the resume-message + <code>unprocessed_chat_context</code> paths; the chunk-replay filter now
-        matching <code>sales_call.py</code> exactly; the talktime timer arming only after the first
-        committed user turn; idle ending the call after the prompt cap; the GKE <code>safe-to-evict</code>
-        flip on both reserve and call-start; and — confirmed in this pass — the <strong>background office
-        sound</strong> is in fact mixed into the outbound audio (0.5 vs 0.3 bot), closing a gap the previous
-        report had left open. The pipeline is now also <strong>assembled in the bot</strong>
-        (<code>SalesCallBot.BuildTask</code>) exactly like <code>sales_call.py</code>'s
-        <code>Pipeline([...])</code>, rather than inside the core.</p>
-      <p>One hard blocker remains for a true production cutover — the <strong>LLM swap</strong> (still
-        hard-coded OpenAI <code>gpt-4.1</code> with no temperature/switching/entity tracing; production runs
-        Grok-4.1-fast on Azure with <code>temperature=0</code> and failover). The rest are operational
-        resilience items that don't change what the user hears but matter under load/incident:
-        SQS-on-API-failure fallback, Sentry, STT connect-retry cap, Daily join retry, a global 120&nbsp;s
-        no-frames watchdog, ping/pong keepalive, per-conversation Cartesia key, and persisting
-        <code>main_agent_system_prompt_langfuse_key</code> on chunks.</p>
+      <p>The previous hard blocker — the <strong>LLM swap</strong> — is now <strong>closed</strong>. A new
+        <code>voicepipelinecore/llmrouter</code> package selects the fastest healthy endpoint in the
+        <code>grok-4.1-fast-sales</code> model group (the Azure-hosted Grok regions + Vertex grok, falling back
+        to the <code>gpt-4.1</code> group) by reading the same <code>live_call_modal_health:{config}</code> Redis
+        keys Disha's Python poller writes, runs at <code>temperature=0</code>, blacklists endpoints that error
+        mid-call, triggers a re-poll on error/slow/fallback (via a public US Lambda Function URL so the poll runs
+        in-region), and logs each call to Disha's <code>llm_logging_service</code>. Every provider is spoken in
+        OpenAI Chat-Completions format over plain HTTP — no provider SDKs, including Vertex (a stdlib-minted
+        OAuth JWT). Verified on staging: selection picks <code>grok_4_1_fnr_eastus</code>, Grok responds, and
+        failover/blacklisting behave correctly.</p>
+      <p>Also closed this round: the <strong>120&nbsp;s no-activity watchdog</strong> (now inside
+        <code>UserIdleProcessor</code>, mirroring Pipecat's <code>cancel_on_idle_timeout</code>), and
+        <strong>greet-first</strong> — the bot now takes the first turn on user-join via a Pipecat-style
+        <code>LLMMessagesAppendFrame</code>, matching <code>on_client_connected</code>. Previously closed:
+        dynamic prompt-by-<code>campaign_pricing_experiment_flag</code> (Redis document store), the S3 phonetic
+        dictionary (<code>language=hi</code> on Cartesia), resume + <code>unprocessed_chat_context</code>, the
+        exact chunk-replay filter, talktime-arms-after-first-turn, idle-ends-call, GKE <code>safe-to-evict</code>
+        on reserve + call-start, the mixed background office sound, and pipeline assembly in the bot.</p>
+      <p>What's left are <strong>operational resilience / observability</strong> items that don't change what the
+        user hears but matter under load/incident — SQS-on-API-failure fallback, Sentry, STT connect-retry cap,
+        Daily join retry, ping/pong keepalive — plus minor analytics completeness: per-conversation Cartesia key,
+        persisting <code>main_agent_system_prompt_langfuse_key</code> on chunks, and LLM prompt/completion token
+        counts in the LLM logs.</p>
     </div>
 
     <section style="background:#e3f5e8; border-color:#bce3c5;">
@@ -184,7 +188,9 @@
         <thead><tr><th>#</th><th>Gap</th><th>Status</th><th>Where</th></tr></thead>
         <tbody>
           <tr><td>M1</td><td>Dynamic Langfuse prompt gated on <code>campaign_pricing_experiment_flag</code></td><td><span class="pill ok">Done</span></td><td><code>disha/document_store.go</code>, <code>disha/sales_call.go</code></td></tr>
-          <tr><td>M2</td><td>Grok-via-Azure LLM swap</td><td><span class="pill todo">Deferred (next batch)</span></td><td><code>voicepipelinecore/llm_processor.go</code></td></tr>
+          <tr><td><strong>M2</strong></td><td><strong>Grok-via-Azure LLM swap + health-based switching, failover, blacklisting, Vertex, LLM logging</strong></td><td><span class="pill ok">Done</span></td><td><code>voicepipelinecore/llmrouter/*</code>, <code>voicepipelinecore/llm_processor.go</code> (LLMClient seam), <code>disha/llm_logging.go</code></td></tr>
+          <tr><td>S8</td><td>120&nbsp;s no-activity watchdog (Pipecat <code>cancel_on_idle_timeout</code>)</td><td><span class="pill ok">Done</span></td><td><code>voicepipelinecore/user_idle_processor.go</code> (<code>runCancelWatchdog</code>)</td></tr>
+          <tr><td>New</td><td>Greet-first: bot takes the first turn on user-join</td><td><span class="pill ok">Done</span></td><td><code>LLMMessagesAppendFrame</code> pushed by <code>daily_room.go</code>; handled in <code>context_aggregator.go</code></td></tr>
           <tr><td>M3</td><td>Phonetic dictionary applied to Cartesia text + <code>language=hi</code></td><td><span class="pill ok">Done</span></td><td><code>disha/phonetic_dict.go</code>, <code>voicepipelinecore/tts_processor.go</code></td></tr>
           <tr><td>M4</td><td>Idle ends the call after max prompts</td><td><span class="pill ok">Done</span></td><td><code>voicepipelinecore/user_idle_processor.go</code></td></tr>
           <tr><td>M5</td><td>Talktime timer arms only after first user speech</td><td><span class="pill ok">Done</span></td><td><code>voicepipelinecore/talktime_monitoring_processor.go</code></td></tr>
@@ -202,29 +208,21 @@
     </section>
 
     <section id="whats-left" style="background:#fbfdff; border-color:#cdd8e6;">
-      <h2>What&rsquo;s left (re-verified 29 May 2026 against current <code>main</code>)</h2>
-      <p>Behaviourally talk-go is now a faithful sales-call worker. Exactly one item blocks a measurable
-        production cutover; everything else is resilience / observability hardening you&rsquo;d want before
-        ramping past a small traffic percentage.</p>
+      <h2>What&rsquo;s left (re-verified 29 May 2026 against branch <code>llm-model-switching</code>)</h2>
+      <p>Behaviourally talk-go is now a faithful sales-call worker, including the LLM. <strong>No item changes
+        what the user hears or what we measure anymore.</strong> Everything remaining is resilience /
+        observability hardening you&rsquo;d want before ramping past a small traffic percentage, plus a couple
+        of minor analytics fields.</p>
 
-      <h3>🔴 Hard blocker — blocks a real cutover</h3>
-      <table>
-        <thead><tr><th>#</th><th>Gap</th><th>Go today</th><th>Python (target)</th></tr></thead>
-        <tbody>
-          <tr>
-            <td><strong>M2</strong></td>
-            <td>LLM swap (the only item that changes what the user hears / what we measure)</td>
-            <td>Hard-coded <code>gpt-4.1</code>, OpenAI public endpoint, <code>OPENAI_API_KEY</code>; <strong>no temperature</strong>, no model switching/failover, no <code>user_id</code>/<code>entity_id</code>/usecase tracing, no LLM-call logging. <code>voicepipelinecore/llm_processor.go</code>.</td>
-            <td><code>grok-4-1-fast-non-reasoning</code> on Azure (<code>eastusresourcegroup</code>, deployment <code>cureai-grok4fnr-eastus</code>), <code>GROK_4_1_FNR_EASTUS_API_KEY</code>, <code>temperature=0</code>, <code>switch_llm_config=True</code> + <code>model_group=grok-4.1-fast-sales</code> (failover via <code>LLMSwitchingService</code>), entity + structured LLM logging.</td>
-          </tr>
-        </tbody>
-      </table>
-      <div class="callout bad">
-        <strong>Why it blocks</strong>
-        Every conversion-rate, latency, and cost number on staging is currently produced by the wrong model.
-        Plumbing tests are fine, but real performance cannot be measured until the model, base URL, deployment,
-        key, and <code>temperature=0</code> are parameterised — ideally with the switching/failover and entity
-        logging too.
+      <h3>🟢 No hard blocker remaining</h3>
+      <div class="callout">
+        <strong>LLM swap closed (was M2)</strong>
+        The sales call now runs <code>grok-4-1-fast-non-reasoning</code> selected by health from the
+        <code>grok-4.1-fast-sales</code> group at <code>temperature=0</code>, with failover, blacklisting, Vertex,
+        and per-call logging — see &sect;3.3. Staging is now producing real-model conversion/latency/cost numbers.
+        The one new operational dependency is the <strong>US poll-trigger Lambda Function URL</strong> that
+        re-polls endpoint health; deploy it and set <code>LLM_POLL_TRIGGER_URL</code> (without it, switching still
+        works off whatever health the poller last wrote, it just won&rsquo;t self-heal on a live error).
       </div>
 
       <h3>🟠 Operational resilience — invisible to the user, bites under load / incidents</h3>
@@ -235,13 +233,12 @@
           <tr><td>M8</td><td>Sentry / error reporting</td><td>None anywhere in the Go tree</td><td>Instruments Redis, S3, post-call, signal handlers, …</td><td>On-call is blind during incidents</td></tr>
           <tr><td>S2</td><td>STT connect-retry cap</td><td>Retries the Soniox connect <strong>forever</strong> (1&nbsp;s loop)</td><td>Caps at 3, then <code>sys.exit(1)</code></td><td>A bad key &rarr; pod retries forever holding a worker slot</td></tr>
           <tr><td>S3</td><td>Daily join retry</td><td><code>JoinDailyRoom</code> dials the bridge <strong>once</strong> (20&nbsp;s timeout)</td><td>Retries 3&times; with Sentry on final failure</td><td>Intermittent join reject &rarr; dropped call Python would recover</td></tr>
-          <tr><td>S8</td><td>Global no-frames watchdog</td><td>Only the 7&nbsp;s user-idle prompt loop; no process-level guard</td><td><code>cancel_on_idle_timeout=True</code>, <code>idle_timeout_secs=120</code></td><td>A <em>frozen</em> pipeline (not user-idle) hangs until pod eviction</td></tr>
           <tr><td>S7</td><td>Daily <code>ping</code>/<code>pong</code> keepalive</td><td>App-message handler only handles <code>end_call</code></td><td>RTVI responds <code>pong</code> to <code>ping</code></td><td>A browser client relying on pong keepalive times out (verify the <code>daily_bridge.py</code> sidecar doesn&rsquo;t cover it)</td></tr>
           <tr><td>S9</td><td>Atexit abrupt-shutdown alert</td><td>None</td><td>Sentry &ldquo;Abrupt machine kill detected&rdquo;</td><td>Blocked on M8</td></tr>
         </tbody>
       </table>
-      <p><strong>Recommended order after the LLM swap:</strong> M8 (Sentry) and S1 (SQS fallback) first &mdash;
-        they&rsquo;re the difference between seeing reality and not during the ramp &mdash; then S2/S3/S8.</p>
+      <p><strong>Recommended order:</strong> M8 (Sentry) and S1 (SQS fallback) first &mdash; they&rsquo;re the
+        difference between seeing reality and not during the ramp &mdash; then S2/S3.</p>
 
       <h3>🟡 Data / analytics completeness</h3>
       <table>
@@ -249,6 +246,7 @@
         <tbody>
           <tr><td>M9</td><td>Per-conversation Cartesia key</td><td>Go uses one <code>CARTESIA_API_KEY</code> env; Python reads <code>cartesia_api_key</code> from the conversation row (per-tenant). Surface a key on the TTS constructor and read it from Redis.</td></tr>
           <tr><td>S6</td><td><code>main_agent_system_prompt_langfuse_key</code> on chunks</td><td>Name+version are computed in <code>SalesCallBot.plan</code> but discarded; thread them into <code>CallEventCallbacks</code> so chunk writes carry the key. Small change.</td></tr>
+          <tr><td>L1</td><td>LLM-log token counts</td><td>The router logs each call to <code>llm_logging_service</code> (model, deployment, latency, response, finish_reason), but <code>prompt_tokens</code>/<code>completion_tokens</code> are <code>0</code> — Go doesn&rsquo;t request stream usage. Analytics only.</td></tr>
           <tr><td>—</td><td>Accepted-null (sales-call doesn&rsquo;t use)</td><td><code>current_agenda</code>, <code>stt_ttfb_ms</code> (no STT TTFB metric in our flow), <code>system_message_params_s3_key</code>, <code>conversation_state_s3_key</code>.</td></tr>
         </tbody>
       </table>
@@ -258,15 +256,16 @@
         <li><strong>S5</strong> &mdash; per-conversation logging: Go uses a <code>[conv=…]</code> prefix on one logger vs Python&rsquo;s per-call loguru file. Fine for CloudWatch-style aggregation.</li>
         <li>Idle timing: Go 7&nbsp;s / 7 prompts / <code>"Hello?"</code> vs Python 5&nbsp;s / 6 / <code>"hello?"</code> &mdash; minor A/B noise.</li>
         <li>The 50&nbsp;ms <code>SpeechTimeoutUserTurnStopStrategy</code> guard is absent; Go relies on Soniox&rsquo;s <code>&lt;end&gt;</code> token directly.</li>
+        <li>LLM live-error handling is <em>strict Python parity</em>: the current turn fails and the next turn re-selects (no in-turn retry).</li>
       </ul>
 
-      <h3>✅ Confirmed done this pass (incl. corrections to the earlier report)</h3>
+      <h3>✅ Confirmed done this pass</h3>
       <ul>
-        <li>Prompt-by-flag · phonetics (logic now in the core TTS processor, dictionary-only boundary) · <code>language=hi</code> · resume message + <code>unprocessed_chat_context</code>.</li>
-        <li><strong>Chunk-replay filter now matches <code>sales_call.py</code> exactly</strong> (drop only on <code>is_debug_log</code> or truthy <code>additional_data</code>).</li>
-        <li>Idle-ends-call · talktime-arms-after-first-committed-turn · GKE <code>safe-to-evict</code> on reserve + call-start.</li>
-        <li><strong>Background office sound is mixed</strong> into outbound audio (0.5 vs 0.3 bot) &mdash; the earlier report had wrongly flagged this open.</li>
-        <li><strong>Pipeline is assembled in the bot</strong> (<code>SalesCallBot.BuildTask</code>) like <code>run_bot</code>; <code>SessionID</code> (= conversation id) replaces the synthetic room name.</li>
+        <li><strong>LLM: health-based Grok switching</strong> (<code>llmrouter</code>) — fastest-endpoint selection, <code>temperature=0</code>, blacklisting + re-poll, Vertex over pure HTTP, <code>llm_call_result</code> with the real model, per-call logging.</li>
+        <li><strong>120&nbsp;s no-activity watchdog</strong> now in <code>UserIdleProcessor</code> (was S8).</li>
+        <li><strong>Greet-first</strong> — bot speaks first on user-join via <code>LLMMessagesAppendFrame</code>.</li>
+        <li>Prompt-by-flag · phonetics (logic in the core TTS processor, dictionary-only boundary) · <code>language=hi</code> · resume + <code>unprocessed_chat_context</code> · exact chunk-replay filter.</li>
+        <li>Idle-ends-call · talktime-arms-after-first-committed-turn · GKE <code>safe-to-evict</code> on reserve + call-start · mixed background office sound · pipeline assembled in the bot (<code>SessionID</code> = conversation id).</li>
       </ul>
     </section>
 
@@ -327,8 +326,8 @@
               <td class="status"><span class="pill ok">Parity</span></td>
               <td>Same voice ID and model (<code>sonic-3</code>); now sends <code>language: "hi"</code> and applies the S3-hosted phonetic dictionary before every Cartesia send via <code>disha.PhoneticDict</code>.</td></tr>
           <tr><td>LLM</td>
-              <td class="status"><span class="pill bad">Gap</span></td>
-              <td>Hard-coded <code>gpt-4.1</code> via OpenAI direct. Python uses <strong>Grok-4.1-fast-non-reasoning via Azure</strong>. No <code>CustomOpenAILLMService</code> (no LLM logging, no switching service, no entity tracing). Deferred to a separate change set per the user's request.</td></tr>
+              <td class="status"><span class="pill ok">Parity</span></td>
+              <td><code>llmrouter</code> selects the fastest healthy endpoint in <code>grok-4.1-fast-sales</code> (Azure Grok regions + Vertex grok, fallback to the <code>gpt-4.1</code> group) from Redis health, <code>temperature=0</code>, blacklists on live error + triggers a re-poll, logs each call to <code>llm_logging_service</code>, emits <code>llm_call_result</code> with the real model. All providers in OpenAI format over plain HTTP. <code>NewLLMProcessor</code> (no client) still defaults to OpenAI <code>gpt-4.1</code> for the local demo.</td></tr>
           <tr><td>System prompt</td>
               <td class="status"><span class="pill ok">Parity</span></td>
               <td>Prompt name picked by <code>campaign_pricing_experiment_flag</code> (<code>sales_call/main_sys-3day_v2</code> / <code>-3day_21rs_v2</code> / <code>-30day_299rs_v2</code>); rendered via the new Redis-only <code>disha.DocumentStore</code> with <code>patient_info</code>, <code>current_datetime</code>, and <code>short_term_memory</code> variables.</td></tr>
@@ -338,9 +337,15 @@
           <tr><td>Talk time monitoring</td>
               <td class="status"><span class="pill info">Equivalent</span></td>
               <td>Same source (<code>remaining_sales_call_talktime_seconds</code>), same default (600 s). Timer is armed on the first <code>LLMMessagesFrame</code> — i.e. after the user's first <em>committed</em> turn, not at speech onset like Python's <code>UserStartedSpeakingFrame</code>. The Go budget therefore starts counting marginally later (by one user turn); immaterial against a 600&nbsp;s budget, but not identical timing.</td></tr>
+          <tr><td>First turn (greet-first)</td>
+              <td class="status"><span class="pill ok">Parity</span></td>
+              <td>On user-join, <code>daily_room.go</code> pushes a Pipecat-style <code>LLMMessagesAppendFrame{RunLLM:true}</code>; <code>ContextAggregator</code> runs the LLM on the initial context so the bot greets first. Matches Python's <code>on_client_connected → queue_frames([context])</code>. Always-on, fires once.</td></tr>
           <tr><td>User idle</td>
               <td class="status"><span class="pill ok">Parity</span></td>
               <td>7 s timeout (we still use ours, not Python's 5 s — accepted), prompts <code>"Hello?"</code> up to 7 times. After the cap, the processor injects <code>EndTask(EndReasonUserIdle)</code>, so post-call sees <code>end_reason="user_idle"</code> like Python.</td></tr>
+          <tr><td>No-activity watchdog (120&nbsp;s)</td>
+              <td class="status"><span class="pill ok">Parity</span></td>
+              <td><code>UserIdleProcessor.runCancelWatchdog</code> ends the call if no user speech / interim transcript / bot speaking for 120&nbsp;s. Mirrors Python's <code>cancel_on_idle_timeout=True, idle_timeout_secs=120</code> (a backstop; the prompt loop normally ends a quiet call first).</td></tr>
           <tr><td>Update-conversation timestamps</td>
               <td class="status"><span class="pill ok">Parity</span></td>
               <td><code>bot_joined_at</code>, <code>user_joined_at</code>, <code>user_first_speech_at</code>, <code>bot_first_speech_at</code> wired via <code>CallEvents</code> &rarr; <code>/bot/update_conversation</code>.</td></tr>
@@ -442,16 +447,17 @@
       <h3>3.3 LLM</h3>
       <div class="twoColCmp">
         <div class="col python"><h4>Python</h4>
-          <code>CustomOpenAILLMService(model="grok-4-1-fast-non-reasoning", api_key=GROK_4_1_FNR_EASTUS_API_KEY, base_url="https://eastusresourcegroup.openai.azure.com/openai/v1", deployment="cureai-grok4fnr-eastus", switch_llm_config=True, model_group='grok-4.1-fast-sales')</code>. Carries <code>user_id</code>+<code>entity_id</code> for LLM logging, with automatic switching via <code>LLMSwitchingService</code> on errors, temperature=0, prompt metadata persisted to chunks.</div>
-        <div class="col go"><h4>Go</h4>
-          <code>LLMProcessor</code> uses <strong>hard-coded <code>llmModel = "gpt-4.1"</code></strong> against <code>https://api.openai.com/v1/chat/completions</code> with <code>OPENAI_API_KEY</code>. No temperature control, no Langfuse linkage, no fallback model, no per-call entity tracing.</div>
+          <code>CustomOpenAILLMService(model="grok-4-1-fast-non-reasoning", switch_llm_config=True, model_group='grok-4.1-fast-sales')</code>. Per turn, <code>switch_llm_config</code> reads endpoint health via <code>LLMSwitchingService.get_fastest_for_group</code> (Redis <code>live_call_modal_health:{config}</code>), reconfigures the client (provider/base&nbsp;url/key), streams at <code>temperature=0</code>; on error it blacklists + re-selects + triggers <code>poll_openai_models</code>; logs each call to <code>llm_logging_service</code>; emits <code>on_llm_call_complete → rtvi llm_call_result</code>. Background <code>poll_openai_models</code> (US Lambda) writes the health.</div>
+        <div class="col go"><h4>Go — <code>voicepipelinecore/llmrouter</code></h4>
+          The core <code>LLMProcessor</code> takes an injected <code>LLMClient</code>; the sales bot injects <code>llmrouter</code>. Each turn it <code>MGET</code>s the group's health keys, drops blacklisted, picks the lowest mean-of-last-5 adjusted latency (fallback to the <code>gpt-4.1</code> group), and streams OpenAI-format SSE. Providers: Grok/OpenAI/Vertex/OpenRouter use <code>Bearer</code>; Azure uses the deployment-path API + <code>api-key</code>. Vertex's token is a stdlib-minted RS256 JWT (SA key from S3) — no SDK. On live error: blacklist (read-modify-write of the health key) + fire the US poll-trigger Function URL (lock-guarded). <code>temperature=0</code> lives in the endpoint config. Per call: <code>llm_call_result</code> with the real model + a best-effort log enqueued to <code>llm_logging_service</code>. <strong>Polling stays in Python</strong> — talk-go only reads health and triggers a re-poll.</div>
       </div>
-      <div class="callout bad">
-        <strong>Hard blocker for drop-in</strong>
-        Switching the production sales-call from Grok-4.1-fast (an Azure deployment that&rsquo;s actively price-
-        and quality-tuned for sales) to OpenAI <code>gpt-4.1</code> will change every conversion-rate, latency,
-        and cost number. <code>LLMSwitchingService</code> also handles model failover; without it any Grok
-        outage today would have nowhere to switch to. This must be parameterised before cutover.
+      <div class="callout">
+        <strong>Closed — verified on staging</strong>
+        Selection picks <code>grok_4_1_fnr_eastus</code> and Grok responds; blacklisting + reselect on a live
+        error work (caught the earlier 400 from an erroneous top-level <code>reasoning</code> field, now scoped
+        to OpenRouter only). The only behavioural divergence from Python is intentional: a live error fails the
+        current turn and the next turn re-selects (no in-turn retry). Remaining nit: prompt/completion token
+        counts aren&rsquo;t captured in the LLM log (Go doesn&rsquo;t request stream usage).
       </div>
 
       <h3>3.4 TTS</h3>
@@ -498,7 +504,7 @@
         <div class="col python"><h4>Python</h4>
           <code>UserIdleProcessor</code> from Pipecat with <code>timeout=5.0</code>, callback <code>handle_idle</code> that pushes <code>TTSSpeakFrame("hello?", append_to_context=True)</code> up to 6 times and then calls <code>task.cancel()</code> with <code>user_idle_timeout_triggered=True</code> &rarr; end_reason <code>user_idle</code> on the post-call.</div>
         <div class="col go"><h4>Go</h4>
-          <code>UserIdleProcessor</code>: 7 s timeout, max 7 prompts. The cap fire now speaks the prompt one final time and then calls <code>taskCtx.EndTask(EndReasonUserIdle)</code> so the EndFrame routes through the pipeline source &mdash; <code>end_reason</code> ends up as <code>"user_idle"</code> on the post-call write, matching Python.</div>
+          <code>UserIdleProcessor</code>: 7 s timeout, max 7 prompts. The cap fire now speaks the prompt one final time and then calls <code>taskCtx.EndTask(EndReasonUserIdle)</code> so the EndFrame routes through the pipeline source &mdash; <code>end_reason</code> ends up as <code>"user_idle"</code> on the post-call write, matching Python. The same processor also hosts the <strong>120&nbsp;s no-activity watchdog</strong> (<code>runCancelWatchdog</code>, reset by user speech / interim transcript / bot speaking) &mdash; Python's <code>cancel_on_idle_timeout</code>.</div>
       </div>
 
       <h3>3.8 RTVI &amp; client messages</h3>
@@ -527,6 +533,8 @@
         <li><strong>InterruptFrame purges procCh keeping <code>!IsInterruptible()</code></strong> &mdash; mirror of Pipecat <code>UninterruptibleFrame</code> mixin. ✓</li>
         <li><strong>WordTimestampFrame interleaving</strong> &mdash; both interleave words with audio frames at PlaybackSink; talk-go uses Cartesia <code>add_timestamps</code>. ✓</li>
         <li><strong>EndFrame-driven cleanup</strong> &mdash; both route shutdown through the source so STT/AudioSource/UserIdle/ContextAggregator see it in pipeline order. ✓</li>
+        <li><strong>Greet-first</strong> &mdash; ✓ on user-join, <code>daily_room.go</code> pushes a Pipecat-style <code>LLMMessagesAppendFrame{RunLLM:true}</code> (no new messages); <code>ContextAggregator</code> runs the LLM on the initial context. Mirrors <code>on_client_connected → queue_frames([context_frame])</code>.</li>
+        <li><strong>120&nbsp;s no-activity watchdog</strong> &mdash; ✓ <code>UserIdleProcessor.runCancelWatchdog</code> reset by user speech / interim transcript / bot speaking; ends the call on timeout. Mirror of <code>cancel_on_idle_timeout=True, idle_timeout_secs=120</code>.</li>
         <li><strong>Custom Daily transport join retry (3&times;)</strong> &mdash; Python implements <code>CustomDailyTransportClient.join</code> with 3 retries. talk-go's <code>JoinDailyRoom</code> dials the bridge once with a 20 s join timeout. Add retry if Daily intermittently rejects joins.</li>
         <li><strong>Background office sound mixer</strong> &mdash; ✓ <strong>now confirmed wired</strong>. <code>PlaybackSinkProcessor</code> calls <code>loadBackgroundPCM("background-office-sound.mp3")</code> and <code>mixPCM</code> blends it under the bot speech (<code>bgVolume=0.5</code>, <code>botVolume=0.3</code>) &mdash; the Go equivalent of Python's <code>CustomSoundMixer(... volume=0.5)</code>.</li>
         <li><strong>Pipeline assembly location</strong> &mdash; ✓ talk-go now builds the processor list inside the bot (<code>SalesCallBot.BuildTask</code>) and hands it to a bare <code>PipelineTask</code>, mirroring how <code>sales_call.py</code> constructs <code>Pipeline([...])</code> in <code>run_bot</code>. <code>voicepipelinecore</code> exposes building blocks (<code>NewPipelineTask</code>, processor constructors, <code>SetPipeline</code>) rather than an all-in-one factory.</li>
@@ -674,7 +682,8 @@
           <tr><td>Sentry exception capture</td><td>Everywhere &mdash; failed Redis writes, failed post-call, S3 upload, signal handlers, etc.</td><td><strong>None</strong>.</td></tr>
           <tr><td>RTVI debug log (S3 upload)</td><td>✓ <code>logs_data</code> on <code>CustomRtviObserver</code></td><td>✓ <code>UIEventSender.Snapshot()</code></td></tr>
           <tr><td>Per-turn metrics in chunk</td><td>✓ via MetricsTracker</td><td>✓ via <code>TurnMetrics</code> (minus <code>stt_ttfb_ms</code>)</td></tr>
-          <tr><td>RTVI <code>llm_call_result</code> server-message</td><td>✓</td><td>✓</td></tr>
+          <tr><td>RTVI <code>llm_call_result</code> server-message</td><td>✓</td><td>✓ (emitted by <code>LLMProcessor</code> with the real selected model)</td></tr>
+          <tr><td>LLM-call logging (S3 + DB)</td><td>✓ <code>llm_logging_service.log_llm_call_async</code></td><td>✓ router <code>LogSink</code> &rarr; <code>disha.newLLMLogSink</code> enqueues the same service via <code>/common/enqueue_job</code>; best-effort, token counts not captured</td></tr>
           <tr><td>RTVI <code>metric</code> server-message</td><td>via Pipecat metrics observer</td><td>✓ explicit (one per metric)</td></tr>
           <tr><td>Goroutine/thread stacks on shutdown timeout</td><td>n/a (asyncio)</td><td>✓ <code>captureGoroutineStacks</code> when 10 s WG-wait expires</td></tr>
         </tbody>
@@ -692,7 +701,7 @@
       <h2>9. Config &amp; environment variables</h2>
       <p>talk-go's runtime config:</p>
       <pre><code>SONIOX_API_KEY            # STT
-OPENAI_API_KEY            # LLM (talk-go uses OpenAI direct)
+OPENAI_API_KEY            # local-demo LLM default + the gpt-4.1 fallback group (openai_gpt_4_1)
 CARTESIA_API_KEY          # TTS — single key for all calls
 DISHA_API_URL / API_BASE_URL
 DISHA_REDIS_URL
@@ -703,13 +712,24 @@ PORT / FAST_API_PORT      # default 3000; GKE uses 7860
 HOSTNAME                  # set by k8s
 POD_UID, POD_IP           # set by k8s
 FLY_APP_NAME / GKE_DEPLOYMENT_NAME
-ACCESS_KEY_ID, SECRET_KEY_ID, AWS_MAIN_REGION, AWS_BUCKET_NAME  # debug-log S3 upload
+ACCESS_KEY_ID, SECRET_KEY_ID, AWS_MAIN_REGION, AWS_BUCKET_NAME  # S3 (debug log + Vertex creds)
+
+# Live LLM router (sales-call model switching):
+GROK_4_1_FNR_{EASTUS,EASTUS2,WESTUS,WESTUS2,WESTCENTRALUS}_API_KEY / _ENDPOINT
+AZURE_OPENAI_US_{EAST,EAST_2,NORTH_CENTRAL,SOUTH_CENTRAL,WEST,WEST_3}_API_KEY / _ENDPOINT  # gpt-4.1 fallback group
+OPENAI_PRIORITY_API_KEY   # gpt-4.1 fallback group (openai_gpt_4_1_priority)
+VERTEX_DISHAAI_CREDS_FILE # S3 object key (in AWS_BUCKET_NAME) for the Vertex service-account JSON
+LLM_POLL_TRIGGER_URL      # public US Lambda Function URL that re-polls endpoint health
+
+# Phonetics / prompt store:
+PHONETICS_DICT_KEY        # S3 object key for the phonetic dictionary JSON
+AWS_US_BUCKET_NAME        # bucket holding the phonetic JSON
+ENVIRONMENT               # staging/dev -> document:{name}:latest, else :production
 </code></pre>
-      <p>Missing relative to Python (because the model/prompt are hard-coded):</p>
+      <p>Still single-key / not yet wired (matches the gap list):</p>
       <ul>
-        <li><code>GROK_4_1_FNR_EASTUS_API_KEY</code> &mdash; talk-go doesn&rsquo;t use Grok.</li>
-        <li>Langfuse credentials &mdash; talk-go doesn&rsquo;t fetch prompts.</li>
-        <li>Per-user <code>cartesia_api_key</code> from <code>conversation_data</code> &mdash; talk-go reads only <code>CARTESIA_API_KEY</code> env.</li>
+        <li>Per-user <code>cartesia_api_key</code> from <code>conversation_data</code> &mdash; talk-go reads only <code>CARTESIA_API_KEY</code> env (M9).</li>
+        <li>Langfuse API credentials are not needed &mdash; prompts are read pre-rendered from the Redis document store, not fetched live.</li>
       </ul>
       <p>New env vars introduced by this change set:</p>
       <ul>
@@ -730,7 +750,7 @@ ACCESS_KEY_ID, SECRET_KEY_ID, AWS_MAIN_REGION, AWS_BUCKET_NAME  # debug-log S3 u
         <thead><tr><th>#</th><th>Gap</th><th>Status</th><th>Notes</th></tr></thead>
         <tbody>
           <tr><td>M1</td><td>Dynamic Langfuse prompts gated on <code>campaign_pricing_experiment_flag</code>.</td><td><span class="pill ok">Done</span></td><td><code>disha.DocumentStore</code> reads from Redis only, <code>SalesCallBot.loadSalesPrompt</code> picks the right name.</td></tr>
-          <tr><td>M2</td><td>Grok-4.1-fast on Azure (vs hard-coded <code>gpt-4.1</code>).</td><td><span class="pill bad">Open (hard blocker)</span></td><td>Still <code>gpt-4.1</code> on OpenAI public with <code>OPENAI_API_KEY</code>, <strong>no <code>temperature</code></strong>, no model switching/failover, no <code>user_id</code>/<code>entity_id</code>/usecase tracing, no LLM-call logging. Target: <code>grok-4-1-fast-non-reasoning</code> on Azure (<code>cureai-grok4fnr-eastus</code>), <code>temperature=0</code>, <code>switch_llm_config</code> + <code>model_group=grok-4.1-fast-sales</code>. Needs a configurable LLM block on the TTS/LLM constructor + Azure base_url.</td></tr>
+          <tr><td>M2</td><td>Grok-4.1-fast on Azure + health switching / failover / logging.</td><td><span class="pill ok">Done</span></td><td><code>voicepipelinecore/llmrouter</code>: fastest-endpoint selection from Redis health for <code>grok-4.1-fast-sales</code> (Azure Grok + Vertex grok; fallback to <code>gpt-4.1</code> group), <code>temperature=0</code>, blacklist + re-poll on live error, Vertex via stdlib-minted OAuth, OpenAI-format over plain HTTP, per-call logging to <code>llm_logging_service</code>, <code>llm_call_result</code> with the real model. Injected via <code>NewLLMProcessorWithClient</code>.</td></tr>
           <tr><td>M3</td><td>Cartesia phonetic dict + <code>language=hi</code>.</td><td><span class="pill ok">Done</span></td><td><code>disha.PhoneticDict</code> fetches the JSON blob from S3 (SigV4 GET) and exposes <code>Dictionary(ctx)</code>; the dictionary is passed to <code>NewTTSProcessor</code> and the filtering logic lives in the core (<code>voicepipelinecore/phonetic_filter.go</code>). TTS payload sends <code>language: "hi"</code>.</td></tr>
           <tr><td>M4</td><td>UserIdle ends the call on the cap.</td><td><span class="pill ok">Done</span></td><td>Final timer fire calls <code>taskCtx.EndTask(EndReasonUserIdle)</code> after pushing the last prompt.</td></tr>
           <tr><td>M5</td><td>Talktime arms only after first user speech.</td><td><span class="pill ok">Done</span></td><td>Timer waits on <code>startUserCh</code>; closed on the first <code>LLMMessagesFrame</code>.</td></tr>
@@ -753,7 +773,7 @@ ACCESS_KEY_ID, SECRET_KEY_ID, AWS_MAIN_REGION, AWS_BUCKET_NAME  # debug-log S3 u
           <tr><td>S6</td><td>Persist <code>main_agent_system_prompt_langfuse_key</code> on chunk writes (name+version computed in <code>SalesCallBot.plan</code> but discarded).</td><td><span class="pill todo">Easy follow-up</span></td></tr>
           <tr><td>S6&prime;</td><td>STT TTFB on chunks, <code>system_message_params_s3_key</code>, <code>conversation_state_s3_key</code>.</td><td><span class="pill ok">Accepted as null</span> &mdash; not used in sales-call analytics.</td></tr>
           <tr><td>S7</td><td>Daily <code>ping</code>/<code>pong</code> for browser keepalive.</td><td><span class="pill todo">Open</span></td></tr>
-          <tr><td>S8</td><td>Global 120 s no-frames safety net (Python's <code>cancel_on_idle_timeout</code>).</td><td><span class="pill todo">Open</span></td></tr>
+          <tr><td>S8</td><td>Global 120 s no-frames safety net (Python's <code>cancel_on_idle_timeout</code>).</td><td><span class="pill ok">Done</span> &mdash; <code>UserIdleProcessor.runCancelWatchdog</code>, reset by user speech / interim transcript / bot speaking.</td></tr>
           <tr><td>S9</td><td>Atexit alert on abrupt shutdown (depends on Sentry).</td><td><span class="pill todo">Blocked on M8</span></td></tr>
         </tbody>
       </table>
@@ -771,8 +791,8 @@ ACCESS_KEY_ID, SECRET_KEY_ID, AWS_MAIN_REGION, AWS_BUCKET_NAME  # debug-log S3 u
     <section id="cutover">
       <h2>11. Cutover plan if you decide to ship</h2>
       <ol>
-        <li><strong>Land the LLM swap (M2).</strong> This is the last user-facing parity item. Until then, every staging call still goes through OpenAI <code>gpt-4.1</code>, which is fine for plumbing tests but not for real conversion measurement.</li>
-        <li><strong>Seed staging Redis with the sales-call documents</strong> at <code>document:sales_call/main_sys-3day_v2:production</code> (and the two campaign variants). Disha's main app already writes these; if you point talk-go at a fresh Redis you need to pre-warm them.</li>
+        <li><strong>LLM swap (M2) — done.</strong> Staging calls now run Grok-4.1-fast via <code>llmrouter</code>, so conversion/latency/cost numbers are real. Deploy the <strong>US poll-trigger Lambda Function URL</strong> and set <code>LLM_POLL_TRIGGER_URL</code> so endpoint health self-heals on live errors, and point talk-go at the same Redis the poller writes to.</li>
+        <li><strong>Seed staging Redis with the sales-call documents</strong> at <code>document:sales_call/main_sys-3day_v2:production</code> (and the two campaign variants). Disha's main app already writes these; if you point talk-go at a fresh Redis you need to pre-warm them. Also confirm the <code>live_call_modal_health:*</code> keys exist (written by the poller) so the router selects Grok rather than the cold-start fallback.</li>
         <li><strong>Smoke test the phonetic filter</strong> by listening to a Hindi turn and confirming brand names sound right. <code>PhoneticDict.Preload</code> emits a log line with the dictionary size at boot.</li>
         <li><strong>Verify GKE annotation patches work</strong> by running a staging call and inspecting <code>kubectl get pod &lt;name&gt; -o yaml | grep safe-to-evict</code>. Should be <code>"false"</code> during the call and <code>"true"</code> after cleanup.</li>
         <li><strong>Stage in dual-write mode.</strong> Point Disha's <code>create_room</code> for a 1% cohort at the talk-go staging deployment. Compare chunk persistence, conversion rate, p99 v2v latency for a week.</li>
@@ -787,7 +807,8 @@ ACCESS_KEY_ID, SECRET_KEY_ID, AWS_MAIN_REGION, AWS_BUCKET_NAME  # debug-log S3 u
         <code>IsInterruptible()</code>, single-shared WaitGroup with bounded wait + goroutine dump on timeout).
         Replacing the Python sales-call is not a downgrade once M1&ndash;M9 are in. The
         <em>process model</em> &mdash; one binary per pod, no asyncio scheduler under load &mdash; should give
-        you a measurable v2v p99 improvement on busy machines.
+        you a measurable v2v p99 improvement on busy machines. With the LLM swap now in, the only thing
+        standing between staging and a real ramp is observability (Sentry) and the SQS-on-failure fallback.
       </div>
     </section>
 
@@ -802,22 +823,28 @@ disha/bot.go
 disha/call_startup.go
 disha/call_event_callbacks.go
 disha/api_client.go
-disha/redis_client.go
+disha/redis_client.go         # + MGetCache / AcquireLock for the LLM router
 disha/types.go
-disha/worker_jobs.go
+disha/worker_lifecycle.go
 disha/s3_uploader.go
-disha/phonetic_dict.go        # NEW — S3-loaded phonetic dictionary, TextFilter for Cartesia
-disha/document_store.go       # NEW — Redis-only Langfuse prompt fetcher with TTL cache
-disha/gke_pod.go              # NEW — in-cluster Kubernetes pod-annotation client
+disha/phonetic_dict.go        # S3-loaded phonetic dictionary, TextFilter for Cartesia
+disha/document_store.go       # Redis-only prompt fetcher with TTL cache
+disha/gke_pod.go              # in-cluster Kubernetes pod-annotation client
+disha/llm_logging.go          # NEW — router LogSink -> enqueue llm_logging_service
 voicepipelinecore/pipeline.go
-voicepipelinecore/task_types.go             # TextFilter interface added
-voicepipelinecore/context_aggregator.go
-voicepipelinecore/llm_processor.go
-voicepipelinecore/tts_processor.go          # applies TextFilter; sends language=hi
+voicepipelinecore/task_types.go
+voicepipelinecore/context_aggregator.go     # handles LLMMessagesAppendFrame (greet-first)
+voicepipelinecore/llm_processor.go          # LLMClient seam; emits llm_call_result
+voicepipelinecore/llmrouter/                # NEW — health-based model switching package
+  groups.go, health.go, selection.go,       #   registry, health parse + selection
+  providers.go, client.go,                   #   OpenAI-format request build + SSE stream
+  vertex_token.go, s3.go,                     #   Vertex OAuth (stdlib) + S3 creds fetch
+  poll_trigger.go, logging.go                 #   re-poll trigger + CallLog/LogSink
+voicepipelinecore/tts_processor.go          # applies phonetic filter; sends language=hi
 voicepipelinecore/stt_processor.go
-voicepipelinecore/user_idle_processor.go    # ends call after max idle prompts
+voicepipelinecore/user_idle_processor.go    # ends call after max prompts; 120s watchdog
 voicepipelinecore/talktime_monitoring_processor.go  # arms after first user speech
-voicepipelinecore/daily_room.go
+voicepipelinecore/daily_room.go             # greet-first push on user join
 AGENTS.md
 </code></pre>
       <h4>disha-backend</h4>
@@ -840,6 +867,12 @@ bots/onboarding_call/phonetic_text_filter.py
 services/conversation_chunk_manager.py
 services/conversation_chunks_cache.py
 common/sqs_queue_mapping_manager.py
+bots/onboarding_call/custom_llm_service.py   # CustomOpenAILLMService (switching/logging)
+bots/llm_switching_service.py                # get_fastest_for_group
+bots/llm_endpoint_health.py                  # health store + selection latency
+services/openai_config_manager.py            # MODEL_GROUPS + per-endpoint config
+common/tasks.py (poll_openai_models)         # the poller (stays in Python)
+worker.py, templateus.yml                    # US poll-trigger Function URL
 </code></pre>
     </section>
   </main>

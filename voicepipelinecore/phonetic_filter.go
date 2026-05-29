@@ -8,7 +8,7 @@ import (
 // phoneticFilter rewrites text before it is sent to the TTS provider so
 // brand names and Hindi words are pronounced correctly. The only thing
 // supplied from outside the pipeline is the dictionary itself (a
-// token → replacement map, passed via TaskOptions.PhoneticDict); the
+// token → replacement map, passed to NewTTSProcessor by the bot); the
 // filtering logic lives here in the core.
 //
 // Ported from Disha's bots/onboarding_call/phonetic_text_filter.py.

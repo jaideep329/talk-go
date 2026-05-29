@@ -50,6 +50,7 @@ type DailyRoom struct {
 	closed      atomic.Bool
 	joinOnce    sync.Once
 	joinResult  chan error
+	greetOnce   sync.Once
 }
 
 func JoinDailyRoom(roomURL, token string, taskCtx *TaskContext, audioSource *AudioSourceProcessor) (*DailyRoom, error) {
@@ -276,6 +277,17 @@ func (r *DailyRoom) markUserJoined(participantID string) {
 	}
 	if r.taskCtx.callEvents != nil {
 		r.taskCtx.callEvents.fireUserJoined(at)
+	}
+	// The user is present; the bot always speaks first. Push an
+	// LLMMessagesAppendFrame (no new messages, run the LLM) so
+	// ContextAggregator runs the first turn from the initial context.
+	// Fires once per call. Mirrors Pipecat's on_client_connected ->
+	// queue_frames([... run_llm ...]).
+	if r.audioSource != nil {
+		r.greetOnce.Do(func() {
+			r.log("[%s] User joined; starting bot greeting (first turn)", r.roomName)
+			r.audioSource.PushFrame(NewLLMMessagesAppendFrame(nil, true), Downstream)
+		})
 	}
 }
 

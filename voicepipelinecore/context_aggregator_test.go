@@ -73,23 +73,25 @@ func TestContextAggregator_InitialMessagesSeedLLMContext(t *testing.T) {
 	}
 }
 
-func TestContextAggregator_KickoffEmitsFirstTurnFromInitialContext(t *testing.T) {
+func TestContextAggregator_AppendRunLLMEmitsFirstTurnFromInitialContext(t *testing.T) {
 	fix := newTestFixture(t)
 	a := NewContextAggregator(fix.TaskCtx, []Message{
 		{Role: "system", Content: "sales prompt"},
 		{Role: "user", Content: "hello?"},
 	})
 
+	// Greet-first: append no messages, just run the LLM on the initial
+	// context (what DailyRoom pushes on user join).
 	down, _ := runProcessorTest(t, fix, runConfig{
 		processor:    a,
-		framesToSend: []Frame{KickoffFrame{}},
+		framesToSend: []Frame{LLMMessagesAppendFrame{RunLLM: true}},
 		settleDelay:  100 * time.Millisecond,
 		sendEndFrame: true,
 	})
 
 	llmMsg, ok := findFrame[LLMMessagesFrame](down)
 	if !ok {
-		t.Fatalf("expected LLMMessagesFrame from kickoff, got %s", describeFrameTypes(down))
+		t.Fatalf("expected LLMMessagesFrame, got %s", describeFrameTypes(down))
 	}
 	if len(llmMsg.Messages) != 2 {
 		t.Fatalf("message count = %d, want 2 (the initial context)", len(llmMsg.Messages))
@@ -97,9 +99,36 @@ func TestContextAggregator_KickoffEmitsFirstTurnFromInitialContext(t *testing.T)
 	if llmMsg.Messages[0]["content"] != "sales prompt" {
 		t.Fatalf("first message = %q, want sales prompt", llmMsg.Messages[0]["content"])
 	}
-	// The kickoff frame itself must be consumed, not forwarded.
-	if _, forwarded := findFrame[KickoffFrame](down); forwarded {
-		t.Fatal("KickoffFrame should be consumed by ContextAggregator, not forwarded")
+	// The append frame itself must be consumed, not forwarded.
+	if _, forwarded := findFrame[LLMMessagesAppendFrame](down); forwarded {
+		t.Fatal("LLMMessagesAppendFrame should be consumed by ContextAggregator, not forwarded")
+	}
+}
+
+func TestContextAggregator_AppendAddsMessages(t *testing.T) {
+	fix := newTestFixture(t)
+	a := NewContextAggregator(fix.TaskCtx, []Message{
+		{Role: "system", Content: "sales prompt"},
+	})
+
+	down, _ := runProcessorTest(t, fix, runConfig{
+		processor: a,
+		framesToSend: []Frame{
+			LLMMessagesAppendFrame{Messages: []Message{{Role: "system", Content: "injected nudge"}}, RunLLM: true},
+		},
+		settleDelay:  100 * time.Millisecond,
+		sendEndFrame: true,
+	})
+
+	llmMsg, ok := findFrame[LLMMessagesFrame](down)
+	if !ok {
+		t.Fatalf("expected LLMMessagesFrame, got %s", describeFrameTypes(down))
+	}
+	if len(llmMsg.Messages) != 2 {
+		t.Fatalf("message count = %d, want 2 (prompt + appended)", len(llmMsg.Messages))
+	}
+	if llmMsg.Messages[1]["content"] != "injected nudge" {
+		t.Fatalf("appended message = %q, want injected nudge", llmMsg.Messages[1]["content"])
 	}
 }
 

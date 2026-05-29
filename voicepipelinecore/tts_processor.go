@@ -80,8 +80,9 @@ var ttsDialURL = "wss://api.cartesia.ai/tts/websocket?cartesia_version=2025-04-1
 // concurrent access to currentAggregation, pcmBuffer, etc.
 type TTSProcessor struct {
 	*BaseProcessor
-	taskCtx *TaskContext
-	metrics *ProcessorMetrics
+	taskCtx  *TaskContext
+	metrics  *ProcessorMetrics
+	phonetic *phoneticFilter
 
 	// Aggregation state (orchestrator only)
 	currentAggregation string
@@ -143,7 +144,11 @@ type CartesiaTTSDoneMessage struct {
 	Error      string `json:"error"`
 }
 
-func NewTTSProcessor(taskCtx *TaskContext) *TTSProcessor {
+// NewTTSProcessor builds the Cartesia TTS stage. phoneticDict is the
+// only thing the caller supplies for pronunciation rewriting — the
+// filter itself is built and owned here, so the dictionary never has to
+// live on the shared TaskContext. A nil/empty dict means no filtering.
+func NewTTSProcessor(taskCtx *TaskContext, phoneticDict map[string]string) *TTSProcessor {
 	opusEncoder, err := opus.NewEncoder(24000, 1, opus.AppVoIP)
 	if err != nil {
 		taskCtx.Logger.Println("opus encoder init failed:", err)
@@ -151,6 +156,7 @@ func NewTTSProcessor(taskCtx *TaskContext) *TTSProcessor {
 	t := &TTSProcessor{
 		taskCtx:     taskCtx,
 		metrics:     NewProcessorMetrics("tts"),
+		phonetic:    newPhoneticFilter(phoneticDict),
 		opusEncoder: opusEncoder,
 		commands:    make(chan ttsCommand, 100),
 		ttsEvents:   make(chan ttsEvent, 100),
@@ -460,11 +466,20 @@ func (t *TTSProcessor) orchestrator() {
 // --- Cartesia interactions (called only from orchestrator goroutine) ---
 
 func (t *TTSProcessor) sendTextToTTS(text string) bool {
+	speakable := text
+	if t.phonetic != nil {
+		speakable = t.phonetic.apply(text)
+		if strings.TrimSpace(speakable) == "" {
+			t.taskCtx.Logger.Printf("TTS filter dropped non-speakable fragment: %q\n", text)
+			return false
+		}
+	}
 	payload := map[string]interface{}{
 		"model_id":       "sonic-3",
-		"transcript":     text,
+		"transcript":     speakable,
 		"voice":          map[string]interface{}{"mode": "id", "id": "95d51f79-c397-46f9-b49a-23763d3eaa2d"},
 		"output_format":  map[string]interface{}{"container": "raw", "encoding": "pcm_s16le", "sample_rate": 24000},
+		"language":       "hi",
 		"context_id":     t.currentContextId,
 		"continue":       true,
 		"add_timestamps": true,
@@ -473,6 +488,8 @@ func (t *TTSProcessor) sendTextToTTS(text string) bool {
 		t.taskCtx.Logger.Println("failed to send TTS payload:", err)
 		return false
 	}
+	// Surface the unfiltered text to the UI/debug log — phonetics are
+	// a Cartesia-pronunciation artifact, not user-visible content.
 	t.taskCtx.UIEvents.BotTranscription(text, time.Now())
 	return true
 }

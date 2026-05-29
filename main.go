@@ -193,15 +193,30 @@ func unregisterTask(task *voicepipelinecore.PipelineTask) {
 
 func newDishaDeps() disha.Deps {
 	logger := log.New(log.Writer(), "[disha] ", log.Flags())
+	redis := disha.NewRedisClient(
+		os.Getenv("DISHA_REDIS_URL"),
+		os.Getenv("DISHA_REDIS_PASSWORD"),
+		redisDBFromEnv(),
+		logger,
+	)
+	phonetic := disha.NewPhoneticDictFromEnv(logger)
+	// Eagerly preload the phonetic dict in the background so the first
+	// Cartesia turn doesn't pay an S3 round trip. Failures here are
+	// non-fatal: TTS still works without the dictionary.
+	if phonetic != nil {
+		go func() {
+			if err := phonetic.Preload(context.Background()); err != nil {
+				logger.Printf("disha: phonetic dict preload failed: %v\n", err)
+			}
+		}()
+	}
 	return disha.Deps{
-		Logger: logger,
-		Redis: disha.NewRedisClient(
-			os.Getenv("DISHA_REDIS_URL"),
-			os.Getenv("DISHA_REDIS_PASSWORD"),
-			redisDBFromEnv(),
-			logger,
-		),
-		API: disha.NewAPIClient(firstNonEmpty(os.Getenv("DISHA_API_URL"), os.Getenv("API_BASE_URL")), 10*time.Second, logger),
+		Logger:       logger,
+		Redis:        redis,
+		API:          disha.NewAPIClient(firstNonEmpty(os.Getenv("DISHA_API_URL"), os.Getenv("API_BASE_URL")), 10*time.Second, logger),
+		Documents:    disha.NewDocumentStore(redis, logger),
+		PhoneticDict: phonetic,
+		GKEPatcher:   disha.NewGKEPodPatcher(logger),
 	}
 }
 

@@ -23,7 +23,7 @@ import (
 // completes without timing out.
 func TestTTS_ForwardsEndFrameWhenIdle(t *testing.T) {
 	fix := newTestFixture(t)
-	p := NewTTSProcessor(fix.TaskCtx)
+	p := NewTTSProcessor(fix.TaskCtx, nil)
 
 	// Don't actually send EndFrame through the helper — that would wait
 	// on the orchestrator's command channel forever. Instead, just run
@@ -45,7 +45,7 @@ func TestTTS_ForwardsEndFrameWhenIdle(t *testing.T) {
 // playback even if the orchestrator is busy.
 func TestTTS_ForwardsInterruptDownstreamImmediately(t *testing.T) {
 	fix := newTestFixture(t)
-	p := NewTTSProcessor(fix.TaskCtx)
+	p := NewTTSProcessor(fix.TaskCtx, nil)
 
 	source := newQueueProcessor(fix.TaskCtx, "source", Upstream)
 	sink := newQueueProcessor(fix.TaskCtx, "sink", Downstream)
@@ -77,7 +77,7 @@ func TestTTS_ForwardsInterruptDownstreamImmediately(t *testing.T) {
 // orchestrator.
 func TestTTS_PassesThroughUpstreamFrames(t *testing.T) {
 	fix := newTestFixture(t)
-	p := NewTTSProcessor(fix.TaskCtx)
+	p := NewTTSProcessor(fix.TaskCtx, nil)
 
 	source := newQueueProcessor(fix.TaskCtx, "source", Upstream)
 	sink := newQueueProcessor(fix.TaskCtx, "sink", Downstream)

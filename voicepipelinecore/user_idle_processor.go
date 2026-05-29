@@ -39,6 +39,23 @@ func (p *UserIdleProcessor) startIdleTimer() {
 	}
 	p.idleTimer = time.AfterFunc(idleTimeout, func() {
 		count := p.idlePromptCount.Add(1)
+		if count > maxIdlePrompts {
+			// We've already issued the final prompt and asked the
+			// pipeline to end; ignore any straggling fires.
+			return
+		}
+		if count == maxIdlePrompts {
+			// Final attempt: speak the prompt one last time, then ask
+			// the pipeline source to inject EndFrame so every processor
+			// shuts down in order. Matches Python sales_call's
+			// handle_idle returning False after retry == 6.
+			p.taskCtx.Logger.Printf("User idle (%d/%d), final prompt; ending task\n", count, maxIdlePrompts)
+			p.PushFrame(NewTTSSpeakFrame(idlePromptText), Downstream)
+			if p.taskCtx.EndTask != nil {
+				p.taskCtx.EndTask(EndReasonUserIdle)
+			}
+			return
+		}
 		p.taskCtx.Logger.Printf("User idle (%d/%d), injecting prompt\n", count, maxIdlePrompts)
 		p.PushFrame(NewTTSSpeakFrame(idlePromptText), Downstream)
 	})

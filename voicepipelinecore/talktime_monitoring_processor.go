@@ -2,6 +2,7 @@ package voicepipelinecore
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -11,11 +12,19 @@ const (
 	talkTimeExceededPrompt = "Your talk time is exhausted now. Ending the call."
 )
 
+// TalkTimeMonitoringProcessor enforces a per-call talk-time budget.
+// The countdown does not start until the first user transcript has
+// reached this processor — mirrors Python's TalktimeMonitor which
+// arms its timer in the `UserStartedSpeakingFrame` handler. The
+// budget therefore only burns while the user is engaging with the
+// bot.
 type TalkTimeMonitoringProcessor struct {
 	*BaseProcessor
-	taskCtx     *TaskContext
-	maxTalkTime time.Duration
-	ending      atomic.Bool
+	taskCtx       *TaskContext
+	maxTalkTime   time.Duration
+	ending        atomic.Bool
+	startUserOnce sync.Once
+	startUserCh   chan struct{}
 }
 
 func NewTalkTimeMonitoringProcessor(taskCtx *TaskContext) *TalkTimeMonitoringProcessor {
@@ -26,6 +35,7 @@ func NewTalkTimeMonitoringProcessorWithMaxTalkTime(taskCtx *TaskContext, maxTalk
 	p := &TalkTimeMonitoringProcessor{
 		taskCtx:     taskCtx,
 		maxTalkTime: maxTalkTime,
+		startUserCh: make(chan struct{}),
 	}
 	p.BaseProcessor = NewBaseProcessor("TalkTimeMonitor", p, taskCtx)
 	return p
@@ -37,7 +47,13 @@ func (p *TalkTimeMonitoringProcessor) Start(ctx context.Context) {
 }
 
 func (p *TalkTimeMonitoringProcessor) runTimer() {
-	p.taskCtx.Logger.Printf("Talk time monitor started: max_talk_time=%s\n", p.maxTalkTime)
+	p.taskCtx.Logger.Printf("Talk time monitor armed; waiting for first user speech (max=%s)\n", p.maxTalkTime)
+	select {
+	case <-p.ctx.Done():
+		return
+	case <-p.startUserCh:
+	}
+	p.taskCtx.Logger.Printf("Talk time monitor started after first user speech: max_talk_time=%s\n", p.maxTalkTime)
 	select {
 	case <-p.ctx.Done():
 		return
@@ -70,6 +86,12 @@ func (p *TalkTimeMonitoringProcessor) ProcessFrame(ctx context.Context, frame Fr
 			return
 		}
 		p.PushFrame(f, dir)
+	case LLMMessagesFrame:
+		// ContextAggregator only emits LLMMessagesFrame after a committed
+		// user turn (post-`<end>`), so this is the cleanest equivalent
+		// of Pipecat's UserStartedSpeakingFrame for arming the budget.
+		p.armOnFirstSpeech()
+		p.PushFrame(frame, dir)
 	default:
 		if p.ending.Load() && dir == Downstream {
 			p.taskCtx.Logger.Printf("Talk time shutdown in progress, dropping downstream frame: %T\n", frame)
@@ -77,4 +99,12 @@ func (p *TalkTimeMonitoringProcessor) ProcessFrame(ctx context.Context, frame Fr
 		}
 		p.PushFrame(frame, dir)
 	}
+}
+
+// armOnFirstSpeech is idempotent — multiple committed user turns only
+// trigger the close of startUserCh once.
+func (p *TalkTimeMonitoringProcessor) armOnFirstSpeech() {
+	p.startUserOnce.Do(func() {
+		close(p.startUserCh)
+	})
 }

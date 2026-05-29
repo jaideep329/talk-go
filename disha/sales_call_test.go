@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -78,11 +79,27 @@ func seedConversationData(t *testing.T, server *miniredis.Miniredis, conversatio
 	server.Set(conversationDataKey(conversationID), string(raw))
 }
 
+// testSalesPrompt is the body the test harness seeds into the document
+// store. Production reads the real Langfuse prompt from Redis.
+const testSalesPrompt = "TEST_SYSTEM_PROMPT patient={{ patient_info }} when={{ current_datetime }}"
+
+func seedDocument(t *testing.T, server *miniredis.Miniredis, name, env string, version int, body string) {
+	t.Helper()
+	doc := DocumentVersion{ID: "doc-" + name, PromptText: body, Version: version}
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("Marshal document %q: %v", name, err)
+	}
+	server.Set("document:"+name+":"+env, string(raw))
+}
+
 func testDeps(redis RedisClient, api *APIClient) Deps {
+	logger := log.New(io.Discard, "", 0)
 	return Deps{
-		Logger: log.New(io.Discard, "", 0),
-		Redis:  redis,
-		API:    api,
+		Logger:    logger,
+		Redis:     redis,
+		API:       api,
+		Documents: NewDocumentStore(redis, logger),
 	}
 }
 
@@ -187,18 +204,20 @@ func TestSalesCallBotBuildOptionsAssemblesDishaCall(t *testing.T) {
 	remainingTalkTime := 2.5
 	conversationID := "conv-1"
 	userID := "user-1"
+	seedDocument(t, redisServer, salesPromptDefault, "production", 17, testSalesPrompt)
 	seedConversationData(t, redisServer, conversationID, ConversationData{
 		Conversation: ConversationRow{
-			ID:      conversationID,
-			UserID:  userID,
-			BotType: SalesCallBotType,
+			ID:          conversationID,
+			UserID:      userID,
+			BotType:     SalesCallBotType,
+			PatientInfo: "Riya, age 32",
 		},
 		Chunks: [][]any{
 			{"chunk-1", "user", "hello", false, nil},
 			{"chunk-2", "assistant", "hi", false, nil},
-			{"debug", "assistant", "debug", true, nil},
-			{"tool", "tool", "skip role", false, nil},
-			{"metadata", "assistant", "skip metadata", false, map[string]any{"x": "y"}},
+			{"debug", "assistant", "debug", true, nil},                                // dropped: is_debug_log
+			{"meta", "assistant", "fn call", false, map[string]any{"x": "y"}},          // dropped: additional_data present
+			{"empty-data", "tool", "tool turn", false, map[string]any{}},              // kept: empty additional_data is falsy, role unrestricted
 		},
 		UserProfile: UserProfileData{
 			UserID:                            userID,
@@ -217,18 +236,13 @@ func TestSalesCallBotBuildOptionsAssemblesDishaCall(t *testing.T) {
 	if opts.MaxTalkTime == nil || *opts.MaxTalkTime != 2500*time.Millisecond {
 		t.Fatalf("MaxTalkTime = %v, want 2.5s", opts.MaxTalkTime)
 	}
-	wantMessages := []voicepipelinecore.Message{
-		{Role: "system", Content: SalesCallSystemPrompt},
-		{Role: "user", Content: "hello"},
-		{Role: "assistant", Content: "hi"},
-	}
-	if len(opts.InitialMessages) != len(wantMessages) {
-		t.Fatalf("InitialMessages len = %d, want %d: %+v", len(opts.InitialMessages), len(wantMessages), opts.InitialMessages)
-	}
-	for i, want := range wantMessages {
-		if opts.InitialMessages[i] != want {
-			t.Fatalf("InitialMessages[%d] = %+v, want %+v", i, opts.InitialMessages[i], want)
-		}
+	if len(opts.InitialMessages) != 4 ||
+		opts.InitialMessages[0].Role != "system" ||
+		!containsAll(opts.InitialMessages[0].Content, "TEST_SYSTEM_PROMPT", "patient=Riya, age 32") ||
+		opts.InitialMessages[1] != (voicepipelinecore.Message{Role: "user", Content: "hello"}) ||
+		opts.InitialMessages[2] != (voicepipelinecore.Message{Role: "assistant", Content: "hi"}) ||
+		opts.InitialMessages[3] != (voicepipelinecore.Message{Role: "tool", Content: "tool turn"}) {
+		t.Fatalf("InitialMessages mismatch: %+v", opts.InitialMessages)
 	}
 	turnAt := time.Date(2026, 5, 22, 1, 2, 3, 0, time.UTC)
 	opts.CallEvents.OnUserTurnCommitted("new user", turnAt)
@@ -317,6 +331,7 @@ func TestSalesCallBotBuildOptionsSeedsHelloWhenNoPriorChunks(t *testing.T) {
 	redisServer, redisClient := newRedisTestClient(t)
 	apiServer, _ := newCallAPIServer(t)
 	conversationID := "fresh"
+	seedDocument(t, redisServer, salesPromptDefault, "production", 1, testSalesPrompt)
 	seedConversationData(t, redisServer, conversationID, ConversationData{
 		Conversation: ConversationRow{
 			ID:      conversationID,
@@ -343,6 +358,63 @@ func TestSalesCallBotBuildOptionsSeedsHelloWhenNoPriorChunks(t *testing.T) {
 	}
 }
 
+func TestSalesCallBotBuildOptionsPicksCampaignPrompt(t *testing.T) {
+	redisServer, redisClient := newRedisTestClient(t)
+	apiServer, _ := newCallAPIServer(t)
+	flag := campaignFlag21For3Days
+	seedDocument(t, redisServer, salesPrompt21Rs, "production", 3, "21RS_PROMPT")
+	seedConversationData(t, redisServer, "conv-21", ConversationData{
+		Conversation: ConversationRow{ID: "conv-21", UserID: "user-1", BotType: SalesCallBotType},
+		UserProfile: UserProfileData{
+			UserID:                        "user-1",
+			CampaignPricingExperimentFlag: &flag,
+		},
+	})
+
+	opts, err := SalesCallBot{}.BuildOptions(context.Background(), "conv-21", testDeps(redisClient, NewAPIClient(apiServer.URL, 10*time.Second, nil)))
+	if err != nil {
+		t.Fatalf("BuildOptions: %v", err)
+	}
+	if opts.InitialMessages[0].Content != "21RS_PROMPT" {
+		t.Fatalf("expected 21RS prompt, got %q", opts.InitialMessages[0].Content)
+	}
+}
+
+func TestSalesCallBotBuildOptionsAppendsResumeMessage(t *testing.T) {
+	redisServer, redisClient := newRedisTestClient(t)
+	apiServer, _ := newCallAPIServer(t)
+	seedDocument(t, redisServer, salesPromptDefault, "production", 1, "SYS")
+	resumedID := "chunk-prev"
+	recent := time.Now().Add(-2 * time.Minute).Format(time.RFC3339Nano)
+	seedConversationData(t, redisServer, "conv-resume", ConversationData{
+		Conversation: ConversationRow{
+			ID:                 "conv-resume",
+			UserID:             "user-1",
+			BotType:            SalesCallBotType,
+			ResumedFromChunkID: &resumedID,
+		},
+		Chunks: [][]any{
+			{"chunk-1", "user", "I was saying", false, nil},
+		},
+		ResumedChunk: map[string]any{
+			"id":      resumedID,
+			"created": recent,
+		},
+		UserProfile: UserProfileData{UserID: "user-1"},
+	})
+
+	opts, err := SalesCallBot{}.BuildOptions(context.Background(), "conv-resume", testDeps(redisClient, NewAPIClient(apiServer.URL, 10*time.Second, nil)))
+	if err != nil {
+		t.Fatalf("BuildOptions: %v", err)
+	}
+	if len(opts.InitialMessages) != 3 {
+		t.Fatalf("InitialMessages = %+v, want 3", opts.InitialMessages)
+	}
+	if opts.InitialMessages[2].Role != "system" || !containsAll(opts.InitialMessages[2].Content, "hanji to aap keh") {
+		t.Fatalf("resume message missing: %+v", opts.InitialMessages[2])
+	}
+}
+
 func TestSalesCallBotBuildOptionsRejectsUnsupportedBotType(t *testing.T) {
 	redisServer, redisClient := newRedisTestClient(t)
 	apiServer, _ := newCallAPIServer(t)
@@ -359,6 +431,15 @@ func TestSalesCallBotBuildOptionsRejectsUnsupportedBotType(t *testing.T) {
 	if err == nil {
 		t.Fatal("SalesCallBot.BuildOptions returned nil error for unsupported bot type")
 	}
+}
+
+func containsAll(haystack string, needles ...string) bool {
+	for _, n := range needles {
+		if !strings.Contains(haystack, n) {
+			return false
+		}
+	}
+	return true
 }
 
 func TestSalesTalkTimeLimit(t *testing.T) {

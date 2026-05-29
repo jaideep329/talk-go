@@ -9,9 +9,12 @@ import (
 )
 
 type Deps struct {
-	Logger *log.Logger
-	Redis  RedisClient
-	API    *APIClient
+	Logger       *log.Logger
+	Redis        RedisClient
+	API          *APIClient
+	Documents    *DocumentStore
+	PhoneticDict *PhoneticDict
+	GKEPatcher   *GKEPodPatcher
 }
 
 type Bot interface {

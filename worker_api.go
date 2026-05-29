@@ -121,17 +121,64 @@ func (e *missingFieldsError) Error() string {
 }
 
 func runWorkerRoom(req workerRoomRequest) {
+	// Pin the pod against autoscaler eviction for the lifetime of the
+	// call. This mirrors Python `BotWorkerManager.create_bot_task`
+	// which calls `set_safe_to_evict(pod_name, safe_to_evict=False)`
+	// right before launching the bot. It's idempotent with the pin done
+	// at reservation time and covers the direct `/connect` path, which
+	// never goes through mark_machine_reserved.
+	pinPodAgainstEviction()
+
 	task, err := prepareTask(context.Background(), req.connectRequest(), func(*voicepipelinecore.PipelineTask) {
+		unpinPodAfterCall()
 		finishWorkerAndQueueCleanup()
 	})
 	if err != nil {
 		log.Printf("worker task failed to start conversation=%s: %v\n", req.ConversationID, err)
+		unpinPodAfterCall()
 		finishWorkerAndQueueCleanup()
 		return
 	}
 	worker.setTask(task)
 	log.Printf("worker task started conversation=%s room=%s\n", req.ConversationID, task.RoomName)
 	task.Start()
+}
+
+// pinPodAgainstEviction best-effort sets the GKE safe-to-evict
+// annotation to "false" so the cluster autoscaler can't evict the pod
+// while it is reserved or running a call. Logs failures and otherwise
+// no-ops outside Kubernetes.
+func pinPodAgainstEviction() {
+	if dishaDeps.GKEPatcher == nil {
+		return
+	}
+	podName := strings.TrimSpace(os.Getenv("HOSTNAME"))
+	if podName == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := dishaDeps.GKEPatcher.SetSafeToEvict(ctx, podName, false); err != nil {
+		log.Printf("failed to set safe-to-evict=false on pod=%s: %v\n", podName, err)
+	}
+}
+
+// unpinPodAfterCall restores safe-to-evict so the pod can be reaped
+// after Disha's cleanup_state job tears it down. Failures are logged
+// but never block the cleanup path.
+func unpinPodAfterCall() {
+	if dishaDeps.GKEPatcher == nil {
+		return
+	}
+	podName := strings.TrimSpace(os.Getenv("HOSTNAME"))
+	if podName == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := dishaDeps.GKEPatcher.SetSafeToEvict(ctx, podName, true); err != nil {
+		log.Printf("failed to set safe-to-evict=true on pod=%s: %v\n", podName, err)
+	}
 }
 
 func finishWorkerAndQueueCleanup() {
@@ -177,6 +224,12 @@ func handleReadinessCheck(w http.ResponseWriter, r *http.Request) {
 
 func handleMarkMachineReserved(w http.ResponseWriter, r *http.Request) {
 	worker.markReserved()
+	// Pin the pod as soon as it is reserved — Disha reserves several
+	// seconds before the user joins, and an autoscaler scale-down in
+	// that window would kill the pod before the call starts. Mirrors
+	// Python `mark_machine_reserved`, which also flips safe-to-evict to
+	// false. The matching unpin happens on call cleanup.
+	pinPodAgainstEviction()
 	writeJSON(w, http.StatusOK, map[string]string{"status": "success"})
 }
 

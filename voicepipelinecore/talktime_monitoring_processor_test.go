@@ -7,18 +7,19 @@ import (
 
 // TestTalkTime_TimerEmitsShutdownSequence verifies the timer goroutine
 // emits InterruptFrame, TTSSpeakFrame, EndFrame downstream when the
-// max-talk-time elapses.
+// max-talk-time elapses. The timer no longer starts on Start — we
+// inject an LLMMessagesFrame to simulate the first committed user turn
+// and arm the countdown.
 func TestTalkTime_TimerEmitsShutdownSequence(t *testing.T) {
 	fix := newTestFixture(t)
 	p := NewTalkTimeMonitoringProcessorWithMaxTalkTime(fix.TaskCtx, 100*time.Millisecond)
 
-	// We want to capture all frames the timer pushes. The timer fires
-	// 100ms after Start. Use a slightly larger settleDelay before the
-	// explicit EndFrame so the timer's frames flow first.
 	down, _ := runProcessorTest(t, fix, runConfig{
-		processor:    p,
-		framesToSend: []Frame{}, // nothing — timer drives the test
-		settleDelay:  200 * time.Millisecond,
+		processor: p,
+		framesToSend: []Frame{
+			LLMMessagesFrame{Messages: []map[string]string{{"role": "user", "content": "hi"}}},
+		},
+		settleDelay:  250 * time.Millisecond,
 		sendEndFrame: false, // timer itself will emit EndFrame
 		timeout:      3 * time.Second,
 	})
@@ -71,8 +72,6 @@ func TestTalkTime_DropsDownstreamFramesDuringShutdown(t *testing.T) {
 	fix := newTestFixture(t)
 	p := NewTalkTimeMonitoringProcessorWithMaxTalkTime(fix.TaskCtx, 50*time.Millisecond)
 
-	// Wait for timer to fire, then try to push a frame — it should be
-	// dropped because ending is true.
 	source := newQueueProcessor(fix.TaskCtx, "source", Upstream)
 	sink := newQueueProcessor(fix.TaskCtx, "sink", Downstream)
 	source.Link(p)
@@ -81,8 +80,11 @@ func TestTalkTime_DropsDownstreamFramesDuringShutdown(t *testing.T) {
 	p.Start(fix.RootCtx)
 	sink.Start(fix.RootCtx)
 
+	// Arm the timer by simulating a committed user turn.
+	source.QueueFrame(LLMMessagesFrame{Messages: []map[string]string{{"role": "user", "content": "hi"}}}, Downstream)
+
 	// Wait for timer to fire and shutdown sequence to emit.
-	time.Sleep(150 * time.Millisecond)
+	time.Sleep(200 * time.Millisecond)
 
 	// Now ending is true. New downstream frames should be dropped.
 	source.QueueFrame(TextFrame{Text: "late"}, Downstream)

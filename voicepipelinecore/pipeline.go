@@ -112,6 +112,12 @@ type TaskOptions struct {
 	// MaxTalkTime overrides the talk-time monitor default when non-nil.
 	MaxTalkTime *time.Duration
 
+	// PhoneticDict, when non-empty, is a token → replacement map applied
+	// to every text fragment before it is sent to Cartesia so brand names
+	// and Hindi words are pronounced correctly. The caller supplies only
+	// the dictionary; the filtering logic lives in the core.
+	PhoneticDict map[string]string
+
 	// CallEvents contains one-shot call timeline hooks.
 	CallEvents CallEvents
 
@@ -248,7 +254,7 @@ func NewTask(parentCtx context.Context, opts TaskOptions) (*PipelineTask, error)
 		talkTimeMonitor = NewTalkTimeMonitoringProcessorWithMaxTalkTime(taskCtx, *opts.MaxTalkTime)
 	}
 	llmProcessor := NewLLMProcessor(taskCtx)
-	ttsProcessor := NewTTSProcessor(taskCtx)
+	ttsProcessor := NewTTSProcessor(taskCtx, opts.PhoneticDict)
 	playbackSink := NewPlaybackSinkProcessor(taskCtx)
 	pipelineSink := NewPipelineSinkProcessor(taskCtx, task.completeEnd)
 

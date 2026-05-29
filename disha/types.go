@@ -16,7 +16,9 @@ type ConversationRow struct {
 	ID                 string  `json:"id"`
 	UserID             string  `json:"user_id"`
 	BotType            string  `json:"bot_type"`
+	PatientInfo        string  `json:"patient_info"`
 	ResumedFromChunkID *string `json:"resumed_from_chunk_id"`
+	ResumeGracefully   *bool   `json:"resume_gracefully"`
 	StartChunkID       *string `json:"start_chunk_id"`
 	EndChunkID         *string `json:"end_chunk_id"`
 }
@@ -25,6 +27,8 @@ type UserProfileData struct {
 	UserID                            string   `json:"user_id"`
 	Phone                             string   `json:"phone"`
 	RemainingSalesCallTalktimeSeconds *float64 `json:"remaining_sales_call_talktime_seconds"`
+	CampaignPricingExperimentFlag     *string  `json:"campaign_pricing_experiment_flag"`
+	ShortTermMemory                   *string  `json:"short_term_memory"`
 }
 
 // ConversationChunk mirrors the dict Disha's chunk manager stores in

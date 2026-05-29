@@ -140,7 +140,7 @@
       machine lifecycle, signal handling, and the conversation context surface. Use this to decide whether talk-go
       can replace the Python sales-call worker today, and to scope the remaining work if not.</p>
     <div class="meta">
-      <span>Generated: Wed 27 May 2026 (updated)</span>
+      <span>Generated: 29 May 2026 (re-verified against current main)</span>
       <span>talk-go @ <code>/Users/jaideepsingh/Projects/talk-go</code></span>
       <span>disha-backend @ <code>/Users/jaideepsingh/Projects/disha-backend</code></span>
       <span>Pipecat reference: <code>pipecat-ai==0.0.108</code></span>
@@ -157,17 +157,25 @@
         <span class="verdict-tag gap">LLM: gap (next)</span>
         <span class="verdict-tag partial">Operational polish: partial</span>
       </p>
-      <p>This iteration closed six of the nine must-fix items from the previous report. The phonetic
-        dictionary is now loaded from S3 and applied inside the existing TTS processor; the system prompt
-        is dynamically selected from the Disha document store (Redis-only) based on
-        <code>campaign_pricing_experiment_flag</code>; the resume-message and unprocessed-chat-context paths
-        ride the conversation data we already fetch; the talktime monitor now only counts down once the user
-        has spoken; the idle prompts now end the call after the cap; and the GKE
-        <code>safe-to-evict</code> annotation is flipped to <code>false</code> when the pod is reserved and when
-        a call begins, then back to <code>true</code> on cleanup. The remaining blockers are the LLM swap (still hard-coded
-        <code>gpt-4.1</code>; production needs Grok-4.1-fast on Azure) and a handful of operational
-        nice-to-haves (SQS-on-API-failure fallback, Sentry, custom Daily join retry). With those, talk-go is
-        a faithful sales-call worker.</p>
+      <p>The user-facing call behaviour is now at parity. Closed since the original report: dynamic
+        Langfuse prompt selection by <code>campaign_pricing_experiment_flag</code> (Redis-only document
+        store); the phonetic dictionary loaded from S3 — its filtering logic now owned by the core TTS
+        processor, with only the dictionary crossing the boundary; <code>language=hi</code> on Cartesia;
+        the resume-message + <code>unprocessed_chat_context</code> paths; the chunk-replay filter now
+        matching <code>sales_call.py</code> exactly; the talktime timer arming only after the first
+        committed user turn; idle ending the call after the prompt cap; the GKE <code>safe-to-evict</code>
+        flip on both reserve and call-start; and — confirmed in this pass — the <strong>background office
+        sound</strong> is in fact mixed into the outbound audio (0.5 vs 0.3 bot), closing a gap the previous
+        report had left open. The pipeline is now also <strong>assembled in the bot</strong>
+        (<code>SalesCallBot.BuildTask</code>) exactly like <code>sales_call.py</code>'s
+        <code>Pipeline([...])</code>, rather than inside the core.</p>
+      <p>One hard blocker remains for a true production cutover — the <strong>LLM swap</strong> (still
+        hard-coded OpenAI <code>gpt-4.1</code> with no temperature/switching/entity tracing; production runs
+        Grok-4.1-fast on Azure with <code>temperature=0</code> and failover). The rest are operational
+        resilience items that don't change what the user hears but matter under load/incident:
+        SQS-on-API-failure fallback, Sentry, STT connect-retry cap, Daily join retry, a global 120&nbsp;s
+        no-frames watchdog, ping/pong keepalive, per-conversation Cartesia key, and persisting
+        <code>main_agent_system_prompt_langfuse_key</code> on chunks.</p>
     </div>
 
     <section style="background:#e3f5e8; border-color:#bce3c5;">
@@ -185,14 +193,87 @@
           <tr><td>M8</td><td>Sentry coverage</td><td><span class="pill todo">Skipped on purpose (add later)</span></td><td>n/a</td></tr>
           <tr><td>M9</td><td>Per-conversation Cartesia API key</td><td><span class="pill todo">Open</span></td><td>still single <code>CARTESIA_API_KEY</code> env</td></tr>
           <tr><td>S6 (subset)</td><td>STT TTFB on chunks intentionally null</td><td><span class="pill ok">Accepted</span></td><td>STT processor has no TTFB metric in our flow</td></tr>
-          <tr><td>S6 (subset)</td><td><code>main_agent_system_prompt_langfuse_key</code> on chunks</td><td><span class="pill todo">Open</span></td><td>Document version is now available; needs a small wiring change in <code>CallEventCallbacks</code></td></tr>
+          <tr><td>S6 (subset)</td><td><code>main_agent_system_prompt_langfuse_key</code> on chunks</td><td><span class="pill todo">Open</span></td><td>Prompt name+version are computed in <code>SalesCallBot.plan</code> but discarded; need threading into <code>CallEventCallbacks</code></td></tr>
+          <tr><td>S4</td><td>Background office sound mixed into outbound audio</td><td><span class="pill ok">Done</span></td><td><code>voicepipelinecore/playback_sink_processor.go</code> — <code>background-office-sound.mp3</code> mixed at 0.5 (bot 0.3)</td></tr>
+          <tr><td>M6′</td><td>Chunk-replay filter matches <code>sales_call.py</code> exactly (debug + truthy <code>additional_data</code> only)</td><td><span class="pill ok">Done</span></td><td><code>disha/call_startup.go</code> <code>messageFromChunkTuple</code></td></tr>
+          <tr><td>Arch</td><td>Pipeline assembled in the bot (<code>BuildTask</code>), not the core; <code>SessionID</code> replaces synthetic room name</td><td><span class="pill ok">Done</span></td><td><code>disha/sales_call.go</code>, <code>voicepipelinecore/pipeline.go</code></td></tr>
         </tbody>
       </table>
+    </section>
+
+    <section id="whats-left" style="background:#fbfdff; border-color:#cdd8e6;">
+      <h2>What&rsquo;s left (re-verified 29 May 2026 against current <code>main</code>)</h2>
+      <p>Behaviourally talk-go is now a faithful sales-call worker. Exactly one item blocks a measurable
+        production cutover; everything else is resilience / observability hardening you&rsquo;d want before
+        ramping past a small traffic percentage.</p>
+
+      <h3>🔴 Hard blocker — blocks a real cutover</h3>
+      <table>
+        <thead><tr><th>#</th><th>Gap</th><th>Go today</th><th>Python (target)</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><strong>M2</strong></td>
+            <td>LLM swap (the only item that changes what the user hears / what we measure)</td>
+            <td>Hard-coded <code>gpt-4.1</code>, OpenAI public endpoint, <code>OPENAI_API_KEY</code>; <strong>no temperature</strong>, no model switching/failover, no <code>user_id</code>/<code>entity_id</code>/usecase tracing, no LLM-call logging. <code>voicepipelinecore/llm_processor.go</code>.</td>
+            <td><code>grok-4-1-fast-non-reasoning</code> on Azure (<code>eastusresourcegroup</code>, deployment <code>cureai-grok4fnr-eastus</code>), <code>GROK_4_1_FNR_EASTUS_API_KEY</code>, <code>temperature=0</code>, <code>switch_llm_config=True</code> + <code>model_group=grok-4.1-fast-sales</code> (failover via <code>LLMSwitchingService</code>), entity + structured LLM logging.</td>
+          </tr>
+        </tbody>
+      </table>
+      <div class="callout bad">
+        <strong>Why it blocks</strong>
+        Every conversion-rate, latency, and cost number on staging is currently produced by the wrong model.
+        Plumbing tests are fine, but real performance cannot be measured until the model, base URL, deployment,
+        key, and <code>temperature=0</code> are parameterised — ideally with the switching/failover and entity
+        logging too.
+      </div>
+
+      <h3>🟠 Operational resilience — invisible to the user, bites under load / incidents</h3>
+      <table>
+        <thead><tr><th>#</th><th>Gap</th><th>Go today</th><th>Python</th><th>Risk</th></tr></thead>
+        <tbody>
+          <tr><td>S1</td><td>SQS fallback on API failure</td><td><code>APIClient</code> logs &amp; drops on failed <code>/bot/update_conversation</code> and <code>/bot/run_post_call_operations</code></td><td><code>_call_api_with_fallback</code> re-queues to SQS + Sentry</td><td>A brief Disha-API blip silently loses the post-call write</td></tr>
+          <tr><td>M8</td><td>Sentry / error reporting</td><td>None anywhere in the Go tree</td><td>Instruments Redis, S3, post-call, signal handlers, …</td><td>On-call is blind during incidents</td></tr>
+          <tr><td>S2</td><td>STT connect-retry cap</td><td>Retries the Soniox connect <strong>forever</strong> (1&nbsp;s loop)</td><td>Caps at 3, then <code>sys.exit(1)</code></td><td>A bad key &rarr; pod retries forever holding a worker slot</td></tr>
+          <tr><td>S3</td><td>Daily join retry</td><td><code>JoinDailyRoom</code> dials the bridge <strong>once</strong> (20&nbsp;s timeout)</td><td>Retries 3&times; with Sentry on final failure</td><td>Intermittent join reject &rarr; dropped call Python would recover</td></tr>
+          <tr><td>S8</td><td>Global no-frames watchdog</td><td>Only the 7&nbsp;s user-idle prompt loop; no process-level guard</td><td><code>cancel_on_idle_timeout=True</code>, <code>idle_timeout_secs=120</code></td><td>A <em>frozen</em> pipeline (not user-idle) hangs until pod eviction</td></tr>
+          <tr><td>S7</td><td>Daily <code>ping</code>/<code>pong</code> keepalive</td><td>App-message handler only handles <code>end_call</code></td><td>RTVI responds <code>pong</code> to <code>ping</code></td><td>A browser client relying on pong keepalive times out (verify the <code>daily_bridge.py</code> sidecar doesn&rsquo;t cover it)</td></tr>
+          <tr><td>S9</td><td>Atexit abrupt-shutdown alert</td><td>None</td><td>Sentry &ldquo;Abrupt machine kill detected&rdquo;</td><td>Blocked on M8</td></tr>
+        </tbody>
+      </table>
+      <p><strong>Recommended order after the LLM swap:</strong> M8 (Sentry) and S1 (SQS fallback) first &mdash;
+        they&rsquo;re the difference between seeing reality and not during the ramp &mdash; then S2/S3/S8.</p>
+
+      <h3>🟡 Data / analytics completeness</h3>
+      <table>
+        <thead><tr><th>#</th><th>Gap</th><th>Detail</th></tr></thead>
+        <tbody>
+          <tr><td>M9</td><td>Per-conversation Cartesia key</td><td>Go uses one <code>CARTESIA_API_KEY</code> env; Python reads <code>cartesia_api_key</code> from the conversation row (per-tenant). Surface a key on the TTS constructor and read it from Redis.</td></tr>
+          <tr><td>S6</td><td><code>main_agent_system_prompt_langfuse_key</code> on chunks</td><td>Name+version are computed in <code>SalesCallBot.plan</code> but discarded; thread them into <code>CallEventCallbacks</code> so chunk writes carry the key. Small change.</td></tr>
+          <tr><td>—</td><td>Accepted-null (sales-call doesn&rsquo;t use)</td><td><code>current_agenda</code>, <code>stt_ttfb_ms</code> (no STT TTFB metric in our flow), <code>system_message_params_s3_key</code>, <code>conversation_state_s3_key</code>.</td></tr>
+        </tbody>
+      </table>
+
+      <h3>⚪ Accepted differences — scope decisions, not bugs</h3>
+      <ul>
+        <li><strong>S5</strong> &mdash; per-conversation logging: Go uses a <code>[conv=…]</code> prefix on one logger vs Python&rsquo;s per-call loguru file. Fine for CloudWatch-style aggregation.</li>
+        <li>Idle timing: Go 7&nbsp;s / 7 prompts / <code>"Hello?"</code> vs Python 5&nbsp;s / 6 / <code>"hello?"</code> &mdash; minor A/B noise.</li>
+        <li>The 50&nbsp;ms <code>SpeechTimeoutUserTurnStopStrategy</code> guard is absent; Go relies on Soniox&rsquo;s <code>&lt;end&gt;</code> token directly.</li>
+      </ul>
+
+      <h3>✅ Confirmed done this pass (incl. corrections to the earlier report)</h3>
+      <ul>
+        <li>Prompt-by-flag · phonetics (logic now in the core TTS processor, dictionary-only boundary) · <code>language=hi</code> · resume message + <code>unprocessed_chat_context</code>.</li>
+        <li><strong>Chunk-replay filter now matches <code>sales_call.py</code> exactly</strong> (drop only on <code>is_debug_log</code> or truthy <code>additional_data</code>).</li>
+        <li>Idle-ends-call · talktime-arms-after-first-committed-turn · GKE <code>safe-to-evict</code> on reserve + call-start.</li>
+        <li><strong>Background office sound is mixed</strong> into outbound audio (0.5 vs 0.3 bot) &mdash; the earlier report had wrongly flagged this open.</li>
+        <li><strong>Pipeline is assembled in the bot</strong> (<code>SalesCallBot.BuildTask</code>) like <code>run_bot</code>; <code>SessionID</code> (= conversation id) replaces the synthetic room name.</li>
+      </ul>
     </section>
 
     <section>
       <h2>Contents</h2>
       <ol class="toc">
+        <li><a href="#whats-left">0. What&rsquo;s left (prioritized)</a></li>
         <li><a href="#scope">1. Scope &amp; method</a></li>
         <li><a href="#summary">2. One-line summary per surface</a></li>
         <li><a href="#bot">3. Inside the bot: <code>sales_call.py</code> vs <code>SalesCallBot</code></a></li>
@@ -447,7 +528,8 @@
         <li><strong>WordTimestampFrame interleaving</strong> &mdash; both interleave words with audio frames at PlaybackSink; talk-go uses Cartesia <code>add_timestamps</code>. ✓</li>
         <li><strong>EndFrame-driven cleanup</strong> &mdash; both route shutdown through the source so STT/AudioSource/UserIdle/ContextAggregator see it in pipeline order. ✓</li>
         <li><strong>Custom Daily transport join retry (3&times;)</strong> &mdash; Python implements <code>CustomDailyTransportClient.join</code> with 3 retries. talk-go's <code>JoinDailyRoom</code> dials the bridge once with a 20 s join timeout. Add retry if Daily intermittently rejects joins.</li>
-        <li><strong>Background office sound mixer</strong> &mdash; Python plays <code>background-office-sound.mp3</code> at volume 0.5 via Pipecat's <code>CustomSoundMixer</code>. talk-go has the mp3 file checked in but, on current reading, doesn't wire it into <code>PlaybackSinkProcessor</code>. Verify before shipping; users notice a quiet bot.</li>
+        <li><strong>Background office sound mixer</strong> &mdash; ✓ <strong>now confirmed wired</strong>. <code>PlaybackSinkProcessor</code> calls <code>loadBackgroundPCM("background-office-sound.mp3")</code> and <code>mixPCM</code> blends it under the bot speech (<code>bgVolume=0.5</code>, <code>botVolume=0.3</code>) &mdash; the Go equivalent of Python's <code>CustomSoundMixer(... volume=0.5)</code>.</li>
+        <li><strong>Pipeline assembly location</strong> &mdash; ✓ talk-go now builds the processor list inside the bot (<code>SalesCallBot.BuildTask</code>) and hands it to a bare <code>PipelineTask</code>, mirroring how <code>sales_call.py</code> constructs <code>Pipeline([...])</code> in <code>run_bot</code>. <code>voicepipelinecore</code> exposes building blocks (<code>NewPipelineTask</code>, processor constructors, <code>SetPipeline</code>) rather than an all-in-one factory.</li>
       </ul>
     </section>
 
@@ -648,8 +730,8 @@ ACCESS_KEY_ID, SECRET_KEY_ID, AWS_MAIN_REGION, AWS_BUCKET_NAME  # debug-log S3 u
         <thead><tr><th>#</th><th>Gap</th><th>Status</th><th>Notes</th></tr></thead>
         <tbody>
           <tr><td>M1</td><td>Dynamic Langfuse prompts gated on <code>campaign_pricing_experiment_flag</code>.</td><td><span class="pill ok">Done</span></td><td><code>disha.DocumentStore</code> reads from Redis only, <code>SalesCallBot.loadSalesPrompt</code> picks the right name.</td></tr>
-          <tr><td>M2</td><td>Grok-4.1-fast on Azure (vs hard-coded <code>gpt-4.1</code>).</td><td><span class="pill todo">Deferred</span></td><td>Tracked for the next change set. Needs <code>TaskOptions.LLMConfig</code>, <code>CustomOpenAILLMService</code>-style switching, Azure base_url support.</td></tr>
-          <tr><td>M3</td><td>Cartesia phonetic dict + <code>language=hi</code>.</td><td><span class="pill ok">Done</span></td><td><code>disha.PhoneticDict</code> fetches the JSON blob from S3 (SigV4 GET via the same uploader infra) and is plugged in as a <code>TextFilter</code> on <code>TaskContext</code>. TTS payload now sends <code>language: "hi"</code>.</td></tr>
+          <tr><td>M2</td><td>Grok-4.1-fast on Azure (vs hard-coded <code>gpt-4.1</code>).</td><td><span class="pill bad">Open (hard blocker)</span></td><td>Still <code>gpt-4.1</code> on OpenAI public with <code>OPENAI_API_KEY</code>, <strong>no <code>temperature</code></strong>, no model switching/failover, no <code>user_id</code>/<code>entity_id</code>/usecase tracing, no LLM-call logging. Target: <code>grok-4-1-fast-non-reasoning</code> on Azure (<code>cureai-grok4fnr-eastus</code>), <code>temperature=0</code>, <code>switch_llm_config</code> + <code>model_group=grok-4.1-fast-sales</code>. Needs a configurable LLM block on the TTS/LLM constructor + Azure base_url.</td></tr>
+          <tr><td>M3</td><td>Cartesia phonetic dict + <code>language=hi</code>.</td><td><span class="pill ok">Done</span></td><td><code>disha.PhoneticDict</code> fetches the JSON blob from S3 (SigV4 GET) and exposes <code>Dictionary(ctx)</code>; the dictionary is passed to <code>NewTTSProcessor</code> and the filtering logic lives in the core (<code>voicepipelinecore/phonetic_filter.go</code>). TTS payload sends <code>language: "hi"</code>.</td></tr>
           <tr><td>M4</td><td>UserIdle ends the call on the cap.</td><td><span class="pill ok">Done</span></td><td>Final timer fire calls <code>taskCtx.EndTask(EndReasonUserIdle)</code> after pushing the last prompt.</td></tr>
           <tr><td>M5</td><td>Talktime arms only after first user speech.</td><td><span class="pill ok">Done</span></td><td>Timer waits on <code>startUserCh</code>; closed on the first <code>LLMMessagesFrame</code>.</td></tr>
           <tr><td>M6</td><td>Resume message + unprocessed chat context.</td><td><span class="pill ok">Done</span></td><td><code>buildResumeSystemMessage</code> + <code>mergeShortTermMemory</code> read what Disha already writes into <code>conversation_data</code>.</td></tr>
@@ -666,9 +748,9 @@ ACCESS_KEY_ID, SECRET_KEY_ID, AWS_MAIN_REGION, AWS_BUCKET_NAME  # debug-log S3 u
           <tr><td>S1</td><td>SQS fallback when <code>/bot/update_conversation</code> or <code>/bot/run_post_call_operations</code> fails (mirror <code>VoiceBotAPIService._call_api_with_fallback</code>).</td><td><span class="pill todo">Open</span></td></tr>
           <tr><td>S2</td><td>STT connect retry cap on auth failure (currently retries forever).</td><td><span class="pill todo">Open</span></td></tr>
           <tr><td>S3</td><td>Daily join retry parity (Python uses 3 attempts).</td><td><span class="pill todo">Open</span></td></tr>
-          <tr><td>S4</td><td>Background office mp3 mixed into outbound audio.</td><td><span class="pill todo">Open</span></td></tr>
-          <tr><td>S5</td><td>Per-conversation log file (Python loguru sink).</td><td><span class="pill todo">Open</span> &mdash; logging staying as-is per the latest scope.</td></tr>
-          <tr><td>S6</td><td>Persist <code>main_agent_system_prompt_langfuse_key</code> on chunk writes (version already available from <code>DocumentStore</code>).</td><td><span class="pill todo">Easy follow-up</span></td></tr>
+          <tr><td>S4</td><td>Background office mp3 mixed into outbound audio.</td><td><span class="pill ok">Done</span> &mdash; <code>playback_sink_processor.go</code> (<code>bgVolume=0.5</code>, <code>botVolume=0.3</code>).</td></tr>
+          <tr><td>S5</td><td>Per-conversation log file (Python loguru sink).</td><td><span class="pill todo">Open</span> &mdash; logging stays as a <code>[conv=…]</code> prefix per the latest scope.</td></tr>
+          <tr><td>S6</td><td>Persist <code>main_agent_system_prompt_langfuse_key</code> on chunk writes (name+version computed in <code>SalesCallBot.plan</code> but discarded).</td><td><span class="pill todo">Easy follow-up</span></td></tr>
           <tr><td>S6&prime;</td><td>STT TTFB on chunks, <code>system_message_params_s3_key</code>, <code>conversation_state_s3_key</code>.</td><td><span class="pill ok">Accepted as null</span> &mdash; not used in sales-call analytics.</td></tr>
           <tr><td>S7</td><td>Daily <code>ping</code>/<code>pong</code> for browser keepalive.</td><td><span class="pill todo">Open</span></td></tr>
           <tr><td>S8</td><td>Global 120 s no-frames safety net (Python's <code>cancel_on_idle_timeout</code>).</td><td><span class="pill todo">Open</span></td></tr>

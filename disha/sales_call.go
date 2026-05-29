@@ -25,10 +25,11 @@ const (
 	campaignFlag299For30Days = "299_for_30_days"
 )
 
-// SalesCallBot is the Disha-specific assembly of a sales call. The
-// pipeline itself is built by voicepipelinecore; this type only wires
-// in the dynamic prompt, the talktime override, the phonetic dict,
-// and the call-event callbacks that talk to Redis + Disha's REST API.
+// SalesCallBot is the Disha-specific assembly of a sales call. It loads
+// the conversation, selects the dynamic prompt, builds the initial LLM
+// context (with resume handling), and wires the call-event callbacks
+// that talk to Redis + Disha's REST API, then assembles the voice
+// pipeline from voicepipelinecore's frame processors.
 type SalesCallBot struct{}
 
 var _ Bot = SalesCallBot{}
@@ -37,15 +38,31 @@ func (SalesCallBot) BotType() string {
 	return SalesCallBotType
 }
 
-func (b SalesCallBot) BuildOptions(ctx context.Context, conversationID string, deps Deps) (voicepipelinecore.TaskOptions, error) {
+// salesCallPlan is the resolved, room-independent configuration for a
+// sales call. It is computed by plan() (which touches only Redis + the
+// document store, so it is unit-testable without a Daily room) and then
+// consumed by BuildTask() to construct the processors.
+type salesCallPlan struct {
+	Startup         CallStartup
+	InitialMessages []voicepipelinecore.Message
+	MaxTalkTime     time.Duration
+	PhoneticDict    map[string]string
+	Callbacks       *CallEventCallbacks
+}
+
+// plan resolves everything that depends only on the conversation data:
+// the dynamic prompt, the initial messages (incl. resume), the
+// talk-time budget, the phonetic dictionary, and the call-event
+// callbacks. It performs no room join, so it is safe to unit-test.
+func (b SalesCallBot) plan(ctx context.Context, conversationID string, deps Deps) (*salesCallPlan, error) {
 	startup, err := collectCallStartup(ctx, conversationID, SalesCallBotType, deps)
 	if err != nil {
-		return voicepipelinecore.TaskOptions{}, err
+		return nil, err
 	}
 
 	prompt, promptName, promptVersion, err := loadSalesPrompt(ctx, deps.Documents, startup)
 	if err != nil {
-		return voicepipelinecore.TaskOptions{}, err
+		return nil, err
 	}
 	startup.Logger.Printf("disha: sales prompt selected name=%s version=%d\n", promptName, promptVersion)
 
@@ -54,29 +71,79 @@ func (b SalesCallBot) BuildOptions(ctx context.Context, conversationID string, d
 		startup.Logger.Println("disha: appending resume system message")
 	}
 
-	maxTalkTime := salesTalkTimeLimit(startup.Data.UserProfile.RemainingSalesCallTalktimeSeconds)
-	callbacks := NewCallEventCallbacks(
-		startup,
-		deps.Redis,
-		deps.API,
-		NewDebugLogUploaderFromEnv(startup.Logger, startup.ConversationID),
-	)
-
-	opts := voicepipelinecore.TaskOptions{
-		Logger:   startup.Logger,
-		RoomName: startup.RoomName,
-		InitialMessages: buildInitialMessages(
-			prompt,
-			startup.Data.Chunks,
-			resumeMsg,
+	pl := &salesCallPlan{
+		Startup:         startup,
+		InitialMessages: buildInitialMessages(prompt, startup.Data.Chunks, resumeMsg),
+		MaxTalkTime:     salesTalkTimeLimit(startup.Data.UserProfile.RemainingSalesCallTalktimeSeconds),
+		Callbacks: NewCallEventCallbacks(
+			startup,
+			deps.Redis,
+			deps.API,
+			NewDebugLogUploaderFromEnv(startup.Logger, startup.ConversationID),
 		),
-		MaxTalkTime: &maxTalkTime,
-		CallEvents:  callbacks.Events(),
 	}
 	if deps.PhoneticDict != nil {
-		opts.PhoneticDict = deps.PhoneticDict.Dictionary(ctx)
+		pl.PhoneticDict = deps.PhoneticDict.Dictionary(ctx)
 	}
-	return opts, nil
+	return pl, nil
+}
+
+// BuildTask assembles the sales-call pipeline. The processor list here
+// is the Go equivalent of the Pipeline([...]) in bots/sales_call/
+// sales_call.py: each processor is constructed with its own config and
+// then linked into the chain.
+func (b SalesCallBot) BuildTask(ctx context.Context, req BotTaskRequest, deps Deps) (*voicepipelinecore.PipelineTask, error) {
+	pl, err := b.plan(ctx, req.ConversationID, deps)
+	if err != nil {
+		return nil, err
+	}
+
+	task, err := voicepipelinecore.NewPipelineTask(ctx, voicepipelinecore.TaskConfig{
+		Logger:     pl.Startup.Logger,
+		SessionID:  pl.Startup.ConversationID,
+		CallEvents: pl.Callbacks.Events(),
+	})
+	if err != nil {
+		return nil, err
+	}
+	taskCtx := task.TaskCtx
+
+	// Source + audio input must exist before the room join: JoinDailyRoom
+	// pumps inbound audio frames into the audio source.
+	source := voicepipelinecore.NewPipelineSourceProcessor(taskCtx)
+	audioSource := voicepipelinecore.NewAudioSourceProcessor(taskCtx)
+
+	room, err := voicepipelinecore.JoinDailyRoom(req.RoomURL, req.RoomToken, taskCtx, audioSource)
+	if err != nil {
+		task.Abort()
+		return nil, err
+	}
+	taskCtx.Room = room
+	taskCtx.UIEvents.SetRoom(room)
+
+	stt := voicepipelinecore.NewSTTProcessor(taskCtx)
+	userIdle := voicepipelinecore.NewUserIdleProcessor(taskCtx)
+	contextAggregator := voicepipelinecore.NewContextAggregator(taskCtx, pl.InitialMessages)
+	talkTime := voicepipelinecore.NewTalkTimeMonitoringProcessorWithMaxTalkTime(taskCtx, pl.MaxTalkTime)
+	llm := voicepipelinecore.NewLLMProcessor(taskCtx)
+	tts := voicepipelinecore.NewTTSProcessor(taskCtx, pl.PhoneticDict)
+	playback := voicepipelinecore.NewPlaybackSinkProcessor(taskCtx)
+	sink := voicepipelinecore.NewPipelineSinkProcessor(taskCtx, task.CompleteEnd)
+
+	pipeline := voicepipelinecore.NewPipeline([]voicepipelinecore.Processor{
+		source,
+		audioSource,
+		stt,
+		userIdle,
+		contextAggregator,
+		talkTime,
+		llm,
+		tts,
+		playback,
+		sink,
+	})
+	task.SetPipeline(source, pipeline)
+	return task, nil
 }
 
 // loadSalesPrompt picks the prompt name based on

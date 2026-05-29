@@ -56,7 +56,6 @@ type connectRequest struct {
 	ConversationID string `json:"conversation_id"`
 	BotType        string `json:"bot_type"`
 	RoomURL        string `json:"room_url"`
-	RoomName       string `json:"room_name"`
 	Token          string `json:"token"`
 	BotToken       string `json:"bot_token"`
 }
@@ -79,11 +78,15 @@ func handleConnect(w http.ResponseWriter, r *http.Request) {
 
 	task.Start()
 
+	roomName := ""
+	if task.TaskCtx != nil && task.TaskCtx.Room != nil {
+		roomName = task.TaskCtx.Room.RoomName()
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{
 		"room_url":       req.RoomURL,
 		"token":          req.Token,
-		"room_name":      task.RoomName,
+		"room_name":      roomName,
 		"transport_type": "daily",
 	})
 }
@@ -93,7 +96,6 @@ func readConnectRequest(r *http.Request) connectRequest {
 		ConversationID: strings.TrimSpace(r.URL.Query().Get("conversation_id")),
 		BotType:        strings.TrimSpace(r.URL.Query().Get("bot_type")),
 		RoomURL:        strings.TrimSpace(r.URL.Query().Get("room_url")),
-		RoomName:       strings.TrimSpace(r.URL.Query().Get("room_name")),
 		Token:          strings.TrimSpace(r.URL.Query().Get("token")),
 		BotToken:       strings.TrimSpace(r.URL.Query().Get("bot_token")),
 	}
@@ -108,9 +110,6 @@ func readConnectRequest(r *http.Request) connectRequest {
 			}
 			if body.RoomURL != "" {
 				req.RoomURL = strings.TrimSpace(body.RoomURL)
-			}
-			if body.RoomName != "" {
-				req.RoomName = strings.TrimSpace(body.RoomName)
 			}
 			if body.Token != "" {
 				req.Token = strings.TrimSpace(body.Token)
@@ -127,18 +126,12 @@ func buildConnectTask(ctx context.Context, req connectRequest) (*voicepipelineco
 	if req.RoomURL == "" {
 		return nil, errors.New("room_url is required")
 	}
+	if req.ConversationID == "" {
+		return nil, errors.New("conversation_id is required")
+	}
 	botToken := req.BotToken
 	if botToken == "" {
 		botToken = req.Token
-	}
-	if req.ConversationID == "" {
-		logger := log.New(log.Writer(), "[room] ", log.Flags())
-		return voicepipelinecore.NewTask(context.Background(), voicepipelinecore.TaskOptions{
-			Logger:    logger,
-			RoomURL:   req.RoomURL,
-			RoomToken: botToken,
-			RoomName:  req.RoomName,
-		})
 	}
 	botType := req.BotType
 	if botType == "" {
@@ -148,16 +141,11 @@ func buildConnectTask(ctx context.Context, req connectRequest) (*voicepipelineco
 	if err != nil {
 		return nil, err
 	}
-	opts, err := bot.BuildOptions(ctx, req.ConversationID, dishaDeps)
-	if err != nil {
-		return nil, err
-	}
-	opts.RoomURL = req.RoomURL
-	opts.RoomToken = botToken
-	if req.RoomName != "" {
-		opts.RoomName = req.RoomName
-	}
-	return voicepipelinecore.NewTask(ctx, opts)
+	return disha.NewBotTask(ctx, bot, disha.BotTaskRequest{
+		ConversationID: req.ConversationID,
+		RoomURL:        req.RoomURL,
+		RoomToken:      botToken,
+	}, dishaDeps)
 }
 
 func prepareTask(ctx context.Context, req connectRequest, onCleanup func(*voicepipelinecore.PipelineTask)) (*voicepipelinecore.PipelineTask, error) {
@@ -182,13 +170,13 @@ func prepareTask(ctx context.Context, req connectRequest, onCleanup func(*voicep
 func registerTask(task *voicepipelinecore.PipelineTask) {
 	sessionsMu.Lock()
 	defer sessionsMu.Unlock()
-	sessions[task.RoomName] = task
+	sessions[task.SessionID] = task
 }
 
 func unregisterTask(task *voicepipelinecore.PipelineTask) {
 	sessionsMu.Lock()
 	defer sessionsMu.Unlock()
-	delete(sessions, task.RoomName)
+	delete(sessions, task.SessionID)
 }
 
 func newDishaDeps() disha.Deps {

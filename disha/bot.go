@@ -17,9 +17,20 @@ type Deps struct {
 	GKEPatcher   *GKEPodPatcher
 }
 
+// BotTaskRequest carries everything a bot needs to assemble and join a
+// call: which conversation to load and which Daily room to join.
+type BotTaskRequest struct {
+	ConversationID string
+	RoomURL        string
+	RoomToken      string
+}
+
 type Bot interface {
 	BotType() string
-	BuildOptions(ctx context.Context, conversationID string, deps Deps) (voicepipelinecore.TaskOptions, error)
+	// BuildTask loads the conversation, constructs the frame processors,
+	// assembles the pipeline, and joins the Daily room — returning a task
+	// that is ready to Start.
+	BuildTask(ctx context.Context, req BotTaskRequest, deps Deps) (*voicepipelinecore.PipelineTask, error)
 }
 
 func NewBot(botType string) (Bot, error) {
@@ -31,13 +42,9 @@ func NewBot(botType string) (Bot, error) {
 	}
 }
 
-func NewBotTask(ctx context.Context, bot Bot, conversationID string, deps Deps) (*voicepipelinecore.PipelineTask, error) {
+func NewBotTask(ctx context.Context, bot Bot, req BotTaskRequest, deps Deps) (*voicepipelinecore.PipelineTask, error) {
 	if bot == nil {
 		return nil, fmt.Errorf("disha: bot is required")
 	}
-	opts, err := bot.BuildOptions(ctx, conversationID, deps)
-	if err != nil {
-		return nil, err
-	}
-	return voicepipelinecore.NewTask(ctx, opts)
+	return bot.BuildTask(ctx, req, deps)
 }

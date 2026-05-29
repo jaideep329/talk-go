@@ -197,7 +197,7 @@ func TestNewBotReturnsSalesCallBot(t *testing.T) {
 	}
 }
 
-func TestSalesCallBotBuildOptionsAssemblesDishaCall(t *testing.T) {
+func TestSalesCallBotPlanAssemblesDishaCall(t *testing.T) {
 	redisServer, redisClient := newRedisTestClient(t)
 	apiServer, apiRecorder := newCallAPIServer(t)
 	api := NewAPIClient(apiServer.URL, 10*time.Second, nil)
@@ -215,9 +215,9 @@ func TestSalesCallBotBuildOptionsAssemblesDishaCall(t *testing.T) {
 		Chunks: [][]any{
 			{"chunk-1", "user", "hello", false, nil},
 			{"chunk-2", "assistant", "hi", false, nil},
-			{"debug", "assistant", "debug", true, nil},                                // dropped: is_debug_log
-			{"meta", "assistant", "fn call", false, map[string]any{"x": "y"}},          // dropped: additional_data present
-			{"empty-data", "tool", "tool turn", false, map[string]any{}},              // kept: empty additional_data is falsy, role unrestricted
+			{"debug", "assistant", "debug", true, nil},                        // dropped: is_debug_log
+			{"meta", "assistant", "fn call", false, map[string]any{"x": "y"}}, // dropped: additional_data present
+			{"empty-data", "tool", "tool turn", false, map[string]any{}},      // kept: empty additional_data is falsy, role unrestricted
 		},
 		UserProfile: UserProfileData{
 			UserID:                            userID,
@@ -226,27 +226,28 @@ func TestSalesCallBotBuildOptionsAssemblesDishaCall(t *testing.T) {
 		},
 	})
 
-	opts, err := SalesCallBot{}.BuildOptions(context.Background(), conversationID, testDeps(redisClient, api))
+	pl, err := SalesCallBot{}.plan(context.Background(), conversationID, testDeps(redisClient, api))
 	if err != nil {
-		t.Fatalf("SalesCallBot.BuildOptions: %v", err)
+		t.Fatalf("SalesCallBot.plan: %v", err)
 	}
-	if opts.RoomName != "conv-conv-1" {
-		t.Fatalf("RoomName = %q, want conv-conv-1", opts.RoomName)
+	if pl.Startup.ConversationID != conversationID {
+		t.Fatalf("ConversationID = %q, want %q", pl.Startup.ConversationID, conversationID)
 	}
-	if opts.MaxTalkTime == nil || *opts.MaxTalkTime != 2500*time.Millisecond {
-		t.Fatalf("MaxTalkTime = %v, want 2.5s", opts.MaxTalkTime)
+	if pl.MaxTalkTime != 2500*time.Millisecond {
+		t.Fatalf("MaxTalkTime = %v, want 2.5s", pl.MaxTalkTime)
 	}
-	if len(opts.InitialMessages) != 4 ||
-		opts.InitialMessages[0].Role != "system" ||
-		!containsAll(opts.InitialMessages[0].Content, "TEST_SYSTEM_PROMPT", "patient=Riya, age 32") ||
-		opts.InitialMessages[1] != (voicepipelinecore.Message{Role: "user", Content: "hello"}) ||
-		opts.InitialMessages[2] != (voicepipelinecore.Message{Role: "assistant", Content: "hi"}) ||
-		opts.InitialMessages[3] != (voicepipelinecore.Message{Role: "tool", Content: "tool turn"}) {
-		t.Fatalf("InitialMessages mismatch: %+v", opts.InitialMessages)
+	if len(pl.InitialMessages) != 4 ||
+		pl.InitialMessages[0].Role != "system" ||
+		!containsAll(pl.InitialMessages[0].Content, "TEST_SYSTEM_PROMPT", "patient=Riya, age 32") ||
+		pl.InitialMessages[1] != (voicepipelinecore.Message{Role: "user", Content: "hello"}) ||
+		pl.InitialMessages[2] != (voicepipelinecore.Message{Role: "assistant", Content: "hi"}) ||
+		pl.InitialMessages[3] != (voicepipelinecore.Message{Role: "tool", Content: "tool turn"}) {
+		t.Fatalf("InitialMessages mismatch: %+v", pl.InitialMessages)
 	}
+	events := pl.Callbacks.Events()
 	turnAt := time.Date(2026, 5, 22, 1, 2, 3, 0, time.UTC)
-	opts.CallEvents.OnUserTurnCommitted("new user", turnAt)
-	opts.CallEvents.OnAssistantTurnCommitted("new assistant", turnAt.Add(time.Second), voicepipelinecore.TurnMetrics{
+	events.OnUserTurnCommitted("new user", turnAt)
+	events.OnAssistantTurnCommitted("new assistant", turnAt.Add(time.Second), voicepipelinecore.TurnMetrics{
 		LLMTTFBMs:            11.1,
 		TTSTTFBMs:            22.2,
 		E2ELatencyMs:         33.3,
@@ -280,11 +281,11 @@ func TestSalesCallBotBuildOptionsAssemblesDishaCall(t *testing.T) {
 	}
 
 	eventAt := time.Date(2026, 5, 22, 2, 3, 4, 0, time.UTC)
-	opts.CallEvents.OnBotJoined(eventAt)
-	opts.CallEvents.OnUserJoined(eventAt.Add(time.Second))
-	opts.CallEvents.OnUserFirstSpeech(eventAt.Add(2 * time.Second))
-	opts.CallEvents.OnBotFirstSpeech(eventAt.Add(3 * time.Second))
-	opts.CallEvents.OnCallEnded(voicepipelinecore.EndReasonClientDisconnect, voicepipelinecore.CallStats{
+	events.OnBotJoined(eventAt)
+	events.OnUserJoined(eventAt.Add(time.Second))
+	events.OnUserFirstSpeech(eventAt.Add(2 * time.Second))
+	events.OnBotFirstSpeech(eventAt.Add(3 * time.Second))
+	events.OnCallEnded(voicepipelinecore.EndReasonClientDisconnect, voicepipelinecore.CallStats{
 		TotalUserDurationSec:  12.9,
 		FirstUserAudioFrameAt: eventAt.Add(4 * time.Second),
 		EndedAt:               eventAt.Add(5 * time.Second),
@@ -327,7 +328,7 @@ func assertRequest(t *testing.T, got callAPIRequest, method, path string) {
 	}
 }
 
-func TestSalesCallBotBuildOptionsSeedsHelloWhenNoPriorChunks(t *testing.T) {
+func TestSalesCallBotPlanSeedsHelloWhenNoPriorChunks(t *testing.T) {
 	redisServer, redisClient := newRedisTestClient(t)
 	apiServer, _ := newCallAPIServer(t)
 	conversationID := "fresh"
@@ -344,21 +345,21 @@ func TestSalesCallBotBuildOptionsSeedsHelloWhenNoPriorChunks(t *testing.T) {
 		UserProfile: UserProfileData{UserID: "user-1"},
 	})
 
-	opts, err := SalesCallBot{}.BuildOptions(context.Background(), conversationID, testDeps(redisClient, NewAPIClient(apiServer.URL, 10*time.Second, nil)))
+	pl, err := SalesCallBot{}.plan(context.Background(), conversationID, testDeps(redisClient, NewAPIClient(apiServer.URL, 10*time.Second, nil)))
 	if err != nil {
-		t.Fatalf("SalesCallBot.BuildOptions: %v", err)
+		t.Fatalf("SalesCallBot.plan: %v", err)
 	}
-	if len(opts.InitialMessages) != 2 ||
-		opts.InitialMessages[0].Role != "system" ||
-		opts.InitialMessages[1] != (voicepipelinecore.Message{Role: "user", Content: "hello?"}) {
-		t.Fatalf("InitialMessages = %+v, want system + hello seed", opts.InitialMessages)
+	if len(pl.InitialMessages) != 2 ||
+		pl.InitialMessages[0].Role != "system" ||
+		pl.InitialMessages[1] != (voicepipelinecore.Message{Role: "user", Content: "hello?"}) {
+		t.Fatalf("InitialMessages = %+v, want system + hello seed", pl.InitialMessages)
 	}
-	if opts.MaxTalkTime == nil || *opts.MaxTalkTime != lifetimeTalkTimeSeconds*time.Second {
-		t.Fatalf("MaxTalkTime = %v, want lifetime default", opts.MaxTalkTime)
+	if pl.MaxTalkTime != lifetimeTalkTimeSeconds*time.Second {
+		t.Fatalf("MaxTalkTime = %v, want lifetime default", pl.MaxTalkTime)
 	}
 }
 
-func TestSalesCallBotBuildOptionsPicksCampaignPrompt(t *testing.T) {
+func TestSalesCallBotPlanPicksCampaignPrompt(t *testing.T) {
 	redisServer, redisClient := newRedisTestClient(t)
 	apiServer, _ := newCallAPIServer(t)
 	flag := campaignFlag21For3Days
@@ -371,16 +372,16 @@ func TestSalesCallBotBuildOptionsPicksCampaignPrompt(t *testing.T) {
 		},
 	})
 
-	opts, err := SalesCallBot{}.BuildOptions(context.Background(), "conv-21", testDeps(redisClient, NewAPIClient(apiServer.URL, 10*time.Second, nil)))
+	pl, err := SalesCallBot{}.plan(context.Background(), "conv-21", testDeps(redisClient, NewAPIClient(apiServer.URL, 10*time.Second, nil)))
 	if err != nil {
-		t.Fatalf("BuildOptions: %v", err)
+		t.Fatalf("plan: %v", err)
 	}
-	if opts.InitialMessages[0].Content != "21RS_PROMPT" {
-		t.Fatalf("expected 21RS prompt, got %q", opts.InitialMessages[0].Content)
+	if pl.InitialMessages[0].Content != "21RS_PROMPT" {
+		t.Fatalf("expected 21RS prompt, got %q", pl.InitialMessages[0].Content)
 	}
 }
 
-func TestSalesCallBotBuildOptionsAppendsResumeMessage(t *testing.T) {
+func TestSalesCallBotPlanAppendsResumeMessage(t *testing.T) {
 	redisServer, redisClient := newRedisTestClient(t)
 	apiServer, _ := newCallAPIServer(t)
 	seedDocument(t, redisServer, salesPromptDefault, "production", 1, "SYS")
@@ -403,19 +404,19 @@ func TestSalesCallBotBuildOptionsAppendsResumeMessage(t *testing.T) {
 		UserProfile: UserProfileData{UserID: "user-1"},
 	})
 
-	opts, err := SalesCallBot{}.BuildOptions(context.Background(), "conv-resume", testDeps(redisClient, NewAPIClient(apiServer.URL, 10*time.Second, nil)))
+	pl, err := SalesCallBot{}.plan(context.Background(), "conv-resume", testDeps(redisClient, NewAPIClient(apiServer.URL, 10*time.Second, nil)))
 	if err != nil {
-		t.Fatalf("BuildOptions: %v", err)
+		t.Fatalf("plan: %v", err)
 	}
-	if len(opts.InitialMessages) != 3 {
-		t.Fatalf("InitialMessages = %+v, want 3", opts.InitialMessages)
+	if len(pl.InitialMessages) != 3 {
+		t.Fatalf("InitialMessages = %+v, want 3", pl.InitialMessages)
 	}
-	if opts.InitialMessages[2].Role != "system" || !containsAll(opts.InitialMessages[2].Content, "hanji to aap keh") {
-		t.Fatalf("resume message missing: %+v", opts.InitialMessages[2])
+	if pl.InitialMessages[2].Role != "system" || !containsAll(pl.InitialMessages[2].Content, "hanji to aap keh") {
+		t.Fatalf("resume message missing: %+v", pl.InitialMessages[2])
 	}
 }
 
-func TestSalesCallBotBuildOptionsRejectsUnsupportedBotType(t *testing.T) {
+func TestSalesCallBotPlanRejectsUnsupportedBotType(t *testing.T) {
 	redisServer, redisClient := newRedisTestClient(t)
 	apiServer, _ := newCallAPIServer(t)
 	seedConversationData(t, redisServer, "conv-1", ConversationData{
@@ -427,9 +428,9 @@ func TestSalesCallBotBuildOptionsRejectsUnsupportedBotType(t *testing.T) {
 		UserProfile: UserProfileData{UserID: "user-1"},
 	})
 
-	_, err := SalesCallBot{}.BuildOptions(context.Background(), "conv-1", testDeps(redisClient, NewAPIClient(apiServer.URL, 10*time.Second, nil)))
+	_, err := SalesCallBot{}.plan(context.Background(), "conv-1", testDeps(redisClient, NewAPIClient(apiServer.URL, 10*time.Second, nil)))
 	if err == nil {
-		t.Fatal("SalesCallBot.BuildOptions returned nil error for unsupported bot type")
+		t.Fatal("SalesCallBot.plan returned nil error for unsupported bot type")
 	}
 }
 

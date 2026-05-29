@@ -140,7 +140,7 @@ func runWorkerRoom(req workerRoomRequest) {
 		return
 	}
 	worker.setTask(task)
-	log.Printf("worker task started conversation=%s room=%s\n", req.ConversationID, task.RoomName)
+	log.Printf("worker task started conversation=%s session=%s\n", req.ConversationID, task.SessionID)
 	task.Start()
 }
 

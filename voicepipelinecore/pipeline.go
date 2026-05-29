@@ -14,7 +14,7 @@ import (
 
 // captureGoroutineStacks returns a textual dump of every live
 // goroutine's stack. Used as a last-resort diagnostic when
-// completeEnd's wg.Wait times out — the dump tells us which
+// CompleteEnd's wg.Wait times out — the dump tells us which
 // goroutines (STT reader, TTS reader, playback, etc.) are still
 // blocked and exactly which call they're parked on. The buffer is
 // grown until runtime.Stack stops truncating.
@@ -88,35 +88,19 @@ type TaskContext struct {
 	metrics    *perTurnMetrics
 }
 
-// TaskOptions configures one voice session.
-type TaskOptions struct {
+// TaskConfig carries the shared, non-processor settings needed to stand
+// up a task's infrastructure. Processor-specific configuration (initial
+// messages, talk-time, phonetic dictionary, …) is passed directly to the
+// individual processor constructors by the bot that assembles the
+// pipeline — it does not live here.
+type TaskConfig struct {
 	// Logger is required.
 	Logger *log.Logger
 
-	// RoomURL is the Daily room URL the bot should join. The room is
-	// created by Disha; NewTask only joins it.
-	RoomURL string
-
-	// RoomToken is the Daily meeting token used by the bot.
-	RoomToken string
-
-	// RoomName is the Daily room name used for logging/session lookup. If
-	// empty, it is derived from RoomURL.
-	RoomName string
-
-	// InitialMessages seeds the LLM conversation context. A nil slice
-	// preserves the core demo's default prompt; an explicit empty slice
-	// means the caller is intentionally providing no initial context.
-	InitialMessages []Message
-
-	// MaxTalkTime overrides the talk-time monitor default when non-nil.
-	MaxTalkTime *time.Duration
-
-	// PhoneticDict, when non-empty, is a token → replacement map applied
-	// to every text fragment before it is sent to Cartesia so brand names
-	// and Hindi words are pronounced correctly. The caller supplies only
-	// the dictionary; the filtering logic lives in the core.
-	PhoneticDict map[string]string
+	// SessionID identifies this session in logs and the host's session
+	// registry. Callers map their own identifier (e.g. a conversation ID)
+	// onto it. A random id is generated when empty.
+	SessionID string
 
 	// CallEvents contains one-shot call timeline hooks.
 	CallEvents CallEvents
@@ -134,7 +118,7 @@ type PipelineTask struct {
 	Cancel         context.CancelFunc
 	Source         *PipelineSourceProcessor
 	Pipeline       *Pipeline
-	RoomName       string
+	SessionID      string
 	OnCleanup      func()
 	onCallEnded    func(reason EndReason, stats CallStats)
 	callStats      *callStatsTracker
@@ -146,24 +130,24 @@ type PipelineTask struct {
 	endReason      EndReason
 }
 
-// NewTask builds a PipelineTask but does not start its processors. The
-// Daily room is joined during construction so the caller knows the bot
-// is present before returning connection details to the browser.
-func NewTask(parentCtx context.Context, opts TaskOptions) (*PipelineTask, error) {
-	if opts.Logger == nil {
-		return nil, errors.New("voicepipelinecore: TaskOptions.Logger is required")
+// NewPipelineTask builds a task's shared infrastructure — context,
+// UIEvents, metrics, call-stats, and the TaskContext every processor
+// hangs off — but constructs no processors and joins no room. The bot
+// that owns the pipeline instantiates the processors (passing their
+// own config to their constructors), assembles them with NewPipeline,
+// and attaches the result via SetPipeline.
+func NewPipelineTask(parentCtx context.Context, cfg TaskConfig) (*PipelineTask, error) {
+	if cfg.Logger == nil {
+		return nil, errors.New("voicepipelinecore: TaskConfig.Logger is required")
 	}
 	if parentCtx == nil {
 		parentCtx = context.Background()
 	}
-	roomName := opts.RoomName
-	if roomName == "" {
-		roomName = dailyRoomNameFromURL(opts.RoomURL)
+	sessionID := cfg.SessionID
+	if sessionID == "" {
+		sessionID = fmt.Sprintf("session-%d", rand.IntN(9000000)+1000000)
 	}
-	if roomName == "" {
-		roomName = fmt.Sprintf("room-%d", rand.IntN(9000000)+1000000)
-	}
-	logger := opts.Logger
+	logger := cfg.Logger
 	ctx, cancel := context.WithCancel(parentCtx)
 	uiEvents := NewUIEventSender(logger)
 	callStats := newCallStatsTracker()
@@ -175,9 +159,9 @@ func NewTask(parentCtx context.Context, opts TaskOptions) (*PipelineTask, error)
 	// hold a pointer to it.
 	task := &PipelineTask{
 		Cancel:      cancel,
-		RoomName:    roomName,
-		OnCleanup:   opts.OnCleanup,
-		onCallEnded: opts.CallEvents.OnCallEnded,
+		SessionID:   sessionID,
+		OnCleanup:   cfg.OnCleanup,
+		onCallEnded: cfg.CallEvents.OnCallEnded,
 		callStats:   callStats,
 	}
 
@@ -221,56 +205,30 @@ func NewTask(parentCtx context.Context, opts TaskOptions) (*PipelineTask, error)
 		callStats: callStats,
 		metrics:   turnMetrics,
 	}
-	taskCtx.callEvents = newCallEventDispatcher(logger, opts.CallEvents)
+	taskCtx.callEvents = newCallEventDispatcher(logger, cfg.CallEvents)
 	task.TaskCtx = taskCtx
 
-	pipelineSource := NewPipelineSourceProcessor(taskCtx)
-	audioSource := NewAudioSourceProcessor(taskCtx)
-	room, err := JoinDailyRoom(opts.RoomURL, opts.RoomToken, taskCtx, audioSource)
-	if err != nil {
-		if taskCtx.callEvents != nil {
-			taskCtx.callEvents.stopAndDrain()
-		}
-		cancel()
-		return nil, err
-	}
-	taskCtx.Room = room
-	// Hand the room to the UI sender so it can publish app messages.
-	// Any events emitted before this point (none today, but
-	// defensive) silently no-op.
-	uiEvents.SetRoom(taskCtx.Room)
-	task.Source = pipelineSource
-
-	sttProcessor := NewSTTProcessor(taskCtx)
-	userIdle := NewUserIdleProcessor(taskCtx)
-	var contextAggregator *ContextAggregator
-	if opts.InitialMessages != nil {
-		contextAggregator = NewContextAggregator(taskCtx, opts.InitialMessages)
-	} else {
-		contextAggregator = NewContextAggregator(taskCtx)
-	}
-	talkTimeMonitor := NewTalkTimeMonitoringProcessor(taskCtx)
-	if opts.MaxTalkTime != nil {
-		talkTimeMonitor = NewTalkTimeMonitoringProcessorWithMaxTalkTime(taskCtx, *opts.MaxTalkTime)
-	}
-	llmProcessor := NewLLMProcessor(taskCtx)
-	ttsProcessor := NewTTSProcessor(taskCtx, opts.PhoneticDict)
-	playbackSink := NewPlaybackSinkProcessor(taskCtx)
-	pipelineSink := NewPipelineSinkProcessor(taskCtx, task.completeEnd)
-
-	task.Pipeline = NewPipeline([]Processor{
-		pipelineSource,
-		audioSource,
-		sttProcessor,
-		userIdle,
-		contextAggregator,
-		talkTimeMonitor,
-		llmProcessor,
-		ttsProcessor,
-		playbackSink,
-		pipelineSink,
-	})
 	return task, nil
+}
+
+// SetPipeline attaches the assembled pipeline and its source to the
+// task. The bot calls this after building all processors and wiring
+// them with NewPipeline.
+func (t *PipelineTask) SetPipeline(source *PipelineSourceProcessor, p *Pipeline) {
+	t.Source = source
+	t.Pipeline = p
+}
+
+// Abort tears down a task that failed during assembly (e.g. the Daily
+// room join failed) before any processors were started. It drains the
+// call-event dispatcher and cancels the task context.
+func (t *PipelineTask) Abort() {
+	if t.TaskCtx != nil && t.TaskCtx.callEvents != nil {
+		t.TaskCtx.callEvents.stopAndDrain()
+	}
+	if t.Cancel != nil {
+		t.Cancel()
+	}
 }
 
 // Start links and starts every processor in the task pipeline.
@@ -312,7 +270,7 @@ func (t *PipelineTask) currentEndReason() EndReason {
 	return normalizeEndReason(t.endReason)
 }
 
-// completeEnd is the EndFrame-driven cleanup. It is called from inside
+// CompleteEnd is the EndFrame-driven cleanup. It is called from inside
 // PipelineSinkProcessor.ProcessFrame, which runs on the sink's
 // processLoop goroutine — a goroutine tracked by t.wg. If we ran the
 // cleanup synchronously, t.wg.Wait() below would deadlock waiting for
@@ -324,9 +282,9 @@ func (t *PipelineTask) currentEndReason() EndReason {
 // auto-cancels b.ctx (per its EndFrame handler), and its deferred
 // Done() fires — allowing the wg drain to make progress.
 //
-// cleanupOnce still gates re-entry, so even if completeEnd is invoked
+// cleanupOnce still gates re-entry, so even if CompleteEnd is invoked
 // multiple times, runCleanup runs exactly once.
-func (t *PipelineTask) completeEnd(frame EndFrame) {
+func (t *PipelineTask) CompleteEnd(frame EndFrame) {
 	t.cleanupOnce.Do(func() {
 		go t.runCleanup(frame)
 	})

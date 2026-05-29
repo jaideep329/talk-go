@@ -12,8 +12,6 @@ import (
 )
 
 const (
-	roomNameConversationPref = "conv"
-
 	// Resume-message branches from
 	// bots/followup_call/fetch_conversation.py. These are shared by any
 	// call flow that can resume a prior conversation, not just sales.
@@ -30,7 +28,6 @@ type CallStartup struct {
 	ConversationID string
 	UserID         string
 	BotType        string
-	RoomName       string
 	Logger         *log.Logger
 	Data           *ConversationData
 }
@@ -72,7 +69,6 @@ func collectCallStartup(ctx context.Context, conversationID, expectedBotType str
 		ConversationID: conversationID,
 		UserID:         userID,
 		BotType:        data.Conversation.BotType,
-		RoomName:       fmt.Sprintf("%s-%s", roomNameConversationPref, conversationID),
 		Logger:         callLogger,
 		Data:           data,
 	}, nil

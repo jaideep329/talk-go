@@ -73,6 +73,36 @@ func TestContextAggregator_InitialMessagesSeedLLMContext(t *testing.T) {
 	}
 }
 
+func TestContextAggregator_KickoffEmitsFirstTurnFromInitialContext(t *testing.T) {
+	fix := newTestFixture(t)
+	a := NewContextAggregator(fix.TaskCtx, []Message{
+		{Role: "system", Content: "sales prompt"},
+		{Role: "user", Content: "hello?"},
+	})
+
+	down, _ := runProcessorTest(t, fix, runConfig{
+		processor:    a,
+		framesToSend: []Frame{KickoffFrame{}},
+		settleDelay:  100 * time.Millisecond,
+		sendEndFrame: true,
+	})
+
+	llmMsg, ok := findFrame[LLMMessagesFrame](down)
+	if !ok {
+		t.Fatalf("expected LLMMessagesFrame from kickoff, got %s", describeFrameTypes(down))
+	}
+	if len(llmMsg.Messages) != 2 {
+		t.Fatalf("message count = %d, want 2 (the initial context)", len(llmMsg.Messages))
+	}
+	if llmMsg.Messages[0]["content"] != "sales prompt" {
+		t.Fatalf("first message = %q, want sales prompt", llmMsg.Messages[0]["content"])
+	}
+	// The kickoff frame itself must be consumed, not forwarded.
+	if _, forwarded := findFrame[KickoffFrame](down); forwarded {
+		t.Fatal("KickoffFrame should be consumed by ContextAggregator, not forwarded")
+	}
+}
+
 func TestContextAggregator_ExplicitEmptyInitialMessagesSkipsDefaultPrompt(t *testing.T) {
 	fix := newTestFixture(t)
 	a := NewContextAggregator(fix.TaskCtx, []Message{})

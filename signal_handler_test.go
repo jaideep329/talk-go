@@ -58,6 +58,8 @@ func (r *signalAPIRecorder) snapshot() []map[string]any {
 
 func TestHandleShutdownSignalEnqueuesGracefulShutdownOnce(t *testing.T) {
 	shutdownInitiated.Store(false)
+	gracefulShutdownCompleted.Store(false)
+	abruptShutdownReported.Store(false)
 	exitCodes := []int{}
 	previousExitProcess := exitProcess
 	exitProcess = func(code int) {
@@ -65,6 +67,8 @@ func TestHandleShutdownSignalEnqueuesGracefulShutdownOnce(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		shutdownInitiated.Store(false)
+		gracefulShutdownCompleted.Store(false)
+		abruptShutdownReported.Store(false)
 		exitProcess = previousExitProcess
 		worker.finish()
 	})
@@ -121,6 +125,8 @@ func TestHandleShutdownSignalEnqueuesGracefulShutdownOnce(t *testing.T) {
 
 func TestHandleShutdownSignalKeepsActiveWorkerAlive(t *testing.T) {
 	shutdownInitiated.Store(false)
+	gracefulShutdownCompleted.Store(false)
+	abruptShutdownReported.Store(false)
 	if !worker.tryStart() {
 		t.Fatal("worker should start from idle state")
 	}
@@ -131,6 +137,8 @@ func TestHandleShutdownSignalKeepsActiveWorkerAlive(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		shutdownInitiated.Store(false)
+		gracefulShutdownCompleted.Store(false)
+		abruptShutdownReported.Store(false)
 		exitProcess = previousExitProcess
 		worker.finish()
 	})

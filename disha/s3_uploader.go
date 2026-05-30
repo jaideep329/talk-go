@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jaideep329/talk-go/internal/sentryutil"
 	"github.com/jaideep329/talk-go/voicepipelinecore"
 )
 
@@ -132,6 +133,13 @@ func uploadDebugLogs(logger interface{ Println(v ...any) }, uploader DebugLogUpl
 	defer cancel()
 	key, err := uploader(ctx, logs)
 	if err != nil {
+		sentryutil.Capture(sentryutil.Event{
+			Err: err,
+			Tags: map[string]string{
+				"component": "disha_s3",
+				"operation": "debug_log_upload",
+			},
+		})
 		if logger != nil {
 			logger.Println("disha: debug log upload failed:", err)
 		}
@@ -211,7 +219,16 @@ func (u *S3Uploader) GetObject(ctx context.Context, bucket, objectKey string) ([
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		return nil, fmt.Errorf("disha: build S3 GET: %w", err)
+		wrapped := fmt.Errorf("disha: build S3 GET: %w", err)
+		sentryutil.Capture(sentryutil.Event{
+			Err:  wrapped,
+			Tags: map[string]string{"component": "disha_s3", "operation": "GET"},
+			Details: map[string]any{
+				"bucket":     bucket,
+				"object_key": objectKey,
+			},
+		})
+		return nil, wrapped
 	}
 	req.Header.Set("Authorization", authorization)
 	for name, value := range headers {
@@ -220,12 +237,31 @@ func (u *S3Uploader) GetObject(ctx context.Context, bucket, objectKey string) ([
 
 	resp, err := u.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("disha: S3 GET failed: %w", err)
+		wrapped := fmt.Errorf("disha: S3 GET failed: %w", err)
+		sentryutil.Capture(sentryutil.Event{
+			Err:  wrapped,
+			Tags: map[string]string{"component": "disha_s3", "operation": "GET"},
+			Details: map[string]any{
+				"bucket":     bucket,
+				"object_key": objectKey,
+			},
+		})
+		return nil, wrapped
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("disha: S3 GET returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		wrapped := fmt.Errorf("disha: S3 GET returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		sentryutil.Capture(sentryutil.Event{
+			Err:  wrapped,
+			Tags: map[string]string{"component": "disha_s3", "operation": "GET"},
+			Details: map[string]any{
+				"bucket":     bucket,
+				"object_key": objectKey,
+				"status":     resp.StatusCode,
+			},
+		})
+		return nil, wrapped
 	}
 	return body, nil
 }
@@ -275,7 +311,16 @@ func (u *S3Uploader) putObject(ctx context.Context, objectKey string, payload []
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, endpoint, bytes.NewReader(payload))
 	if err != nil {
-		return fmt.Errorf("disha: build S3 PUT: %w", err)
+		wrapped := fmt.Errorf("disha: build S3 PUT: %w", err)
+		sentryutil.Capture(sentryutil.Event{
+			Err:  wrapped,
+			Tags: map[string]string{"component": "disha_s3", "operation": "PUT"},
+			Details: map[string]any{
+				"bucket":     u.bucket,
+				"object_key": objectKey,
+			},
+		})
+		return wrapped
 	}
 	req.Header.Set("Authorization", authorization)
 	for name, value := range headers {
@@ -285,12 +330,31 @@ func (u *S3Uploader) putObject(ctx context.Context, objectKey string, payload []
 
 	resp, err := u.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("disha: S3 PUT failed: %w", err)
+		wrapped := fmt.Errorf("disha: S3 PUT failed: %w", err)
+		sentryutil.Capture(sentryutil.Event{
+			Err:  wrapped,
+			Tags: map[string]string{"component": "disha_s3", "operation": "PUT"},
+			Details: map[string]any{
+				"bucket":     u.bucket,
+				"object_key": objectKey,
+			},
+		})
+		return wrapped
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("disha: S3 PUT returned %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
+		wrapped := fmt.Errorf("disha: S3 PUT returned %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
+		sentryutil.Capture(sentryutil.Event{
+			Err:  wrapped,
+			Tags: map[string]string{"component": "disha_s3", "operation": "PUT"},
+			Details: map[string]any{
+				"bucket":     u.bucket,
+				"object_key": objectKey,
+				"status":     resp.StatusCode,
+			},
+		})
+		return wrapped
 	}
 	return nil
 }

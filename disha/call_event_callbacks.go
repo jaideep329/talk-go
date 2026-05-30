@@ -72,12 +72,12 @@ func (c *CallEventCallbacks) OnBotFirstSpeech(at time.Time) {
 
 func (c *CallEventCallbacks) OnFirstUserAudio(time.Time) {}
 
-func (c *CallEventCallbacks) OnUserTurnCommitted(text string, at time.Time) {
-	c.appendConversationChunk(text, "user", at, voicepipelinecore.TurnMetrics{})
+func (c *CallEventCallbacks) OnUserTurnCommitted(text string, at time.Time, promptKey string) {
+	c.appendConversationChunk(text, "user", at, voicepipelinecore.TurnMetrics{}, promptKey)
 }
 
-func (c *CallEventCallbacks) OnAssistantTurnCommitted(text string, at time.Time, metrics voicepipelinecore.TurnMetrics) {
-	c.appendConversationChunk(text, "assistant", at, metrics)
+func (c *CallEventCallbacks) OnAssistantTurnCommitted(text string, at time.Time, metrics voicepipelinecore.TurnMetrics, promptKey string) {
+	c.appendConversationChunk(text, "assistant", at, metrics, promptKey)
 }
 
 func (c *CallEventCallbacks) OnCallEnded(reason voicepipelinecore.EndReason, stats voicepipelinecore.CallStats) {
@@ -93,28 +93,33 @@ func (c *CallEventCallbacks) updateConversation(req UpdateConversationRequest) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), callEventRequestTimeout)
 	defer cancel()
-	if err := c.api.UpdateConversation(ctx, req); err != nil && c.logger != nil {
+	if err := c.api.UpdateConversationWithFallback(ctx, req); err != nil && c.logger != nil {
 		c.logger.Printf("disha: update_conversation failed: %v\n", err)
 	}
 }
 
-func (c *CallEventCallbacks) appendConversationChunk(text, role string, at time.Time, metrics voicepipelinecore.TurnMetrics) {
+func (c *CallEventCallbacks) appendConversationChunk(text, role string, at time.Time, metrics voicepipelinecore.TurnMetrics, promptKey string) {
 	if c == nil || c.redis == nil {
 		return
 	}
+	var promptKeyPtr *string
+	if promptKey != "" {
+		promptKeyPtr = &promptKey
+	}
 	chunk := ConversationChunk{
-		ID:                uuid.NewString(),
-		Text:              text,
-		Role:              role,
-		BotType:           c.botType,
-		ConversationID:    c.conversationID,
-		UserID:            c.userID,
-		LLMTTFBMs:         assistantMetric(role, metrics.LLMTTFBMs),
-		TTSTTFBMs:         assistantMetric(role, metrics.TTSTTFBMs),
-		V2VLatencyMs:      assistantMetric(role, metrics.E2ELatencyMs),
-		TextAggregationMs: assistantMetric(role, metrics.TTSTextAggregationMs),
-		Created:           at.Format(time.RFC3339Nano),
-		IsDebugLog:        false,
+		ID:                               uuid.NewString(),
+		Text:                             text,
+		Role:                             role,
+		BotType:                          c.botType,
+		ConversationID:                   c.conversationID,
+		UserID:                           c.userID,
+		LLMTTFBMs:                        assistantMetric(role, metrics.LLMTTFBMs),
+		TTSTTFBMs:                        assistantMetric(role, metrics.TTSTTFBMs),
+		V2VLatencyMs:                     assistantMetric(role, metrics.E2ELatencyMs),
+		TextAggregationMs:                assistantMetric(role, metrics.TTSTextAggregationMs),
+		Created:                          at.Format(time.RFC3339Nano),
+		IsDebugLog:                       false,
+		MainAgentSystemPromptLangfuseKey: promptKeyPtr,
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), chunkWriteTimeout)
 	defer cancel()
@@ -141,7 +146,7 @@ func (c *CallEventCallbacks) runPostCallOperations(reason voicepipelinecore.EndR
 	if req.EndedAt.IsZero() {
 		req.EndedAt = time.Now()
 	}
-	if err := c.api.RunPostCallOperations(ctx, req); err != nil && c.logger != nil {
+	if err := c.api.RunPostCallOperationsWithFallback(ctx, req); err != nil && c.logger != nil {
 		c.logger.Printf("disha: run_post_call_operations failed conversation=%s user=%s: %v\n", c.conversationID, c.userID, err)
 	}
 }

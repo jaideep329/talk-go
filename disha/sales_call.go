@@ -48,6 +48,7 @@ type salesCallPlan struct {
 	MaxTalkTime     time.Duration
 	PhoneticDict    map[string]string
 	Callbacks       *CallEventCallbacks
+	PromptKey       string
 }
 
 // plan resolves everything that depends only on the conversation data:
@@ -65,6 +66,7 @@ func (b SalesCallBot) plan(ctx context.Context, conversationID string, deps Deps
 		return nil, err
 	}
 	startup.Logger.Printf("disha: sales prompt selected name=%s version=%d\n", promptName, promptVersion)
+	promptKey := PromptKey(promptName, promptVersion)
 
 	resumeMsg := buildResumeSystemMessage(startup.Data, time.Now())
 	if resumeMsg != "" {
@@ -75,6 +77,7 @@ func (b SalesCallBot) plan(ctx context.Context, conversationID string, deps Deps
 		Startup:         startup,
 		InitialMessages: buildInitialMessages(prompt, startup.Data.Chunks, resumeMsg),
 		MaxTalkTime:     salesTalkTimeLimit(startup.Data.UserProfile.RemainingSalesCallTalktimeSeconds),
+		PromptKey:       promptKey,
 		Callbacks: NewCallEventCallbacks(
 			startup,
 			deps.Redis,
@@ -123,7 +126,10 @@ func (b SalesCallBot) BuildTask(ctx context.Context, req BotTaskRequest, deps De
 
 	stt := voicepipelinecore.NewSTTProcessor(taskCtx)
 	userIdle := voicepipelinecore.NewUserIdleProcessor(taskCtx)
-	contextAggregator := voicepipelinecore.NewContextAggregator(taskCtx, pl.InitialMessages)
+	contextAggregator := voicepipelinecore.NewContextAggregatorWithConfig(taskCtx, voicepipelinecore.ContextAggregatorConfig{
+		InitialMessages:                  pl.InitialMessages,
+		MainAgentSystemPromptLangfuseKey: pl.PromptKey,
+	})
 	talkTime := voicepipelinecore.NewTalkTimeMonitoringProcessorWithMaxTalkTime(taskCtx, pl.MaxTalkTime)
 	llm := voicepipelinecore.NewLLMProcessor(taskCtx)
 	tts := voicepipelinecore.NewTTSProcessor(taskCtx, pl.PhoneticDict)

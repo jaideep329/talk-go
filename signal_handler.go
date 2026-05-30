@@ -10,7 +10,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/getsentry/sentry-go"
 	"github.com/jaideep329/talk-go/disha"
+	"github.com/jaideep329/talk-go/internal/sentryutil"
 )
 
 var shutdownInitiated atomic.Bool
@@ -33,6 +35,7 @@ func handleShutdownSignal(sig os.Signal) {
 		return
 	}
 
+	markGracefulShutdownCompleted()
 	log.Printf("Received %s, checking worker status...\n", sig)
 	log.Println("Allowing graceful shutdown to proceed...")
 
@@ -46,6 +49,14 @@ func handleShutdownSignal(sig os.Signal) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := disha.EnqueueWorkerGracefulShutdown(ctx, dishaDeps, podName); err != nil {
+		sentryutil.Capture(sentryutil.Event{
+			Err:  err,
+			Tags: map[string]string{"component": "signal_handler"},
+			Details: map[string]any{
+				"pod_name": podName,
+				"signal":   sig.String(),
+			},
+		})
 		log.Printf("failed to enqueue graceful shutdown for pod=%s: %v\n", podName, err)
 	}
 	exitForSignal(sig)
@@ -53,6 +64,7 @@ func handleShutdownSignal(sig os.Signal) {
 
 func exitForSignal(sig os.Signal) {
 	if sig == syscall.SIGINT || sig == os.Interrupt {
+		sentry.Flush(2 * time.Second)
 		exitProcess(0)
 		return
 	}
@@ -62,6 +74,7 @@ func exitForSignal(sig os.Signal) {
 			log.Println("worker is active or reserved; keeping process alive for graceful shutdown")
 			return
 		}
+		sentry.Flush(2 * time.Second)
 		exitProcess(0)
 	}
 }

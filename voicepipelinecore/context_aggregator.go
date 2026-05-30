@@ -10,28 +10,47 @@ const minBargeInWords = 3
 
 type ContextAggregator struct {
 	*BaseProcessor
-	taskCtx           *TaskContext
-	messages          []map[string]string
-	currentTranscript string
-	spokenWords       []string
-	interimTranscript string
-	interimResponseID int
-	interruptSent     bool
-	botSpeaking       bool
-	useDefaultPrompt  bool
+	taskCtx                          *TaskContext
+	messages                         []map[string]string
+	currentTranscript                string
+	spokenWords                      []string
+	interimTranscript                string
+	interimResponseID                int
+	interruptSent                    bool
+	botSpeaking                      bool
+	useDefaultPrompt                 bool
+	mainAgentSystemPromptLangfuseKey string
+}
+
+type ContextAggregatorConfig struct {
+	InitialMessages                  []Message
+	MainAgentSystemPromptLangfuseKey string
 }
 
 func NewContextAggregator(taskCtx *TaskContext, initialMessages ...[]Message) *ContextAggregator {
+	cfg := ContextAggregatorConfig{}
+	if len(initialMessages) > 0 {
+		cfg.InitialMessages = initialMessages[0]
+	}
+	return newContextAggregator(taskCtx, cfg, len(initialMessages) > 0)
+}
+
+func NewContextAggregatorWithConfig(taskCtx *TaskContext, cfg ContextAggregatorConfig) *ContextAggregator {
+	return newContextAggregator(taskCtx, cfg, cfg.InitialMessages != nil)
+}
+
+func newContextAggregator(taskCtx *TaskContext, cfg ContextAggregatorConfig, hasInitialMessages bool) *ContextAggregator {
 	useDefaultPrompt := true
 	messages := []map[string]string{}
-	if len(initialMessages) > 0 {
+	if hasInitialMessages {
 		useDefaultPrompt = false
-		messages = messagesFromInitial(initialMessages[0])
+		messages = messagesFromInitial(cfg.InitialMessages)
 	}
 	a := &ContextAggregator{
-		taskCtx:          taskCtx,
-		messages:         messages,
-		useDefaultPrompt: useDefaultPrompt,
+		taskCtx:                          taskCtx,
+		messages:                         messages,
+		useDefaultPrompt:                 useDefaultPrompt,
+		mainAgentSystemPromptLangfuseKey: cfg.MainAgentSystemPromptLangfuseKey,
 	}
 	a.BaseProcessor = NewBaseProcessor("ContextAggregator", a, taskCtx)
 	return a
@@ -129,7 +148,7 @@ func (a *ContextAggregator) commitSpokenText(interrupted bool) {
 			metrics = a.taskCtx.metrics.snapshotAndReset()
 		}
 		if a.taskCtx.callEvents != nil {
-			a.taskCtx.callEvents.fireAssistantTurnCommitted(spoken, time.Now(), metrics)
+			a.taskCtx.callEvents.fireAssistantTurnCommitted(spoken, time.Now(), metrics, a.mainAgentSystemPromptLangfuseKey)
 		}
 		if interrupted {
 			a.taskCtx.UIEvents.BotStoppedSpeaking(time.Now())
@@ -158,7 +177,7 @@ func (a *ContextAggregator) addUserMessage(text string) {
 	}
 	a.taskCtx.UIEvents.UserTranscription(text, true, at)
 	if a.taskCtx.callEvents != nil {
-		a.taskCtx.callEvents.fireUserTurnCommitted(text, at)
+		a.taskCtx.callEvents.fireUserTurnCommitted(text, at, a.mainAgentSystemPromptLangfuseKey)
 	}
 }
 

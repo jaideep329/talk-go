@@ -14,7 +14,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/getsentry/sentry-go"
 	"github.com/jaideep329/talk-go/disha"
+	"github.com/jaideep329/talk-go/internal/sentryutil"
 	"github.com/jaideep329/talk-go/voicepipelinecore"
 )
 
@@ -26,10 +28,32 @@ var (
 )
 
 func main() {
+	exitCode := 0
+	defer func() {
+		if exitCode != 0 {
+			os.Exit(exitCode)
+		}
+	}()
 	loadEnv(".env")
 	appLog, _ := os.Create("app.log")
 	log.SetOutput(io.MultiWriter(os.Stderr, appLog))
 	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
+	if dsn := strings.TrimSpace(os.Getenv("SENTRY_DSN")); dsn != "" {
+		if err := sentry.Init(sentry.ClientOptions{
+			Dsn:              dsn,
+			Environment:      firstNonEmpty(os.Getenv("SENTRY_ENVIRONMENT"), os.Getenv("ENVIRONMENT")),
+			Release:          strings.TrimSpace(os.Getenv("SENTRY_RELEASE")),
+			AttachStacktrace: true,
+		}); err != nil {
+			log.Printf("sentry init failed: %v\n", err)
+		} else {
+			log.Println("sentry enabled")
+		}
+	} else {
+		log.Println("sentry disabled: SENTRY_DSN is empty")
+	}
+	defer reportAbruptShutdownOnExit()
+	defer sentry.Flush(2 * time.Second)
 	dishaDeps = newDishaDeps()
 	defer closeDishaDeps(dishaDeps)
 	registerCleanupHandlers()
@@ -48,8 +72,18 @@ func main() {
 	addr := serverAddr()
 	log.Println("HTTP server listening on", addr)
 	if err := http.ListenAndServe(addr, nil); err != nil {
-		log.Fatal("HTTP server error:", err)
+		sentryutil.Capture(sentryutil.Event{
+			Err:  err,
+			Tags: map[string]string{"component": "http_server"},
+			Details: map[string]any{
+				"addr": addr,
+			},
+		})
+		log.Println("HTTP server error:", err)
+		exitCode = 1
+		return
 	}
+	markGracefulShutdownCompleted()
 }
 
 type connectRequest struct {
@@ -268,6 +302,10 @@ func loadEnv(path string) {
 func registerWorkerPodIfConfigured() {
 	reg, ok, err := workerPodRegistrationFromEnv()
 	if err != nil {
+		sentryutil.Capture(sentryutil.Event{
+			Err:  err,
+			Tags: map[string]string{"component": "worker_registration"},
+		})
 		log.Fatal("worker registration config error:", err)
 	}
 	if !ok {
@@ -276,6 +314,14 @@ func registerWorkerPodIfConfigured() {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	if err := disha.RegisterWorkerPod(ctx, dishaDeps, reg); err != nil {
+		sentryutil.Capture(sentryutil.Event{
+			Err:  err,
+			Tags: map[string]string{"component": "worker_registration"},
+			Details: map[string]any{
+				"pod_name": reg.PodName,
+				"pod_uid":  reg.PodUID,
+			},
+		})
 		log.Fatal("worker pod registration failed:", err)
 	}
 	log.Printf("registered worker pod: pod_name=%s app_name=%s\n", reg.PodName, reg.AppName)

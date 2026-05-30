@@ -341,16 +341,22 @@ func TestContextAggregator_EmitsCommittedTurnCallEventsWithMetrics(t *testing.T)
 	var users []string
 	var assistants []string
 	var metrics []TurnMetrics
+	var userPromptKeys []string
+	var assistantPromptKeys []string
 	fix.TaskCtx.callEvents = newCallEventDispatcher(fix.Logger, CallEvents{
-		OnUserTurnCommitted: func(text string, at time.Time) {
+		OnUserTurnCommitted: func(text string, at time.Time, promptKey string) {
 			users = append(users, text)
+			userPromptKeys = append(userPromptKeys, promptKey)
 		},
-		OnAssistantTurnCommitted: func(text string, at time.Time, m TurnMetrics) {
+		OnAssistantTurnCommitted: func(text string, at time.Time, m TurnMetrics, promptKey string) {
 			assistants = append(assistants, text)
 			metrics = append(metrics, m)
+			assistantPromptKeys = append(assistantPromptKeys, promptKey)
 		},
 	})
-	a := NewContextAggregator(fix.TaskCtx)
+	a := NewContextAggregatorWithConfig(fix.TaskCtx, ContextAggregatorConfig{
+		MainAgentSystemPromptLangfuseKey: "sales_call/main_sys-3day_v2_v17",
+	})
 
 	fix.TaskCtx.metrics.absorb(NewMetricsFrame([]MetricsData{
 		{Processor: "llm", Label: MetricTTFB, ValueMs: 12},
@@ -369,6 +375,12 @@ func TestContextAggregator_EmitsCommittedTurnCallEventsWithMetrics(t *testing.T)
 	}
 	if len(metrics) != 1 || metrics[0].LLMTTFBMs != 12 || metrics[0].TTSTTFBMs != 34 {
 		t.Fatalf("assistant metrics = %+v, want llm=12 tts=34", metrics)
+	}
+	if len(userPromptKeys) != 1 || userPromptKeys[0] != "sales_call/main_sys-3day_v2_v17" {
+		t.Fatalf("user prompt keys = %v, want sales prompt key", userPromptKeys)
+	}
+	if len(assistantPromptKeys) != 1 || assistantPromptKeys[0] != "sales_call/main_sys-3day_v2_v17" {
+		t.Fatalf("assistant prompt keys = %v, want sales prompt key", assistantPromptKeys)
 	}
 }
 

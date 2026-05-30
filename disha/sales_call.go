@@ -102,11 +102,11 @@ func (b SalesCallBot) BuildTask(ctx context.Context, req BotTaskRequest, deps De
 		return nil, err
 	}
 
-	initialContext := &salesInitialContextStarter{}
+	startupContext := &salesStartupContextStarter{}
 	callEvents := pl.Callbacks.Events()
 	onUserJoined := callEvents.OnUserJoined
 	callEvents.OnUserJoined = func(at time.Time) {
-		initialContext.UserJoined()
+		startupContext.UserJoined()
 		if onUserJoined != nil {
 			onUserJoined(at)
 		}
@@ -160,37 +160,45 @@ func (b SalesCallBot) BuildTask(ctx context.Context, req BotTaskRequest, deps De
 		sink,
 	})
 	task.SetPipeline(source, pipeline)
-	initialContext.Attach(source)
+	startupContext.Attach(llm, contextAggregator.ContextFrame)
 	return task, nil
 }
 
-type salesInitialContextStarter struct {
-	mu      sync.Mutex
-	source  *voicepipelinecore.PipelineSourceProcessor
-	pending bool
-	queued  bool
+type salesContextFrameProvider func() (voicepipelinecore.LLMMessagesFrame, bool)
+
+type salesStartupContextStarter struct {
+	mu           sync.Mutex
+	target       voicepipelinecore.Processor
+	contextFrame salesContextFrameProvider
+	pending      bool
+	queued       bool
 }
 
-func (s *salesInitialContextStarter) UserJoined() {
+func (s *salesStartupContextStarter) UserJoined() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.pending = true
 	s.queueLocked()
 }
 
-func (s *salesInitialContextStarter) Attach(source *voicepipelinecore.PipelineSourceProcessor) {
+func (s *salesStartupContextStarter) Attach(target voicepipelinecore.Processor, contextFrame salesContextFrameProvider) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.source = source
+	s.target = target
+	s.contextFrame = contextFrame
 	s.queueLocked()
 }
 
-func (s *salesInitialContextStarter) queueLocked() {
-	if !s.pending || s.queued || s.source == nil {
+func (s *salesStartupContextStarter) queueLocked() {
+	if !s.pending || s.queued || s.target == nil || s.contextFrame == nil {
+		return
+	}
+	frame, ok := s.contextFrame()
+	if !ok {
 		return
 	}
 	s.queued = true
-	s.source.Queue(voicepipelinecore.NewInitialLLMContextFrame())
+	s.target.QueueFrame(frame, voicepipelinecore.Downstream)
 }
 
 // loadSalesPrompt picks the prompt name based on

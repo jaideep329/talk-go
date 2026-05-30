@@ -79,6 +79,13 @@ func cloneMessages(messages []map[string]string) []map[string]string {
 	return out
 }
 
+func (a *ContextAggregator) ContextFrame() (LLMMessagesFrame, bool) {
+	if len(a.messages) == 0 {
+		return LLMMessagesFrame{}, false
+	}
+	return NewLLMMessagesFrame(cloneMessages(a.messages)), true
+}
+
 func (a *ContextAggregator) appendWords(words []string) {
 	for _, w := range words {
 		if len(a.spokenWords) > 0 && len(w) > 0 && w[0] != '.' && w[0] != ',' && w[0] != '!' && w[0] != '?' && w[0] != ';' && w[0] != ':' {
@@ -217,13 +224,6 @@ func (a *ContextAggregator) ProcessFrame(ctx context.Context, frame Frame, dir D
 	case EndFrame:
 		a.taskCtx.Logger.Printf("EndFrame at ContextAggregator: reason=%q\n", f.Reason)
 		a.PushFrame(f, dir)
-	case InitialLLMContextFrame:
-		if len(a.messages) == 0 {
-			a.taskCtx.Logger.Println("Initial LLM context requested with no seeded messages; ignoring")
-			return
-		}
-		a.taskCtx.Logger.Println("Initial LLM context requested; pushing seeded messages")
-		a.PushFrame(NewInitialLLMMessagesFrame(cloneMessages(a.messages)), Downstream)
 	case TranscriptFrame:
 		interimTranscript := a.updateInterimTranscript(f)
 

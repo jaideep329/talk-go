@@ -193,7 +193,7 @@
           <tr><td>M7</td><td>GKE <code>safe-to-evict=false</code> on reserve + call start, restored on cleanup</td><td><span class="pill ok">Done</span></td><td><code>disha/gke_pod.go</code>, <code>worker_api.go</code></td></tr>
           <tr><td>M8</td><td>Sentry coverage</td><td><span class="pill ok">Done</span></td><td><code>internal/sentryutil.Capture</code> wraps <code>sentry-go</code> across API/Redis/S3/Daily/STT/signal surfaces</td></tr>
           <tr><td>M9</td><td>Per-conversation Cartesia API key</td><td><span class="pill todo">Open</span></td><td>still single <code>CARTESIA_API_KEY</code> env</td></tr>
-          <tr><td>M10</td><td>Initial seeded context queued when the client connects</td><td><span class="pill ok">Done</span></td><td><code>SalesCallBot</code> queues one <code>InitialLLMContextFrame</code> on Daily user join; <code>ContextAggregator</code> emits an initial <code>LLMMessagesFrame</code> without arming talk time</td></tr>
+          <tr><td>M10</td><td>Initial seeded context queued when the client connects</td><td><span class="pill ok">Done</span></td><td><code>ContextAggregator.ContextFrame()</code> returns the existing <code>LLMMessagesFrame</code> snapshot; <code>SalesCallBot</code> queues it once on Daily user join</td></tr>
           <tr><td>S6 (subset)</td><td>STT TTFB on chunks intentionally null</td><td><span class="pill ok">Accepted</span></td><td>STT processor has no TTFB metric in our flow</td></tr>
           <tr><td>S6 (subset)</td><td><code>main_agent_system_prompt_langfuse_key</code> on chunks</td><td><span class="pill ok">Done</span></td><td><code>SalesCallBot</code> passes <code>disha.PromptKey</code> into <code>ContextAggregatorConfig</code> for committed-turn chunk writes</td></tr>
           <tr><td>S4</td><td>Background office sound mixed into outbound audio</td><td><span class="pill ok">Done</span></td><td><code>voicepipelinecore/playback_sink_processor.go</code> — <code>background-office-sound.mp3</code> mixed at 0.5 (bot 0.3)</td></tr>
@@ -337,7 +337,7 @@
               <td>Hard-coded <code>gpt-4.1</code> via OpenAI direct. Python uses <strong>Grok-4.1-fast-non-reasoning via Azure</strong>. No <code>CustomOpenAILLMService</code> (no LLM logging, no switching service, no entity tracing). Deferred to a separate change set per the user's request.</td></tr>
           <tr><td>Initial bot greeting</td>
               <td class="status"><span class="pill ok">Parity</span></td>
-              <td>Fresh-call context is seeded with <code>{user:"hello?"}</code> and queued once on Daily user join via <code>InitialLLMContextFrame</code>, so the bot opens the call like Python.</td></tr>
+              <td>Fresh-call context is seeded with <code>{user:"hello?"}</code> and queued once on Daily user join using the existing LLM message frame, so the bot opens the call like Python.</td></tr>
           <tr><td>System prompt</td>
               <td class="status"><span class="pill ok">Parity</span></td>
               <td>Prompt name picked by <code>campaign_pricing_experiment_flag</code> (<code>sales_call/main_sys-3day_v2</code> / <code>-3day_21rs_v2</code> / <code>-30day_299rs_v2</code>); rendered via the new Redis-only <code>disha.DocumentStore</code> with <code>patient_info</code>, <code>current_datetime</code>, and <code>short_term_memory</code> variables.</td></tr>
@@ -754,7 +754,7 @@ SENTRY_DSN, SENTRY_ENVIRONMENT, SENTRY_RELEASE                  # error reportin
           <tr><td>M7</td><td>GKE <code>safe-to-evict=false</code> on reserve + call start.</td><td><span class="pill ok">Done</span></td><td><code>disha.GKEPodPatcher</code> uses the in-cluster service-account projection. Flipped to <code>false</code> at <code>mark_machine_reserved</code> and <code>create_worker_room</code>, restored on cleanup. No-ops outside Kubernetes.</td></tr>
           <tr><td>M8</td><td>Sentry coverage.</td><td><span class="pill ok">Done</span></td><td><code>SENTRY_DSN</code> initializes <code>sentry-go</code> in <code>main.go</code>; captures go through <code>internal/sentryutil.Capture</code>.</td></tr>
           <tr><td>M9</td><td>Per-conversation Cartesia API key.</td><td><span class="pill todo">Open</span></td><td>Still <code>CARTESIA_API_KEY</code> from env. When we&rsquo;re ready: surface a Cartesia API key on the TTS constructor path and read <code>conversation.cartesia_api_key</code> from the Redis row.</td></tr>
-          <tr><td>M10</td><td>Initial seeded context queued on client connect.</td><td><span class="pill ok">Done</span></td><td><code>SalesCallBot</code> queues one <code>InitialLLMContextFrame</code> after Daily user join; the resulting <code>InitialContext</code> LLM frame does not arm the talk-time timer.</td></tr>
+          <tr><td>M10</td><td>Initial seeded context queued on client connect.</td><td><span class="pill ok">Done</span></td><td><code>SalesCallBot</code> queues the existing seeded <code>LLMMessagesFrame</code> once after Daily user join, matching Python's context-frame kickoff without adding a special frame type.</td></tr>
         </tbody>
       </table>
 

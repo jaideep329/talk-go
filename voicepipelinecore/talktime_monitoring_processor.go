@@ -88,12 +88,9 @@ func (p *TalkTimeMonitoringProcessor) ProcessFrame(ctx context.Context, frame Fr
 		p.PushFrame(f, dir)
 	case LLMMessagesFrame:
 		// ContextAggregator only emits LLMMessagesFrame after a committed
-		// user turn (post-`<end>`), except for the sales-call initial
-		// seeded-context kickoff. That synthetic "hello?" should make the
-		// bot speak first but must not burn user talk time.
-		if !f.InitialContext {
-			p.armOnFirstSpeech()
-		}
+		// user turn (post-`<end>`), so this is the cleanest equivalent
+		// of Pipecat's UserStartedSpeakingFrame for arming the budget.
+		p.armOnFirstSpeech()
 		p.PushFrame(frame, dir)
 	default:
 		if p.ending.Load() && dir == Downstream {

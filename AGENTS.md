@@ -52,10 +52,10 @@ Jaideep is an experienced Python backend engineer learning Go by building real p
 - Soniox connect attempts are capped at three with short backoff; after exhaustion the STT processor pushes a fatal `ErrorFrame` so the pipeline ends instead of holding a worker slot forever.
 - Daily bridge join retries three times before failing, matching Disha's Python transport retry pattern. Daily inbound RTVI `client-message` pings must receive RTVI `server-response` pong messages over Daily app messages.
 - Sales-call chunks must carry `main_agent_system_prompt_langfuse_key` using `disha.PromptKey(promptName, promptVersion)` for both user and assistant committed turns.
-- Do not promote one-flow values into broad task context, shared deps, or long-lived callback struct fields just because a later method needs them. For narrow values like the sales-call prompt key, pass it into `ContextAggregatorConfig`; the aggregator supplies it at the committed-turn boundary and `CallEventCallbacks.Events()` stays a plain default callback mapping.
-- Sales-call initial context kickoff must mirror Python's shape without special startup frame types: expose the aggregator's current context as the existing LLM trigger frame, and let the sales-call assembly queue that one existing frame when the Daily user/client connects. Do not mutate core frame semantics for one-flow startup. Because Go's `LLMMessagesFrame` currently also arms talk time when routed through `TalkTimeMonitoringProcessor`, this startup trigger is queued directly at the LLM until talk-time is redesigned to start from a real user-speech signal like Python's `UserStartedSpeakingFrame`.
+- Do not promote one-flow values into broad task context, shared deps, long-lived callback struct fields, or config structs just because a later method needs them. For narrow values like the sales-call prompt key, pass it directly into the processor constructor (`NewContextAggregator(taskCtx, initialMessages, promptKey)`); the aggregator supplies it at the committed-turn boundary and `CallEventCallbacks.Events()` stays a plain default callback mapping.
+- Sales-call initial context kickoff must mirror Python's shape without special startup frame types: Daily user-join pushes the existing Pipecat-style `LLMMessagesAppendFrame(nil, true)`, and `ContextAggregator` consumes it by running the LLM on its current seeded context. Do not mutate core frame semantics or add a one-flow kickoff frame for sales-call startup.
 - Daily RTVI protocol handling stays generic in `DailyRoom`: inbound RTVI `client-ready` app messages should receive a `bot-ready` response with the same id and protocol version `1.2.0`, mirroring Pipecat's `RTVIProcessor.set_bot_ready()` behavior.
-- Known sales-call parity gaps from the 2026-05-30 report: LLM is still OpenAI `gpt-4.1` instead of Disha's Grok/Azure switching path; per-conversation Cartesia key, global 120s no-frames watchdog, and exact debug-log/interim transcript shape remain open.
+- Known sales-call parity gaps from the 2026-05-30 report: per-conversation Cartesia key and LLM prompt/completion token counts remain open.
 
 ## Project Overview
 
@@ -165,7 +165,7 @@ All processors embed `*BaseProcessor` and take `taskCtx *TaskContext` (plus, for
 NewAudioSourceProcessor(taskCtx)
 NewSTTProcessor(taskCtx)
 NewUserIdleProcessor(taskCtx)
-NewContextAggregator(taskCtx)
+NewContextAggregator(taskCtx, initialMessages, promptKey)
 NewTalkTimeMonitoringProcessor(taskCtx)
 NewLLMProcessor(taskCtx)
 NewTTSProcessor(taskCtx)

@@ -135,10 +135,7 @@ func (b SalesCallBot) BuildTask(ctx context.Context, req BotTaskRequest, deps De
 
 	stt := voicepipelinecore.NewSTTProcessor(taskCtx)
 	userIdle := voicepipelinecore.NewUserIdleProcessor(taskCtx)
-	contextAggregator := voicepipelinecore.NewContextAggregatorWithConfig(taskCtx, voicepipelinecore.ContextAggregatorConfig{
-		InitialMessages:                  pl.InitialMessages,
-		MainAgentSystemPromptLangfuseKey: pl.PromptKey,
-	})
+	contextAggregator := voicepipelinecore.NewContextAggregator(taskCtx, pl.InitialMessages, pl.PromptKey)
 	talkTime := voicepipelinecore.NewTalkTimeMonitoringProcessorWithMaxTalkTime(taskCtx, pl.MaxTalkTime)
 	llm := voicepipelinecore.NewLLMProcessorWithClient(taskCtx, newSalesLLMClient(deps, pl.Startup))
 	tts := voicepipelinecore.NewTTSProcessor(taskCtx, pl.PhoneticDict)

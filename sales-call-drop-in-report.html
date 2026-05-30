@@ -198,7 +198,7 @@
           <tr><td>M8</td><td>Sentry coverage</td><td><span class="pill ok">Done</span></td><td><code>internal/sentryutil.Capture</code> wraps <code>sentry-go</code> across API/Redis/S3/Daily/STT/signal surfaces</td></tr>
           <tr><td>M9</td><td>Per-conversation Cartesia API key</td><td><span class="pill todo">Open</span></td><td>still single <code>CARTESIA_API_KEY</code> env</td></tr>
           <tr><td>S6 (subset)</td><td>STT TTFB on chunks intentionally null</td><td><span class="pill ok">Accepted</span></td><td>STT processor has no TTFB metric in our flow</td></tr>
-          <tr><td>S6 (subset)</td><td><code>main_agent_system_prompt_langfuse_key</code> on chunks</td><td><span class="pill ok">Done</span></td><td><code>SalesCallBot</code> passes <code>disha.PromptKey</code> into <code>ContextAggregatorConfig</code> for committed-turn chunk writes</td></tr>
+          <tr><td>S6 (subset)</td><td><code>main_agent_system_prompt_langfuse_key</code> on chunks</td><td><span class="pill ok">Done</span></td><td><code>SalesCallBot</code> passes <code>disha.PromptKey</code> directly into <code>NewContextAggregator</code> for committed-turn chunk writes</td></tr>
           <tr><td>S4</td><td>Background office sound mixed into outbound audio</td><td><span class="pill ok">Done</span></td><td><code>voicepipelinecore/playback_sink_processor.go</code> — <code>background-office-sound.mp3</code> mixed at 0.5 (bot 0.3)</td></tr>
           <tr><td>M6′</td><td>Chunk-replay filter matches <code>sales_call.py</code> exactly (debug + truthy <code>additional_data</code> only)</td><td><span class="pill ok">Done</span></td><td><code>disha/call_startup.go</code> <code>messageFromChunkTuple</code></td></tr>
           <tr><td>Arch</td><td>Pipeline assembled in the bot (<code>BuildTask</code>), not the core; <code>SessionID</code> replaces synthetic room name</td><td><span class="pill ok">Done</span></td><td><code>disha/sales_call.go</code>, <code>voicepipelinecore/pipeline.go</code></td></tr>
@@ -244,7 +244,7 @@
         <thead><tr><th>#</th><th>Gap</th><th>Detail</th></tr></thead>
         <tbody>
           <tr><td>M9</td><td>Per-conversation Cartesia key</td><td>Go uses one <code>CARTESIA_API_KEY</code> env; Python reads <code>cartesia_api_key</code> from the conversation row (per-tenant). Surface a key on the TTS constructor and read it from Redis.</td></tr>
-          <tr><td>S6</td><td><code>main_agent_system_prompt_langfuse_key</code> on chunks</td><td><span class="pill ok">Done</span> &mdash; name+version are threaded through <code>ContextAggregatorConfig</code> and written on user/assistant chunks.</td></tr>
+          <tr><td>S6</td><td><code>main_agent_system_prompt_langfuse_key</code> on chunks</td><td><span class="pill ok">Done</span> &mdash; name+version are passed directly into <code>NewContextAggregator</code> and written on user/assistant chunks.</td></tr>
           <tr><td>L1</td><td>LLM-log token counts</td><td>The router logs each call to <code>llm_logging_service</code> (model, deployment, latency, response, finish_reason), but <code>prompt_tokens</code>/<code>completion_tokens</code> are <code>0</code> — Go doesn&rsquo;t request stream usage. Analytics only.</td></tr>
           <tr><td>—</td><td>Accepted-null (sales-call doesn&rsquo;t use)</td><td><code>current_agenda</code>, <code>stt_ttfb_ms</code> (no STT TTFB metric in our flow), <code>system_message_params_s3_key</code>, <code>conversation_state_s3_key</code>.</td></tr>
         </tbody>
@@ -555,13 +555,13 @@
           <tr><td><code>created</code></td><td>ISO 8601</td><td>RFC 3339Nano</td><td><span class="pill ok">Compatible</span></td></tr>
           <tr><td><code>is_debug_log</code></td><td><code>false</code> for normal turns</td><td>same</td><td><span class="pill ok">Same</span></td></tr>
           <tr><td><code>additional_data</code></td><td>function-call payloads etc</td><td>Always omitted (<code>nil</code>)</td><td><span class="pill ok">Same for sales-call</span></td></tr>
-          <tr><td><code>main_agent_system_prompt_langfuse_key</code></td><td><code>"sales_call/main_sys-3day_v2_v17"</code> etc</td><td>Written on user and assistant chunks from <code>ContextAggregatorConfig</code></td><td><span class="pill ok">Same</span></td></tr>
+          <tr><td><code>main_agent_system_prompt_langfuse_key</code></td><td><code>"sales_call/main_sys-3day_v2_v17"</code> etc</td><td>Written on user and assistant chunks from the prompt key passed into <code>NewContextAggregator</code></td><td><span class="pill ok">Same</span></td></tr>
           <tr><td><code>system_message_params_s3_key</code></td><td>S3 key per chunk</td><td>Always <code>nil</code></td><td><span class="pill ok">Accepted</span> &mdash; not used in sales call</td></tr>
           <tr><td><code>conversation_state_s3_key</code></td><td>S3 key when <code>conversation_state</code> set (sales-call doesn't, so usually null)</td><td>Always <code>nil</code></td><td><span class="pill ok">Accepted</span> &mdash; not used in sales call</td></tr>
         </tbody>
       </table>
       <p>The chunk prompt-key gap is closed: <code>SalesCallBot</code> computes <code>disha.PromptKey(name, version)</code>,
-        passes it through <code>ContextAggregatorConfig</code>, and committed user/assistant turn callbacks write it.
+        passes it directly into <code>NewContextAggregator</code>, and committed user/assistant turn callbacks write it.
         Everything else in the &ldquo;not used in sales call&rdquo; rows is intentionally <code>null</code>.</p>
 
       <h3>5.2 Storage paths</h3>

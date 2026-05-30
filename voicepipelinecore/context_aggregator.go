@@ -22,35 +22,17 @@ type ContextAggregator struct {
 	mainAgentSystemPromptLangfuseKey string
 }
 
-type ContextAggregatorConfig struct {
-	InitialMessages                  []Message
-	MainAgentSystemPromptLangfuseKey string
-}
-
-func NewContextAggregator(taskCtx *TaskContext, initialMessages ...[]Message) *ContextAggregator {
-	cfg := ContextAggregatorConfig{}
-	if len(initialMessages) > 0 {
-		cfg.InitialMessages = initialMessages[0]
-	}
-	return newContextAggregator(taskCtx, cfg, len(initialMessages) > 0)
-}
-
-func NewContextAggregatorWithConfig(taskCtx *TaskContext, cfg ContextAggregatorConfig) *ContextAggregator {
-	return newContextAggregator(taskCtx, cfg, cfg.InitialMessages != nil)
-}
-
-func newContextAggregator(taskCtx *TaskContext, cfg ContextAggregatorConfig, hasInitialMessages bool) *ContextAggregator {
-	useDefaultPrompt := true
+func NewContextAggregator(taskCtx *TaskContext, initialMessages []Message, mainAgentSystemPromptLangfuseKey string) *ContextAggregator {
+	useDefaultPrompt := initialMessages == nil
 	messages := []map[string]string{}
-	if hasInitialMessages {
-		useDefaultPrompt = false
-		messages = messagesFromInitial(cfg.InitialMessages)
+	if !useDefaultPrompt {
+		messages = messagesFromInitial(initialMessages)
 	}
 	a := &ContextAggregator{
 		taskCtx:                          taskCtx,
 		messages:                         messages,
 		useDefaultPrompt:                 useDefaultPrompt,
-		mainAgentSystemPromptLangfuseKey: cfg.MainAgentSystemPromptLangfuseKey,
+		mainAgentSystemPromptLangfuseKey: mainAgentSystemPromptLangfuseKey,
 	}
 	a.BaseProcessor = NewBaseProcessor("ContextAggregator", a, taskCtx)
 	return a

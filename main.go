@@ -41,8 +41,6 @@ func main() {
 	if dsn := strings.TrimSpace(os.Getenv("SENTRY_DSN")); dsn != "" {
 		if err := sentry.Init(sentry.ClientOptions{
 			Dsn:              dsn,
-			Environment:      firstNonEmpty(os.Getenv("SENTRY_ENVIRONMENT"), os.Getenv("ENVIRONMENT")),
-			Release:          strings.TrimSpace(os.Getenv("SENTRY_RELEASE")),
 			AttachStacktrace: true,
 		}); err != nil {
 			log.Printf("sentry init failed: %v\n", err)

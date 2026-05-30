@@ -41,6 +41,28 @@ func TestTalkTime_TimerEmitsShutdownSequence(t *testing.T) {
 	}
 }
 
+func TestTalkTime_InitialContextDoesNotArmTimer(t *testing.T) {
+	fix := newTestFixture(t)
+	p := NewTalkTimeMonitoringProcessorWithMaxTalkTime(fix.TaskCtx, 50*time.Millisecond)
+
+	down, _ := runProcessorTest(t, fix, runConfig{
+		processor: p,
+		framesToSend: []Frame{
+			NewInitialLLMMessagesFrame([]map[string]string{{"role": "user", "content": "hello?"}}),
+		},
+		settleDelay:  150 * time.Millisecond,
+		sendEndFrame: true,
+		timeout:      3 * time.Second,
+	})
+
+	if c := countFrames[InterruptFrame](down); c != 0 {
+		t.Errorf("expected no InterruptFrame for initial context, got %d: %s", c, describeFrameTypes(down))
+	}
+	if c := countFrames[TTSSpeakFrame](down); c != 0 {
+		t.Errorf("expected no TTSSpeakFrame for initial context, got %d: %s", c, describeFrameTypes(down))
+	}
+}
+
 // TestTalkTime_PassesFramesThroughBeforeTimeout verifies that ordinary
 // frames pass through before the timer fires.
 func TestTalkTime_PassesFramesThroughBeforeTimeout(t *testing.T) {

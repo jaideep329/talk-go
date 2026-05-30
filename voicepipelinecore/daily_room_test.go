@@ -52,6 +52,47 @@ func TestDailyRoomRespondsToRTVIPing(t *testing.T) {
 	}
 }
 
+func TestDailyRoomRespondsToRTVIClientReady(t *testing.T) {
+	var out testWriteCloser
+	room := &DailyRoom{
+		roomName: "room-1",
+		stdin:    &out,
+	}
+
+	room.handleAppMessage(json.RawMessage(`{
+		"label":"rtvi-ai",
+		"type":"client-ready",
+		"id":"ready-1",
+		"data":{"version":"1.2.0","about":{"library":"test-client"}}
+	}`))
+
+	var cmd dailyBridgeCommand
+	if err := json.NewDecoder(&out).Decode(&cmd); err != nil {
+		t.Fatalf("Decode command: %v", err)
+	}
+	if cmd.Type != "message" {
+		t.Fatalf("command type = %q, want message", cmd.Type)
+	}
+	msg, ok := cmd.Data.(map[string]any)
+	if !ok {
+		t.Fatalf("command data = %#v, want object", cmd.Data)
+	}
+	if msg["label"] != "rtvi-ai" || msg["type"] != "bot-ready" || msg["id"] != "ready-1" {
+		t.Fatalf("RTVI bot-ready mismatch: %+v", msg)
+	}
+	data, ok := msg["data"].(map[string]any)
+	if !ok {
+		t.Fatalf("bot-ready data = %#v, want object", msg["data"])
+	}
+	if data["version"] != rtviProtocolVersion {
+		t.Fatalf("bot-ready version = %v, want %s", data["version"], rtviProtocolVersion)
+	}
+	about, ok := data["about"].(map[string]any)
+	if !ok || about["library"] != "talk-go" {
+		t.Fatalf("bot-ready about = %#v, want talk-go library", data["about"])
+	}
+}
+
 func TestJoinDailyRoomRetriesBridgeJoin(t *testing.T) {
 	fix := newTestFixture(t)
 	tmp := t.TempDir()

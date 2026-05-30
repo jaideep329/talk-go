@@ -67,6 +67,18 @@ func messagesFromInitial(initial []Message) []map[string]string {
 	return messages
 }
 
+func cloneMessages(messages []map[string]string) []map[string]string {
+	out := make([]map[string]string, len(messages))
+	for i, msg := range messages {
+		copied := make(map[string]string, len(msg))
+		for k, v := range msg {
+			copied[k] = v
+		}
+		out[i] = copied
+	}
+	return out
+}
+
 func (a *ContextAggregator) appendWords(words []string) {
 	for _, w := range words {
 		if len(a.spokenWords) > 0 && len(w) > 0 && w[0] != '.' && w[0] != ',' && w[0] != '!' && w[0] != '?' && w[0] != ';' && w[0] != ':' {
@@ -197,7 +209,7 @@ You are conducting your first telephonic consultation with a new client. You are
 	a.spokenWords = nil
 	a.resetInterimTranscript()
 	a.resetFinalTranscript()
-	a.PushFrame(NewLLMMessagesFrame(a.messages), Downstream)
+	a.PushFrame(NewLLMMessagesFrame(cloneMessages(a.messages)), Downstream)
 }
 
 func (a *ContextAggregator) ProcessFrame(ctx context.Context, frame Frame, dir Direction) {
@@ -205,6 +217,13 @@ func (a *ContextAggregator) ProcessFrame(ctx context.Context, frame Frame, dir D
 	case EndFrame:
 		a.taskCtx.Logger.Printf("EndFrame at ContextAggregator: reason=%q\n", f.Reason)
 		a.PushFrame(f, dir)
+	case InitialLLMContextFrame:
+		if len(a.messages) == 0 {
+			a.taskCtx.Logger.Println("Initial LLM context requested with no seeded messages; ignoring")
+			return
+		}
+		a.taskCtx.Logger.Println("Initial LLM context requested; pushing seeded messages")
+		a.PushFrame(NewInitialLLMMessagesFrame(cloneMessages(a.messages)), Downstream)
 	case TranscriptFrame:
 		interimTranscript := a.updateInterimTranscript(f)
 

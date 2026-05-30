@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jaideep329/talk-go/voicepipelinecore"
@@ -101,10 +102,20 @@ func (b SalesCallBot) BuildTask(ctx context.Context, req BotTaskRequest, deps De
 		return nil, err
 	}
 
+	initialContext := &salesInitialContextStarter{}
+	callEvents := pl.Callbacks.Events()
+	onUserJoined := callEvents.OnUserJoined
+	callEvents.OnUserJoined = func(at time.Time) {
+		initialContext.UserJoined()
+		if onUserJoined != nil {
+			onUserJoined(at)
+		}
+	}
+
 	task, err := voicepipelinecore.NewPipelineTask(ctx, voicepipelinecore.TaskConfig{
 		Logger:     pl.Startup.Logger,
 		SessionID:  pl.Startup.ConversationID,
-		CallEvents: pl.Callbacks.Events(),
+		CallEvents: callEvents,
 	})
 	if err != nil {
 		return nil, err
@@ -149,7 +160,37 @@ func (b SalesCallBot) BuildTask(ctx context.Context, req BotTaskRequest, deps De
 		sink,
 	})
 	task.SetPipeline(source, pipeline)
+	initialContext.Attach(source)
 	return task, nil
+}
+
+type salesInitialContextStarter struct {
+	mu      sync.Mutex
+	source  *voicepipelinecore.PipelineSourceProcessor
+	pending bool
+	queued  bool
+}
+
+func (s *salesInitialContextStarter) UserJoined() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pending = true
+	s.queueLocked()
+}
+
+func (s *salesInitialContextStarter) Attach(source *voicepipelinecore.PipelineSourceProcessor) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.source = source
+	s.queueLocked()
+}
+
+func (s *salesInitialContextStarter) queueLocked() {
+	if !s.pending || s.queued || s.source == nil {
+		return
+	}
+	s.queued = true
+	s.source.Queue(voicepipelinecore.NewInitialLLMContextFrame())
 }
 
 // loadSalesPrompt picks the prompt name based on

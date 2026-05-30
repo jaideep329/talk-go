@@ -171,13 +171,11 @@
         report had left open. The pipeline is now also <strong>assembled in the bot</strong>
         (<code>SalesCallBot.BuildTask</code>) exactly like <code>sales_call.py</code>'s
         <code>Pipeline([...])</code>, rather than inside the core.</p>
-      <p>Two hard blockers remain for a true production cutover. First, Python starts the sales call by queuing
-        the seeded LLM context on Daily <code>on_client_connected</code>; Go currently stores the seed
-        (<code>{user: "hello?"}</code>) but never queues it, so fresh calls likely wait for the user to speak
-        first. Second, the <strong>LLM swap</strong> is still open: Go uses OpenAI <code>gpt-4.1</code> with no
+      <p>One hard blocker remains for a true production cutover: the <strong>LLM swap</strong> is still open.
+        Go uses OpenAI <code>gpt-4.1</code> with no
         temperature/switching/entity tracing, while production runs Grok-4.1-fast on Azure with
         <code>temperature=0</code> and failover. The rest are operational/data parity items: a global
-        120&nbsp;s no-frames watchdog, per-conversation Cartesia key, RTVI bot-ready/client-ready handling, and a
+        120&nbsp;s no-frames watchdog, per-conversation Cartesia key, and a
         few exact-shape differences in debug logs and edge-case prompts.</p>
     </div>
 
@@ -195,7 +193,7 @@
           <tr><td>M7</td><td>GKE <code>safe-to-evict=false</code> on reserve + call start, restored on cleanup</td><td><span class="pill ok">Done</span></td><td><code>disha/gke_pod.go</code>, <code>worker_api.go</code></td></tr>
           <tr><td>M8</td><td>Sentry coverage</td><td><span class="pill ok">Done</span></td><td><code>internal/sentryutil.Capture</code> wraps <code>sentry-go</code> across API/Redis/S3/Daily/STT/signal surfaces</td></tr>
           <tr><td>M9</td><td>Per-conversation Cartesia API key</td><td><span class="pill todo">Open</span></td><td>still single <code>CARTESIA_API_KEY</code> env</td></tr>
-          <tr><td>M10</td><td>Initial seeded context queued when the client connects</td><td><span class="pill bad">Open</span></td><td>Go seeds <code>hello?</code> in context but does not push the initial <code>LLMMessagesFrame</code></td></tr>
+          <tr><td>M10</td><td>Initial seeded context queued when the client connects</td><td><span class="pill ok">Done</span></td><td><code>SalesCallBot</code> queues one <code>InitialLLMContextFrame</code> on Daily user join; <code>ContextAggregator</code> emits an initial <code>LLMMessagesFrame</code> without arming talk time</td></tr>
           <tr><td>S6 (subset)</td><td>STT TTFB on chunks intentionally null</td><td><span class="pill ok">Accepted</span></td><td>STT processor has no TTFB metric in our flow</td></tr>
           <tr><td>S6 (subset)</td><td><code>main_agent_system_prompt_langfuse_key</code> on chunks</td><td><span class="pill ok">Done</span></td><td><code>SalesCallBot</code> passes <code>disha.PromptKey</code> into <code>ContextAggregatorConfig</code> for committed-turn chunk writes</td></tr>
           <tr><td>S4</td><td>Background office sound mixed into outbound audio</td><td><span class="pill ok">Done</span></td><td><code>voicepipelinecore/playback_sink_processor.go</code> — <code>background-office-sound.mp3</code> mixed at 0.5 (bot 0.3)</td></tr>
@@ -207,20 +205,14 @@
 
     <section id="whats-left" style="background:#fbfdff; border-color:#cdd8e6;">
       <h2>What&rsquo;s left (re-verified 30 May 2026 against current branch)</h2>
-      <p>Most worker/persistence pieces are now faithful to the Python sales-call worker. Two user-facing items
-        still block a measurable production cutover; everything else is resilience, RTVI compatibility, or data
+      <p>Most worker/persistence pieces are now faithful to the Python sales-call worker. One user-facing item
+        still blocks a measurable production cutover; everything else is resilience, RTVI compatibility, or data
         shape hardening you&rsquo;d want before ramping past a small traffic percentage.</p>
 
       <h3>🔴 Hard blocker — blocks a real cutover</h3>
       <table>
         <thead><tr><th>#</th><th>Gap</th><th>Go today</th><th>Python (target)</th></tr></thead>
         <tbody>
-          <tr>
-            <td><strong>M10</strong></td>
-            <td>Initial bot greeting / seeded context kickoff</td>
-            <td><code>buildInitialMessages</code> correctly seeds <code>{role:"user", content:"hello?"}</code> for fresh calls, but <code>PipelineTask.Start()</code> does not queue those messages and <code>DailyRoom</code> does not trigger an initial context frame on participant/client connect. The first <code>LLMMessagesFrame</code> is only emitted after a real user transcript.</td>
-            <td><code>on_client_connected</code> queues <code>main_context_aggregator.user()._get_context_frame()</code>, so the bot opens the call from the seeded context.</td>
-          </tr>
           <tr>
             <td><strong>M2</strong></td>
             <td>LLM swap (the only item that changes what the user hears / what we measure)</td>
@@ -231,11 +223,9 @@
       </table>
       <div class="callout bad">
         <strong>Why it blocks</strong>
-        A fresh Python sales call starts with the bot speaking; a fresh Go call currently appears to wait for
-        the user unless another path injects an initial LLM frame. After that is fixed, every conversion-rate,
-        latency, and cost number still depends on the LLM swap: plumbing tests are fine, but real performance
-        cannot be measured until the model, base URL, deployment, key, and <code>temperature=0</code> are
-        parameterised — ideally with switching/failover and entity logging too.
+        Every conversion-rate, latency, and cost number still depends on the LLM swap: plumbing tests are fine,
+        but real performance cannot be measured until the model, base URL, deployment, key, and
+        <code>temperature=0</code> are parameterised — ideally with switching/failover and entity logging too.
       </div>
 
       <h3>🟠 Operational resilience — invisible to the user, bites under load / incidents</h3>
@@ -249,12 +239,12 @@
           <tr><td>S8</td><td>Global no-frames watchdog</td><td>Only the 7&nbsp;s user-idle prompt loop; no process-level guard</td><td><code>cancel_on_idle_timeout=True</code>, <code>idle_timeout_secs=120</code></td><td>A <em>frozen</em> pipeline (not user-idle) hangs until pod eviction</td></tr>
           <tr><td>S7</td><td>Daily <code>ping</code>/<code>pong</code> keepalive</td><td>App-message handler responds to RTVI <code>client-message</code> pings with <code>server-response</code> pongs</td><td>RTVI responds <code>pong</code> to <code>ping</code></td><td><span class="pill ok">Done</span></td></tr>
           <tr><td>S9</td><td>Atexit abrupt-shutdown alert</td><td><code>reportAbruptShutdownOnExit</code> emits the Sentry alert unless a graceful signal path completed</td><td>Sentry &ldquo;Abrupt machine kill detected&rdquo;</td><td><span class="pill ok">Done</span></td></tr>
-          <tr><td>S10</td><td>RTVI <code>client-ready</code> / bot-ready response</td><td>No <code>client-ready</code> handler and no <code>set_bot_ready</code> equivalent</td><td><code>on_client_ready</code> calls <code>rtvi.set_bot_ready()</code></td><td>Strict RTVI clients may wait for bot-ready before enabling UI state</td></tr>
+          <tr><td>S10</td><td>RTVI <code>client-ready</code> / bot-ready response</td><td><code>DailyRoom</code> responds to RTVI <code>client-ready</code> app messages with <code>bot-ready</code> (<code>version=1.2.0</code>) using the same message id</td><td><code>on_client_ready</code> calls <code>rtvi.set_bot_ready()</code></td><td><span class="pill ok">Done</span></td></tr>
         </tbody>
       </table>
-      <p><strong>Recommended order:</strong> fix M10 first because it changes the call&rsquo;s opening behaviour, then
-        M2 because it changes quality/cost/latency. After that, S8 and S10 are the remaining runtime parity
-        items. M8/S1/S2/S3/S7/S9 are already done.</p>
+      <p><strong>Recommended order:</strong> M2 is now the only user-facing blocker because it changes quality,
+        cost, latency, and conversion measurement. After that, S8 plus the remaining data-shape items are the
+        runtime parity work. M10/S10/M8/S1/S2/S3/S7/S9 are already done.</p>
 
       <h3>🟡 Data / analytics completeness</h3>
       <table>
@@ -334,8 +324,8 @@
               <td class="status"><span class="pill ok">Parity</span></td>
               <td>Pipecat-style <code>BaseProcessor</code>, broadcast frames, EndFrame-driven shutdown, min-words barge-in, word-timestamp interleaving &mdash; all in.</td></tr>
           <tr><td>Daily transport (join, audio in/out, app messages)</td>
-              <td class="status"><span class="pill warn">Mostly</span></td>
-              <td>via Python <code>daily_bridge.py</code> sidecar; Daily app messages used for UI events plus inbound <code>end_call</code> and RTVI ping/pong. Missing the Python <code>client-ready</code> &rarr; bot-ready handshake.</td></tr>
+              <td class="status"><span class="pill ok">Parity</span></td>
+              <td>via Python <code>daily_bridge.py</code> sidecar; Daily app messages used for UI events plus inbound <code>end_call</code>, RTVI ping/pong, and RTVI <code>client-ready</code> &rarr; <code>bot-ready</code>.</td></tr>
           <tr><td>STT (Soniox)</td>
               <td class="status"><span class="pill ok">Parity</span></td>
               <td>Same model (<code>stt-rt-v4</code>), 16 kHz s16le, <code>language_hints=["hi"]</code>, lazy connect + reconnect.</td></tr>
@@ -346,8 +336,8 @@
               <td class="status"><span class="pill bad">Gap</span></td>
               <td>Hard-coded <code>gpt-4.1</code> via OpenAI direct. Python uses <strong>Grok-4.1-fast-non-reasoning via Azure</strong>. No <code>CustomOpenAILLMService</code> (no LLM logging, no switching service, no entity tracing). Deferred to a separate change set per the user's request.</td></tr>
           <tr><td>Initial bot greeting</td>
-              <td class="status"><span class="pill bad">Gap</span></td>
-              <td>Fresh-call context is seeded with <code>{user:"hello?"}</code>, but Go does not queue that context on client connect. Python queues the context frame from <code>on_client_connected</code>, so the bot speaks first.</td></tr>
+              <td class="status"><span class="pill ok">Parity</span></td>
+              <td>Fresh-call context is seeded with <code>{user:"hello?"}</code> and queued once on Daily user join via <code>InitialLLMContextFrame</code>, so the bot opens the call like Python.</td></tr>
           <tr><td>System prompt</td>
               <td class="status"><span class="pill ok">Parity</span></td>
               <td>Prompt name picked by <code>campaign_pricing_experiment_flag</code> (<code>sales_call/main_sys-3day_v2</code> / <code>-3day_21rs_v2</code> / <code>-30day_299rs_v2</code>); rendered via the new Redis-only <code>disha.DocumentStore</code> with <code>patient_info</code>, <code>current_datetime</code>, and <code>short_term_memory</code> variables.</td></tr>
@@ -532,9 +522,9 @@
         <div class="col python"><h4>Python</h4>
           <code>CustomRTVIProcessor</code> + <code>CustomRtviObserver</code> emit <code>rtvi-ai</code> entries for <code>bot-transcription</code>, <code>user-transcription</code>, <code>bot-started/stopped-speaking</code>, <code>server-message</code> (metrics, llm_call_result, interruption, talktime_exhausted, participant-left). Also handles inbound <code>{type:"ping"}</code> and responds with <code>"pong"</code> via <code>send_server_response</code>.</div>
         <div class="col go"><h4>Go</h4>
-          <code>UIEventSender</code> emits all the outbound types above through Daily app messages and snapshots them into the S3 debug log. Inbound side handles <code>{type:"end_call"}</code> plus RTVI <code>client-message</code> <code>ping</code> with a <code>server-response</code> <code>pong</code>. Missing: <code>client-ready</code> &rarr; bot-ready, and Go currently includes interim user-transcription entries in the same buffered S3 stream.</div>
+          <code>UIEventSender</code> emits all the outbound types above through Daily app messages and snapshots them into the S3 debug log. Inbound side handles <code>{type:"end_call"}</code>, RTVI <code>client-message</code> <code>ping</code> with a <code>server-response</code> <code>pong</code>, and RTVI <code>client-ready</code> with <code>bot-ready</code>. Remaining difference: Go currently includes interim user-transcription entries in the same buffered S3 stream.</div>
       </div>
-      <p>RTVI pong-based keepalive is now covered for clients that send <code>client-message</code> pings over Daily app messages. Bot-ready remains open for strict RTVI clients.</p>
+      <p>RTVI pong-based keepalive and bot-ready are now covered for clients that use RTVI app messages over Daily.</p>
     </section>
 
     <section id="pipeline">
@@ -764,7 +754,7 @@ SENTRY_DSN, SENTRY_ENVIRONMENT, SENTRY_RELEASE                  # error reportin
           <tr><td>M7</td><td>GKE <code>safe-to-evict=false</code> on reserve + call start.</td><td><span class="pill ok">Done</span></td><td><code>disha.GKEPodPatcher</code> uses the in-cluster service-account projection. Flipped to <code>false</code> at <code>mark_machine_reserved</code> and <code>create_worker_room</code>, restored on cleanup. No-ops outside Kubernetes.</td></tr>
           <tr><td>M8</td><td>Sentry coverage.</td><td><span class="pill ok">Done</span></td><td><code>SENTRY_DSN</code> initializes <code>sentry-go</code> in <code>main.go</code>; captures go through <code>internal/sentryutil.Capture</code>.</td></tr>
           <tr><td>M9</td><td>Per-conversation Cartesia API key.</td><td><span class="pill todo">Open</span></td><td>Still <code>CARTESIA_API_KEY</code> from env. When we&rsquo;re ready: surface a Cartesia API key on the TTS constructor path and read <code>conversation.cartesia_api_key</code> from the Redis row.</td></tr>
-          <tr><td>M10</td><td>Initial seeded context queued on client connect.</td><td><span class="pill bad">Open (hard blocker)</span></td><td>Python queues the context on <code>on_client_connected</code>; Go seeds the context but never pushes it until real user speech.</td></tr>
+          <tr><td>M10</td><td>Initial seeded context queued on client connect.</td><td><span class="pill ok">Done</span></td><td><code>SalesCallBot</code> queues one <code>InitialLLMContextFrame</code> after Daily user join; the resulting <code>InitialContext</code> LLM frame does not arm the talk-time timer.</td></tr>
         </tbody>
       </table>
 
@@ -782,7 +772,7 @@ SENTRY_DSN, SENTRY_ENVIRONMENT, SENTRY_RELEASE                  # error reportin
           <tr><td>S7</td><td>Daily <code>ping</code>/<code>pong</code> for browser keepalive.</td><td><span class="pill ok">Done</span></td></tr>
           <tr><td>S8</td><td>Global 120 s no-frames safety net (Python's <code>cancel_on_idle_timeout</code>).</td><td><span class="pill todo">Open</span></td></tr>
           <tr><td>S9</td><td>Atexit alert on abrupt shutdown (depends on Sentry).</td><td><span class="pill ok">Done</span></td></tr>
-          <tr><td>S10</td><td>RTVI <code>client-ready</code> / bot-ready response.</td><td><span class="pill todo">Open</span></td></tr>
+          <tr><td>S10</td><td>RTVI <code>client-ready</code> / bot-ready response.</td><td><span class="pill ok">Done</span></td></tr>
           <tr><td>S11</td><td>Debug-log exactness: Python skips interim user transcriptions; Go currently buffers them.</td><td><span class="pill todo">Open / decide</span></td></tr>
           <tr><td>S12</td><td>Talk-time exhaustion sentence and timer start point differ from Python.</td><td><span class="pill todo">Open / small</span></td></tr>
         </tbody>
@@ -801,7 +791,6 @@ SENTRY_DSN, SENTRY_ENVIRONMENT, SENTRY_RELEASE                  # error reportin
     <section id="cutover">
       <h2>11. Cutover plan if you decide to ship</h2>
       <ol>
-        <li><strong>Fix the initial context kickoff (M10).</strong> Queue the seeded context once the Daily user/client is connected so fresh calls open with the bot, matching Python.</li>
         <li><strong>Land the LLM swap (M2).</strong> Until then, every staging call still goes through OpenAI <code>gpt-4.1</code>, which is fine for plumbing tests but not for real conversion measurement.</li>
         <li><strong>Seed staging Redis with the sales-call documents</strong> at <code>document:sales_call/main_sys-3day_v2:production</code> (and the two campaign variants). Disha's main app already writes these; if you point talk-go at a fresh Redis you need to pre-warm them.</li>
         <li><strong>Smoke test the phonetic filter</strong> by listening to a Hindi turn and confirming brand names sound right. <code>PhoneticDict.Preload</code> emits a log line with the dictionary size at boot.</li>

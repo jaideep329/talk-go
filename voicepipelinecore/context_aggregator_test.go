@@ -73,6 +73,35 @@ func TestContextAggregator_InitialMessagesSeedLLMContext(t *testing.T) {
 	}
 }
 
+func TestContextAggregator_InitialLLMContextFramePushesSeededMessages(t *testing.T) {
+	fix := newTestFixture(t)
+	a := NewContextAggregator(fix.TaskCtx, []Message{
+		{Role: "system", Content: "seed context"},
+		{Role: "user", Content: "hello?"},
+	})
+
+	down, _ := runProcessorTest(t, fix, runConfig{
+		processor: a,
+		framesToSend: []Frame{
+			NewInitialLLMContextFrame(),
+		},
+		sendEndFrame: true,
+	})
+
+	llmMsg, ok := findFrame[LLMMessagesFrame](down)
+	if !ok {
+		t.Fatalf("expected LLMMessagesFrame, got %s", describeFrameTypes(down))
+	}
+	if !llmMsg.InitialContext {
+		t.Fatal("InitialContext = false, want true")
+	}
+	if len(llmMsg.Messages) != 2 ||
+		llmMsg.Messages[0]["content"] != "seed context" ||
+		llmMsg.Messages[1]["content"] != "hello?" {
+		t.Fatalf("messages = %+v, want seeded context", llmMsg.Messages)
+	}
+}
+
 func TestContextAggregator_ExplicitEmptyInitialMessagesSkipsDefaultPrompt(t *testing.T) {
 	fix := newTestFixture(t)
 	a := NewContextAggregator(fix.TaskCtx, []Message{})

@@ -97,6 +97,7 @@ const (
 	BotStoppedSpeaking
 	LLMMessages
 	Error
+	InitialLLMContext
 )
 
 type AudioFrame struct {
@@ -269,16 +270,37 @@ func (f BotStoppedSpeakingFrame) Clone() Frame          { return NewBotStoppedSp
 
 type LLMMessagesFrame struct {
 	FrameBase
-	Messages []map[string]string
+	Messages       []map[string]string
+	InitialContext bool
 }
 
 func NewLLMMessagesFrame(messages []map[string]string) LLMMessagesFrame {
 	return LLMMessagesFrame{FrameBase: FrameBase{Meta: newFrameMeta("LLMMessagesFrame")}, Messages: messages}
 }
 
+func NewInitialLLMMessagesFrame(messages []map[string]string) LLMMessagesFrame {
+	return LLMMessagesFrame{
+		FrameBase:      FrameBase{Meta: newFrameMeta("LLMMessagesFrame")},
+		Messages:       messages,
+		InitialContext: true,
+	}
+}
+
 func (f LLMMessagesFrame) FrameType() FrameType  { return LLMMessages }
 func (f LLMMessagesFrame) IsSystem() bool        { return false }
 func (f LLMMessagesFrame) IsInterruptible() bool { return true }
+
+type InitialLLMContextFrame struct {
+	FrameBase
+}
+
+func NewInitialLLMContextFrame() InitialLLMContextFrame {
+	return InitialLLMContextFrame{FrameBase: FrameBase{Meta: newFrameMeta("InitialLLMContextFrame")}}
+}
+
+func (f InitialLLMContextFrame) FrameType() FrameType  { return InitialLLMContext }
+func (f InitialLLMContextFrame) IsSystem() bool        { return false }
+func (f InitialLLMContextFrame) IsInterruptible() bool { return true }
 
 // ErrorFrame propagates an error upstream so the source can react
 // (log + optionally end the task on Fatal). Mirrors Pipecat's ErrorFrame:

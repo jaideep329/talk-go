@@ -22,6 +22,8 @@ const botIdentity = "bot"
 
 const dailyJoinRetries = 3
 
+const rtviProtocolVersion = "1.2.0"
+
 var (
 	dailyJoinRetryDelay = time.Second
 	dailyJoinTimeout    = 20 * time.Second
@@ -334,6 +336,10 @@ func (r *DailyRoom) handleAppMessage(raw json.RawMessage) {
 		r.sendLegacyPong()
 		return
 	}
+	if msg.Label == rtviDebugLabel && msg.Type == "client-ready" {
+		r.sendRTVIBotReady(msg.ID)
+		return
+	}
 	if msg.Label != rtviDebugLabel || msg.Type != "client-message" {
 		return
 	}
@@ -359,9 +365,7 @@ func (r *DailyRoom) sendLegacyPong() {
 }
 
 func (r *DailyRoom) sendRTVIServerResponse(id, messageType string, data any) {
-	if strings.TrimSpace(id) == "" {
-		id = fmt.Sprintf("go-%d", time.Now().UnixNano())
-	}
+	id = rtviMessageID(id)
 	resp := map[string]any{
 		"label": rtviDebugLabel,
 		"type":  "server-response",
@@ -382,6 +386,38 @@ func (r *DailyRoom) sendRTVIServerResponse(id, messageType string, data any) {
 			},
 		})
 	}
+}
+
+func (r *DailyRoom) sendRTVIBotReady(id string) {
+	id = rtviMessageID(id)
+	msg := map[string]any{
+		"label": rtviDebugLabel,
+		"type":  "bot-ready",
+		"id":    id,
+		"data": map[string]any{
+			"version": rtviProtocolVersion,
+			"about": map[string]any{
+				"library": "talk-go",
+			},
+		},
+	}
+	if err := r.SendAppMessage(msg); err != nil {
+		r.log("[%s] RTVI bot-ready publish error: %v", r.roomName, err)
+		sentryutil.Capture(sentryutil.Event{
+			Err:  err,
+			Tags: map[string]string{"component": "daily", "operation": "rtvi_bot_ready"},
+			Details: map[string]any{
+				"id": id,
+			},
+		})
+	}
+}
+
+func rtviMessageID(id string) string {
+	if strings.TrimSpace(id) != "" {
+		return id
+	}
+	return fmt.Sprintf("go-%d", time.Now().UnixNano())
 }
 
 func (r *DailyRoom) markUserJoined(participantID string) {

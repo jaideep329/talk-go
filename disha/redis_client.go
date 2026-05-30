@@ -26,7 +26,9 @@ var ErrConversationDataNotFound = errors.New("disha: conversation_data not found
 type RedisClient interface {
 	GetConversationData(ctx context.Context, conversationID string) (*ConversationData, error)
 	GetCache(ctx context.Context, key string) ([]byte, bool, error)
+	MGetCache(ctx context.Context, keys ...string) ([][]byte, error)
 	SetCache(ctx context.Context, key string, value any, expiration time.Duration) error
+	AcquireLock(ctx context.Context, key string, ttl time.Duration) (bool, error)
 	AppendChunk(ctx context.Context, userID, conversationID string, chunk ConversationChunk) error
 	Close() error
 }
@@ -145,6 +147,54 @@ func (c *redisClient) GetCache(ctx context.Context, key string) ([]byte, bool, e
 		return nil, false, wrapped
 	}
 	return raw, true, nil
+}
+
+// MGetCache fetches multiple cache keys in a single round trip. The
+// returned slice has one entry per requested key, in order; a nil entry
+// means that key was absent (redis.Nil). Used by the LLM router to read
+// all of a model group's endpoint-health keys at once.
+func (c *redisClient) MGetCache(ctx context.Context, keys ...string) ([][]byte, error) {
+	if len(keys) == 0 {
+		return nil, nil
+	}
+	var vals []any
+	err := withRedisTimeoutRetry(ctx, func() error {
+		var getErr error
+		vals, getErr = c.rdb.MGet(ctx, keys...).Result()
+		return getErr
+	})
+	if err != nil {
+		return nil, fmt.Errorf("disha: redis MGET failed: %w", err)
+	}
+	out := make([][]byte, len(keys))
+	for i := range keys {
+		if i >= len(vals) || vals[i] == nil {
+			continue
+		}
+		switch v := vals[i].(type) {
+		case string:
+			out[i] = []byte(v)
+		case []byte:
+			out[i] = v
+		}
+	}
+	return out, nil
+}
+
+// AcquireLock performs a SET NX with expiry, returning whether the lock
+// was acquired. Mirrors Disha's acquire_redis_lock; used to gate the
+// LLM re-poll trigger so it isn't fired concurrently.
+func (c *redisClient) AcquireLock(ctx context.Context, key string, ttl time.Duration) (bool, error) {
+	var acquired bool
+	err := withRedisTimeoutRetry(ctx, func() error {
+		var setErr error
+		acquired, setErr = c.rdb.SetNX(ctx, key, "1", ttl).Result()
+		return setErr
+	})
+	if err != nil {
+		return false, fmt.Errorf("disha: redis SETNX %s failed: %w", key, err)
+	}
+	return acquired, nil
 }
 
 func (c *redisClient) SetCache(ctx context.Context, key string, value any, expiration time.Duration) error {

@@ -365,65 +365,6 @@ func TestSalesCallBotPlanSeedsHelloWhenNoPriorChunks(t *testing.T) {
 	}
 }
 
-func TestSalesStartupContextStarterQueuesExistingContextFrameOnce(t *testing.T) {
-	starter := &salesStartupContextStarter{}
-	target := &captureProcessor{}
-	providerCalls := 0
-	provider := func() (voicepipelinecore.LLMMessagesFrame, bool) {
-		providerCalls++
-		return voicepipelinecore.NewLLMMessagesFrame([]map[string]string{
-			{"role": "system", "content": "seed"},
-			{"role": "user", "content": "hello?"},
-		}), true
-	}
-
-	starter.UserJoined()
-	if len(target.frames) != 0 {
-		t.Fatalf("frames before Attach = %d, want 0", len(target.frames))
-	}
-	starter.Attach(target, provider)
-	starter.UserJoined()
-
-	if providerCalls != 1 {
-		t.Fatalf("provider calls = %d, want 1", providerCalls)
-	}
-	if len(target.frames) != 1 {
-		t.Fatalf("queued frames = %d, want 1", len(target.frames))
-	}
-	frame, ok := target.frames[0].(voicepipelinecore.LLMMessagesFrame)
-	if !ok {
-		t.Fatalf("frame type = %T, want LLMMessagesFrame", target.frames[0])
-	}
-	if len(frame.Messages) != 2 || frame.Messages[1]["content"] != "hello?" {
-		t.Fatalf("frame messages = %+v, want seeded context", frame.Messages)
-	}
-}
-
-type captureProcessor struct {
-	frames []voicepipelinecore.Frame
-}
-
-func (p *captureProcessor) Name() string { return "capture" }
-func (p *captureProcessor) Prev() voicepipelinecore.Processor {
-	return nil
-}
-func (p *captureProcessor) Next() voicepipelinecore.Processor {
-	return nil
-}
-func (p *captureProcessor) Link(next voicepipelinecore.Processor) {}
-func (p *captureProcessor) SetPrev(prev voicepipelinecore.Processor) {
-}
-func (p *captureProcessor) QueueFrame(frame voicepipelinecore.Frame, dir voicepipelinecore.Direction) {
-	p.frames = append(p.frames, frame)
-}
-func (p *captureProcessor) ProcessFrame(ctx context.Context, frame voicepipelinecore.Frame, dir voicepipelinecore.Direction) {
-}
-func (p *captureProcessor) PushFrame(frame voicepipelinecore.Frame, dir voicepipelinecore.Direction) {
-}
-func (p *captureProcessor) Broadcast(frame voicepipelinecore.BroadcastableFrame) {}
-func (p *captureProcessor) Start(ctx context.Context)                            {}
-func (p *captureProcessor) Stop()                                                {}
-
 func TestSalesCallBotPlanPicksCampaignPrompt(t *testing.T) {
 	redisServer, redisClient := newRedisTestClient(t)
 	apiServer, _ := newCallAPIServer(t)

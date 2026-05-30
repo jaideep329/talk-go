@@ -97,6 +97,7 @@ const (
 	BotStoppedSpeaking
 	LLMMessages
 	Error
+	LLMMessagesAppend
 )
 
 type AudioFrame struct {
@@ -307,3 +308,27 @@ func NewErrorFrame(processor, errMsg string, fatal bool) ErrorFrame {
 func (f ErrorFrame) FrameType() FrameType  { return Error }
 func (f ErrorFrame) IsSystem() bool        { return true }
 func (f ErrorFrame) IsInterruptible() bool { return false }
+
+// LLMMessagesAppendFrame appends messages to the conversation context and
+// optionally runs the LLM. Mirrors Pipecat's LLMMessagesAppendFrame.
+// ContextAggregator handles it: it appends Messages (if any) to its
+// context, and when RunLLM is set it emits an LLMMessagesFrame for the
+// current context. Pushing one with no Messages and RunLLM=true is how
+// the bot takes the first turn (greet-first) from the initial context.
+type LLMMessagesAppendFrame struct {
+	FrameBase
+	Messages []Message
+	RunLLM   bool
+}
+
+func NewLLMMessagesAppendFrame(messages []Message, runLLM bool) LLMMessagesAppendFrame {
+	return LLMMessagesAppendFrame{
+		FrameBase: FrameBase{Meta: newFrameMeta("LLMMessagesAppendFrame")},
+		Messages:  messages,
+		RunLLM:    runLLM,
+	}
+}
+
+func (f LLMMessagesAppendFrame) FrameType() FrameType  { return LLMMessagesAppend }
+func (f LLMMessagesAppendFrame) IsSystem() bool        { return false }
+func (f LLMMessagesAppendFrame) IsInterruptible() bool { return true }

@@ -4,15 +4,23 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/jaideep329/talk-go/voicepipelinecore"
+	"github.com/jaideep329/talk-go/voicepipelinecore/llmrouter"
 )
 
 const (
 	SalesCallBotType        = "sales_call"
 	lifetimeTalkTimeSeconds = 600
+
+	// salesModelGroup is the LLM model group the sales call selects from.
+	// Matches Python's model_group="grok-4.1-fast-sales".
+	salesModelGroup = "grok-4.1-fast-sales"
+
+	// salesUsecaseType matches Python's
+	// UsecaseType.SALES_CALL_CONVERSATION; it tags this call's LLM logs.
+	salesUsecaseType = "sales_call_conversation"
 
 	// Prompt names in the Disha document store. Same as Python's
 	// bots/sales_call/sales_call.py.
@@ -102,20 +110,10 @@ func (b SalesCallBot) BuildTask(ctx context.Context, req BotTaskRequest, deps De
 		return nil, err
 	}
 
-	startupContext := &salesStartupContextStarter{}
-	callEvents := pl.Callbacks.Events()
-	onUserJoined := callEvents.OnUserJoined
-	callEvents.OnUserJoined = func(at time.Time) {
-		startupContext.UserJoined()
-		if onUserJoined != nil {
-			onUserJoined(at)
-		}
-	}
-
 	task, err := voicepipelinecore.NewPipelineTask(ctx, voicepipelinecore.TaskConfig{
 		Logger:     pl.Startup.Logger,
 		SessionID:  pl.Startup.ConversationID,
-		CallEvents: callEvents,
+		CallEvents: pl.Callbacks.Events(),
 	})
 	if err != nil {
 		return nil, err
@@ -142,7 +140,7 @@ func (b SalesCallBot) BuildTask(ctx context.Context, req BotTaskRequest, deps De
 		MainAgentSystemPromptLangfuseKey: pl.PromptKey,
 	})
 	talkTime := voicepipelinecore.NewTalkTimeMonitoringProcessorWithMaxTalkTime(taskCtx, pl.MaxTalkTime)
-	llm := voicepipelinecore.NewLLMProcessor(taskCtx)
+	llm := voicepipelinecore.NewLLMProcessorWithClient(taskCtx, newSalesLLMClient(deps, pl.Startup))
 	tts := voicepipelinecore.NewTTSProcessor(taskCtx, pl.PhoneticDict)
 	playback := voicepipelinecore.NewPlaybackSinkProcessor(taskCtx)
 	sink := voicepipelinecore.NewPipelineSinkProcessor(taskCtx, task.CompleteEnd)
@@ -160,45 +158,7 @@ func (b SalesCallBot) BuildTask(ctx context.Context, req BotTaskRequest, deps De
 		sink,
 	})
 	task.SetPipeline(source, pipeline)
-	startupContext.Attach(llm, contextAggregator.ContextFrame)
 	return task, nil
-}
-
-type salesContextFrameProvider func() (voicepipelinecore.LLMMessagesFrame, bool)
-
-type salesStartupContextStarter struct {
-	mu           sync.Mutex
-	target       voicepipelinecore.Processor
-	contextFrame salesContextFrameProvider
-	pending      bool
-	queued       bool
-}
-
-func (s *salesStartupContextStarter) UserJoined() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.pending = true
-	s.queueLocked()
-}
-
-func (s *salesStartupContextStarter) Attach(target voicepipelinecore.Processor, contextFrame salesContextFrameProvider) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.target = target
-	s.contextFrame = contextFrame
-	s.queueLocked()
-}
-
-func (s *salesStartupContextStarter) queueLocked() {
-	if !s.pending || s.queued || s.target == nil || s.contextFrame == nil {
-		return
-	}
-	frame, ok := s.contextFrame()
-	if !ok {
-		return
-	}
-	s.queued = true
-	s.target.QueueFrame(frame, voicepipelinecore.Downstream)
 }
 
 // loadSalesPrompt picks the prompt name based on
@@ -239,6 +199,29 @@ func loadSalesPrompt(ctx context.Context, store *DocumentStore, startup CallStar
 		return "", "", 0, fmt.Errorf("disha: sales prompt %q is empty", name)
 	}
 	return text, name, version, nil
+}
+
+// newSalesLLMClient builds the health-based LLM router for the sales
+// call (model group grok-4.1-fast-sales, region us, temperature 0). On
+// any construction error it returns nil, which NewLLMProcessorWithClient
+// treats as a fallback to the default OpenAI gpt-4.1 client so a call
+// can still proceed.
+func newSalesLLMClient(deps Deps, startup CallStartup) voicepipelinecore.LLMClient {
+	logger := startup.Logger
+	router, err := llmrouter.New(llmrouter.Config{
+		Group:   salesModelGroup,
+		Region:  "us",
+		Redis:   deps.Redis,
+		Logger:  logger,
+		LogSink: newLLMLogSink(deps.API, logger, salesUsecaseType, startup.UserID, startup.ConversationID),
+	})
+	if err != nil {
+		if logger != nil {
+			logger.Printf("disha: LLM router init failed, using default OpenAI client: %v\n", err)
+		}
+		return nil
+	}
+	return router
 }
 
 func salesTalkTimeLimit(remainingSeconds *float64) time.Duration {

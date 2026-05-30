@@ -28,7 +28,7 @@ func normalizeEndReason(reason EndReason) EndReason {
 	return reason
 }
 
-// CallStats is delivered with TaskOptions.OnCallEnded.
+// CallStats is delivered with CallEvents.OnCallEnded.
 type CallStats struct {
 	TotalUserDurationSec  float64
 	FirstUserAudioFrameAt time.Time

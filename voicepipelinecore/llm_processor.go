@@ -36,9 +36,11 @@ type LLMResult struct {
 // transport concerns (endpoint selection, auth, health write-backs);
 // the LLMProcessor owns pipeline framing, metrics, and cancellation.
 //
-// The signature deliberately uses only stdlib types so implementers
-// (e.g. the llmrouter package) need not import voicepipelinecore, which
-// keeps this package free of any business/transport dependency.
+// Inputs are plain stdlib types; the only core type in the contract is
+// the small LLMResult return value, so an implementer (e.g. the
+// llmrouter package) imports voicepipelinecore just for that. The
+// dependency runs one way — the core never imports the implementer — so
+// the pipeline package stays free of any business/transport dependency.
 type LLMClient interface {
 	Stream(ctx context.Context, messages []map[string]string, onToken func(string)) (LLMResult, error)
 }
@@ -132,14 +134,25 @@ func (p *LLMProcessor) runLLM(ctx context.Context, messages []map[string]string)
 	}
 
 	result, err := p.client.Stream(ctx, messages, onToken)
-	if err != nil {
-		if ctx.Err() == nil {
-			p.taskCtx.Logger.Println("LLM stream failed:", err)
-		}
+
+	// Cancellation (barge-in / EndFrame) takes precedence: the interrupt/
+	// end path already reset TTS + playback, so we must NOT emit terminal
+	// frames here (they'd be processed after the reset).
+	if ctx.Err() != nil {
 		p.emitLLMCallResult(result.Model, ttfbMs, 0, "interrupted")
 		return
 	}
-	if ctx.Err() != nil {
+	if err != nil {
+		// Live endpoint error (the router has already blacklisted +
+		// triggered a re-poll). The turn fails but the call continues
+		// (Python parity: the next turn re-selects). Close the turn so
+		// the pipeline returns to a terminal state — LLMResponseEndFrame
+		// makes TTS flush any partial text and emit TTSDoneFrame, which
+		// PlaybackSink turns into BotStoppedSpeaking so UserIdleProcessor
+		// arms its prompt loop. Otherwise the caller sits in silence
+		// until the 120s watchdog.
+		p.taskCtx.Logger.Println("LLM stream failed:", err)
+		p.PushFrame(NewLLMResponseEndFrame(), Downstream)
 		p.emitLLMCallResult(result.Model, ttfbMs, 0, "interrupted")
 		return
 	}

@@ -336,6 +336,22 @@
               startVideoOff: true,
               startAudioOff: false,
             });
+            try {
+              await _call.sendAppMessage({
+                label: "rtvi-ai",
+                type: "client-ready",
+                id: `client-ready-${Date.now()}`,
+                data: {
+                  version: "1.2.0",
+                  about: {
+                    library: "talk-go-daily-client",
+                    platform: "browser",
+                  },
+                },
+              }, "*");
+            } catch (err) {
+              console.warn("sendAppMessage(client-ready) failed:", err);
+            }
             _call.setLocalAudio(true);
             this.connected = true;
             this.connecting = false;

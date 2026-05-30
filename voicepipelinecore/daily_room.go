@@ -14,9 +14,20 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/jaideep329/talk-go/internal/sentryutil"
 )
 
 const botIdentity = "bot"
+
+const dailyJoinRetries = 3
+
+const rtviProtocolVersion = "1.2.0"
+
+var (
+	dailyJoinRetryDelay = time.Second
+	dailyJoinTimeout    = 20 * time.Second
+)
 
 type dailyBridgeEvent struct {
 	Event         string          `json:"event"`
@@ -32,6 +43,18 @@ type dailyBridgeEvent struct {
 type dailyBridgeCommand struct {
 	Type string      `json:"type"`
 	Data interface{} `json:"data,omitempty"`
+}
+
+type dailyAppMessage struct {
+	Label string          `json:"label"`
+	Type  string          `json:"type"`
+	ID    string          `json:"id"`
+	Data  json.RawMessage `json:"data"`
+}
+
+type rtviClientMessageData struct {
+	T string `json:"t"`
+	D any    `json:"d,omitempty"`
 }
 
 // DailyRoom owns the Daily media bridge process. Daily's official
@@ -58,11 +81,44 @@ func JoinDailyRoom(roomURL, token string, taskCtx *TaskContext, audioSource *Aud
 	if roomURL == "" {
 		return nil, errors.New("daily room url is required")
 	}
-	python := strings.TrimSpace(os.Getenv("DAILY_BRIDGE_PYTHON"))
+	python, script := dailyBridgeConfig()
+	var lastErr error
+	for attempt := 1; attempt <= dailyJoinRetries; attempt++ {
+		room, err := startDailyRoomAttempt(roomURL, token, python, script, taskCtx, audioSource)
+		if err == nil {
+			return room, nil
+		}
+		lastErr = err
+		if taskCtx != nil && taskCtx.Logger != nil {
+			taskCtx.Logger.Printf("Daily join attempt %d/%d failed: %v\n", attempt, dailyJoinRetries, err)
+		}
+		if attempt < dailyJoinRetries {
+			done := taskDone(taskCtx)
+			select {
+			case <-time.After(dailyJoinRetryDelay):
+			case <-done:
+				return nil, taskCtx.Ctx.Err()
+			}
+		}
+	}
+	err := fmt.Errorf("failed to join Daily room after %d attempts: %w", dailyJoinRetries, lastErr)
+	sentryutil.Capture(sentryutil.Event{
+		Err:  err,
+		Tags: map[string]string{"component": "daily", "operation": "join"},
+		Details: map[string]any{
+			"room_url": roomURL,
+			"attempts": dailyJoinRetries,
+		},
+	})
+	return nil, err
+}
+
+func dailyBridgeConfig() (python, script string) {
+	python = strings.TrimSpace(os.Getenv("DAILY_BRIDGE_PYTHON"))
 	if python == "" {
 		python = "python3"
 	}
-	script := strings.TrimSpace(os.Getenv("DAILY_BRIDGE_SCRIPT"))
+	script = strings.TrimSpace(os.Getenv("DAILY_BRIDGE_SCRIPT"))
 	if script == "" {
 		script = "daily_bridge.py"
 	}
@@ -71,7 +127,10 @@ func JoinDailyRoom(roomURL, token string, taskCtx *TaskContext, audioSource *Aud
 			script = filepath.Join(wd, script)
 		}
 	}
+	return python, script
+}
 
+func startDailyRoomAttempt(roomURL, token, python, script string, taskCtx *TaskContext, audioSource *AudioSourceProcessor) (*DailyRoom, error) {
 	cmd := exec.Command(python, script, "--room-url", roomURL, "--token", token, "--bot-name", "Chatbot")
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -117,11 +176,18 @@ func JoinDailyRoom(roomURL, token string, taskCtx *TaskContext, audioSource *Aud
 			room.Disconnect()
 			return nil, err
 		}
-	case <-time.After(20 * time.Second):
+	case <-time.After(dailyJoinTimeout):
 		room.Disconnect()
 		return nil, errors.New("daily bridge join timed out")
 	}
 	return room, nil
+}
+
+func taskDone(taskCtx *TaskContext) <-chan struct{} {
+	if taskCtx == nil || taskCtx.Ctx == nil {
+		return nil
+	}
+	return taskCtx.Ctx.Done()
 }
 
 func (r *DailyRoom) RoomURL() string {
@@ -244,14 +310,20 @@ func (r *DailyRoom) handleEvent(event dailyBridgeEvent) {
 			message = "daily bridge error"
 		}
 		r.log("[%s] %s", r.roomName, message)
-		r.finishJoin(errors.New(message))
+		err := errors.New(message)
+		sentryutil.Capture(sentryutil.Event{
+			Err:  err,
+			Tags: map[string]string{"component": "daily", "operation": "bridge_event"},
+			Details: map[string]any{
+				"room_name": r.roomName,
+			},
+		})
+		r.finishJoin(err)
 	}
 }
 
 func (r *DailyRoom) handleAppMessage(raw json.RawMessage) {
-	var msg struct {
-		Type string `json:"type"`
-	}
+	var msg dailyAppMessage
 	if err := json.Unmarshal(raw, &msg); err != nil {
 		r.log("[%s] Daily app message malformed: %v", r.roomName, err)
 		return
@@ -259,7 +331,94 @@ func (r *DailyRoom) handleAppMessage(raw json.RawMessage) {
 	if msg.Type == "end_call" {
 		r.log("[%s] UI requested end_call via Daily app message", r.roomName)
 		r.endTask(EndReasonClientDisconnect)
+		return
 	}
+	if msg.Type == "ping" {
+		r.sendLegacyPong()
+		return
+	}
+	if msg.Label == rtviDebugLabel && msg.Type == "client-ready" {
+		r.sendRTVIBotReady(msg.ID)
+		return
+	}
+	if msg.Label != rtviDebugLabel || msg.Type != "client-message" {
+		return
+	}
+	var data rtviClientMessageData
+	if err := json.Unmarshal(msg.Data, &data); err != nil {
+		r.log("[%s] RTVI client-message malformed: %v", r.roomName, err)
+		return
+	}
+	switch data.T {
+	case "ping":
+		r.sendRTVIServerResponse(msg.ID, data.T, "pong")
+	}
+}
+
+func (r *DailyRoom) sendLegacyPong() {
+	if err := r.SendAppMessage(map[string]any{"type": "pong"}); err != nil {
+		r.log("[%s] Daily pong publish error: %v", r.roomName, err)
+		sentryutil.Capture(sentryutil.Event{
+			Err:  err,
+			Tags: map[string]string{"component": "daily", "operation": "legacy_pong"},
+		})
+	}
+}
+
+func (r *DailyRoom) sendRTVIServerResponse(id, messageType string, data any) {
+	id = rtviMessageID(id)
+	resp := map[string]any{
+		"label": rtviDebugLabel,
+		"type":  "server-response",
+		"id":    id,
+		"data": map[string]any{
+			"t": messageType,
+			"d": data,
+		},
+	}
+	if err := r.SendAppMessage(resp); err != nil {
+		r.log("[%s] RTVI server-response publish error: %v", r.roomName, err)
+		sentryutil.Capture(sentryutil.Event{
+			Err:  err,
+			Tags: map[string]string{"component": "daily", "operation": "rtvi_server_response"},
+			Details: map[string]any{
+				"id":   id,
+				"type": messageType,
+			},
+		})
+	}
+}
+
+func (r *DailyRoom) sendRTVIBotReady(id string) {
+	id = rtviMessageID(id)
+	msg := map[string]any{
+		"label": rtviDebugLabel,
+		"type":  "bot-ready",
+		"id":    id,
+		"data": map[string]any{
+			"version": rtviProtocolVersion,
+			"about": map[string]any{
+				"library": "talk-go",
+			},
+		},
+	}
+	if err := r.SendAppMessage(msg); err != nil {
+		r.log("[%s] RTVI bot-ready publish error: %v", r.roomName, err)
+		sentryutil.Capture(sentryutil.Event{
+			Err:  err,
+			Tags: map[string]string{"component": "daily", "operation": "rtvi_bot_ready"},
+			Details: map[string]any{
+				"id": id,
+			},
+		})
+	}
+}
+
+func rtviMessageID(id string) string {
+	if strings.TrimSpace(id) != "" {
+		return id
+	}
+	return fmt.Sprintf("go-%d", time.Now().UnixNano())
 }
 
 func (r *DailyRoom) markUserJoined(participantID string) {

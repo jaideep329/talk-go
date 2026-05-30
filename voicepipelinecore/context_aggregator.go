@@ -10,28 +10,29 @@ const minBargeInWords = 3
 
 type ContextAggregator struct {
 	*BaseProcessor
-	taskCtx           *TaskContext
-	messages          []map[string]string
-	currentTranscript string
-	spokenWords       []string
-	interimTranscript string
-	interimResponseID int
-	interruptSent     bool
-	botSpeaking       bool
-	useDefaultPrompt  bool
+	taskCtx                          *TaskContext
+	messages                         []map[string]string
+	currentTranscript                string
+	spokenWords                      []string
+	interimTranscript                string
+	interimResponseID                int
+	interruptSent                    bool
+	botSpeaking                      bool
+	useDefaultPrompt                 bool
+	mainAgentSystemPromptLangfuseKey string
 }
 
-func NewContextAggregator(taskCtx *TaskContext, initialMessages ...[]Message) *ContextAggregator {
-	useDefaultPrompt := true
+func NewContextAggregator(taskCtx *TaskContext, initialMessages []Message, mainAgentSystemPromptLangfuseKey string) *ContextAggregator {
+	useDefaultPrompt := initialMessages == nil
 	messages := []map[string]string{}
-	if len(initialMessages) > 0 {
-		useDefaultPrompt = false
-		messages = messagesFromInitial(initialMessages[0])
+	if !useDefaultPrompt {
+		messages = messagesFromInitial(initialMessages)
 	}
 	a := &ContextAggregator{
-		taskCtx:          taskCtx,
-		messages:         messages,
-		useDefaultPrompt: useDefaultPrompt,
+		taskCtx:                          taskCtx,
+		messages:                         messages,
+		useDefaultPrompt:                 useDefaultPrompt,
+		mainAgentSystemPromptLangfuseKey: mainAgentSystemPromptLangfuseKey,
 	}
 	a.BaseProcessor = NewBaseProcessor("ContextAggregator", a, taskCtx)
 	return a
@@ -46,6 +47,18 @@ func messagesFromInitial(initial []Message) []map[string]string {
 		messages = append(messages, map[string]string{"role": msg.Role, "content": msg.Content})
 	}
 	return messages
+}
+
+func cloneMessages(messages []map[string]string) []map[string]string {
+	out := make([]map[string]string, len(messages))
+	for i, msg := range messages {
+		copied := make(map[string]string, len(msg))
+		for k, v := range msg {
+			copied[k] = v
+		}
+		out[i] = copied
+	}
+	return out
 }
 
 func (a *ContextAggregator) appendWords(words []string) {
@@ -129,7 +142,7 @@ func (a *ContextAggregator) commitSpokenText(interrupted bool) {
 			metrics = a.taskCtx.metrics.snapshotAndReset()
 		}
 		if a.taskCtx.callEvents != nil {
-			a.taskCtx.callEvents.fireAssistantTurnCommitted(spoken, time.Now(), metrics)
+			a.taskCtx.callEvents.fireAssistantTurnCommitted(spoken, time.Now(), metrics, a.mainAgentSystemPromptLangfuseKey)
 		}
 		if interrupted {
 			a.taskCtx.UIEvents.BotStoppedSpeaking(time.Now())
@@ -158,7 +171,7 @@ func (a *ContextAggregator) addUserMessage(text string) {
 	}
 	a.taskCtx.UIEvents.UserTranscription(text, true, at)
 	if a.taskCtx.callEvents != nil {
-		a.taskCtx.callEvents.fireUserTurnCommitted(text, at)
+		a.taskCtx.callEvents.fireUserTurnCommitted(text, at, a.mainAgentSystemPromptLangfuseKey)
 	}
 }
 
@@ -178,7 +191,7 @@ You are conducting your first telephonic consultation with a new client. You are
 	a.spokenWords = nil
 	a.resetInterimTranscript()
 	a.resetFinalTranscript()
-	a.PushFrame(NewLLMMessagesFrame(a.messages), Downstream)
+	a.PushFrame(NewLLMMessagesFrame(cloneMessages(a.messages)), Downstream)
 }
 
 func (a *ContextAggregator) ProcessFrame(ctx context.Context, frame Frame, dir Direction) {
@@ -201,7 +214,7 @@ func (a *ContextAggregator) ProcessFrame(ctx context.Context, frame Frame, dir D
 				return
 			}
 			a.taskCtx.Logger.Println("Running LLM turn from appended context (greet-first / injected)")
-			a.PushFrame(NewLLMMessagesFrame(a.messages), Downstream)
+			a.PushFrame(NewLLMMessagesFrame(cloneMessages(a.messages)), Downstream)
 		}
 	case TranscriptFrame:
 		interimTranscript := a.updateInterimTranscript(f)

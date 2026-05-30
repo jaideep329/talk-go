@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jaideep329/talk-go/internal/sentryutil"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -98,12 +99,28 @@ func (c *redisClient) GetConversationData(ctx context.Context, conversationID st
 		return nil, fmt.Errorf("%w: %s", ErrConversationDataNotFound, conversationID)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("disha: redis GET %s failed: %w", key, err)
+		wrapped := fmt.Errorf("disha: redis GET %s failed: %w", key, err)
+		sentryutil.Capture(sentryutil.Event{
+			Err:  wrapped,
+			Tags: map[string]string{"component": "disha_redis", "operation": "GET"},
+			Details: map[string]any{
+				"key": key,
+			},
+		})
+		return nil, wrapped
 	}
 
 	var data ConversationData
 	if err := json.Unmarshal(raw, &data); err != nil {
-		return nil, fmt.Errorf("disha: conversation_data malformed for %s: %w", conversationID, err)
+		wrapped := fmt.Errorf("disha: conversation_data malformed for %s: %w", conversationID, err)
+		sentryutil.Capture(sentryutil.Event{
+			Err:  wrapped,
+			Tags: map[string]string{"component": "disha_redis", "operation": "UNMARSHAL"},
+			Details: map[string]any{
+				"key": key,
+			},
+		})
+		return nil, wrapped
 	}
 	return &data, nil
 }
@@ -119,7 +136,15 @@ func (c *redisClient) GetCache(ctx context.Context, key string) ([]byte, bool, e
 		return nil, false, nil
 	}
 	if err != nil {
-		return nil, false, fmt.Errorf("disha: redis GET %s failed: %w", key, err)
+		wrapped := fmt.Errorf("disha: redis GET %s failed: %w", key, err)
+		sentryutil.Capture(sentryutil.Event{
+			Err:  wrapped,
+			Tags: map[string]string{"component": "disha_redis", "operation": "GET"},
+			Details: map[string]any{
+				"key": key,
+			},
+		})
+		return nil, false, wrapped
 	}
 	return raw, true, nil
 }
@@ -175,12 +200,28 @@ func (c *redisClient) AcquireLock(ctx context.Context, key string, ttl time.Dura
 func (c *redisClient) SetCache(ctx context.Context, key string, value any, expiration time.Duration) error {
 	payload, err := json.Marshal(value)
 	if err != nil {
-		return fmt.Errorf("disha: cache marshal failed: %w", err)
+		wrapped := fmt.Errorf("disha: cache marshal failed: %w", err)
+		sentryutil.Capture(sentryutil.Event{
+			Err:  wrapped,
+			Tags: map[string]string{"component": "disha_redis", "operation": "MARSHAL"},
+			Details: map[string]any{
+				"key": key,
+			},
+		})
+		return wrapped
 	}
 	if err := withRedisTimeoutRetry(ctx, func() error {
 		return c.rdb.Set(ctx, key, payload, expiration).Err()
 	}); err != nil {
-		return fmt.Errorf("disha: redis SET %s failed: %w", key, err)
+		wrapped := fmt.Errorf("disha: redis SET %s failed: %w", key, err)
+		sentryutil.Capture(sentryutil.Event{
+			Err:  wrapped,
+			Tags: map[string]string{"component": "disha_redis", "operation": "SET"},
+			Details: map[string]any{
+				"key": key,
+			},
+		})
+		return wrapped
 	}
 	return nil
 }
@@ -189,12 +230,28 @@ func (c *redisClient) AppendChunk(ctx context.Context, userID, conversationID st
 	key := conversationChunksKey(userID, conversationID)
 	payload, err := json.Marshal(chunk)
 	if err != nil {
-		return fmt.Errorf("disha: chunk marshal failed: %w", err)
+		wrapped := fmt.Errorf("disha: chunk marshal failed: %w", err)
+		sentryutil.Capture(sentryutil.Event{
+			Err:  wrapped,
+			Tags: map[string]string{"component": "disha_redis", "operation": "MARSHAL"},
+			Details: map[string]any{
+				"key": key,
+			},
+		})
+		return wrapped
 	}
 	if err := withRedisTimeoutRetry(ctx, func() error {
 		return c.rdb.RPush(ctx, key, payload).Err()
 	}); err != nil {
-		return fmt.Errorf("disha: redis RPUSH %s failed: %w", key, err)
+		wrapped := fmt.Errorf("disha: redis RPUSH %s failed: %w", key, err)
+		sentryutil.Capture(sentryutil.Event{
+			Err:  wrapped,
+			Tags: map[string]string{"component": "disha_redis", "operation": "RPUSH"},
+			Details: map[string]any{
+				"key": key,
+			},
+		})
+		return wrapped
 	}
 	if c.logger != nil {
 		c.logger.Printf("Appended chunk %s to Redis conversation %s\n", chunk.ID, conversationID)

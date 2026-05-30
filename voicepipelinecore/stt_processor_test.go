@@ -1,6 +1,10 @@
 package voicepipelinecore
 
 import (
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -73,5 +77,33 @@ func TestSTT_PassesThroughOtherFrames(t *testing.T) {
 
 	if c := countFrames[TextFrame](down); c != 1 {
 		t.Errorf("expected TextFrame to pass through, got %d in %s", c, describeFrameTypes(down))
+	}
+}
+
+func TestSTTConnectCapsRetries(t *testing.T) {
+	fix := newTestFixture(t)
+	var attempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		attempts.Add(1)
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	t.Cleanup(server.Close)
+
+	oldURL := sttDialURL
+	oldDelays := sttConnectRetryDelays
+	sttDialURL = "ws" + strings.TrimPrefix(server.URL, "http")
+	sttConnectRetryDelays = []time.Duration{time.Millisecond, time.Millisecond}
+	t.Cleanup(func() {
+		sttDialURL = oldURL
+		sttConnectRetryDelays = oldDelays
+	})
+
+	p := NewSTTProcessor(fix.TaskCtx)
+	err := p.connect()
+	if err == nil {
+		t.Fatal("connect returned nil, want exhausted retry error")
+	}
+	if got := attempts.Load(); got != 3 {
+		t.Fatalf("connect attempts = %d, want 3", got)
 	}
 }

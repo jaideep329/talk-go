@@ -246,13 +246,13 @@ func TestSalesCallBotPlanAssemblesDishaCall(t *testing.T) {
 	}
 	events := pl.Callbacks.Events()
 	turnAt := time.Date(2026, 5, 22, 1, 2, 3, 0, time.UTC)
-	events.OnUserTurnCommitted("new user", turnAt)
+	events.OnUserTurnCommitted("new user", turnAt, pl.PromptKey)
 	events.OnAssistantTurnCommitted("new assistant", turnAt.Add(time.Second), voicepipelinecore.TurnMetrics{
 		LLMTTFBMs:            11.1,
 		TTSTTFBMs:            22.2,
 		E2ELatencyMs:         33.3,
 		TTSTextAggregationMs: 44.4,
-	})
+	}, pl.PromptKey)
 	chunkItems, err := redisServer.List(conversationChunksKey(userID, conversationID))
 	if err != nil {
 		t.Fatalf("List chunks: %v", err)
@@ -270,8 +270,14 @@ func TestSalesCallBotPlanAssemblesDishaCall(t *testing.T) {
 	if userChunk.Role != "user" || userChunk.Text != "new user" || userChunk.LLMTTFBMs != nil {
 		t.Fatalf("user chunk mismatch: %+v", userChunk)
 	}
+	if userChunk.MainAgentSystemPromptLangfuseKey == nil || *userChunk.MainAgentSystemPromptLangfuseKey != "sales_call/main_sys-3day_v2_v17" {
+		t.Fatalf("user prompt key = %v, want sales_call/main_sys-3day_v2_v17", userChunk.MainAgentSystemPromptLangfuseKey)
+	}
 	if assistantChunk.Role != "assistant" || assistantChunk.Text != "new assistant" {
 		t.Fatalf("assistant chunk mismatch: %+v", assistantChunk)
+	}
+	if assistantChunk.MainAgentSystemPromptLangfuseKey == nil || *assistantChunk.MainAgentSystemPromptLangfuseKey != "sales_call/main_sys-3day_v2_v17" {
+		t.Fatalf("assistant prompt key = %v, want sales_call/main_sys-3day_v2_v17", assistantChunk.MainAgentSystemPromptLangfuseKey)
 	}
 	if assistantChunk.LLMTTFBMs == nil || *assistantChunk.LLMTTFBMs != 11.1 ||
 		assistantChunk.TTSTTFBMs == nil || *assistantChunk.TTSTTFBMs != 22.2 ||

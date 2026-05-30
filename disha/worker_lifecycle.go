@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/jaideep329/talk-go/internal/sentryutil"
 )
 
 const (
@@ -53,10 +55,35 @@ func RegisterWorkerPod(ctx context.Context, deps Deps, reg WorkerPodRegistration
 		},
 		SQSQueue: "fifo-p0-fast-l1",
 	}); err != nil {
+		sentryutil.Capture(sentryutil.Event{
+			Err: err,
+			Tags: map[string]string{
+				"component": "worker_lifecycle",
+				"operation": "register_worker_pod_db_ops",
+			},
+			Details: map[string]any{
+				"pod_name": reg.PodName,
+				"pod_uid":  reg.PodUID,
+			},
+		})
 		return err
 	}
 
-	return deps.Redis.SetCache(ctx, key, true, workerRegistrationTTL)
+	if err := deps.Redis.SetCache(ctx, key, true, workerRegistrationTTL); err != nil {
+		sentryutil.Capture(sentryutil.Event{
+			Err: err,
+			Tags: map[string]string{
+				"component": "worker_lifecycle",
+				"operation": "set_worker_registration_key",
+			},
+			Details: map[string]any{
+				"pod_name": reg.PodName,
+				"pod_uid":  reg.PodUID,
+			},
+		})
+		return err
+	}
+	return nil
 }
 
 func EnqueueWorkerCleanup(ctx context.Context, deps Deps, podName string) error {
@@ -66,14 +93,27 @@ func EnqueueWorkerCleanup(ctx context.Context, deps Deps, podName string) error 
 	if podName == "" {
 		return errors.New("disha: pod_name is required")
 	}
-	return deps.API.EnqueueJob(ctx, EnqueueJobRequest{
+	if err := deps.API.EnqueueJob(ctx, EnqueueJobRequest{
 		ModuleName: "bots.signal_handler",
 		FuncName:   "cleanup_state",
 		Kwargs: map[string]any{
 			"pod_name": podName,
 		},
 		SQSQueue: "p0-fast-l1",
-	})
+	}); err != nil {
+		sentryutil.Capture(sentryutil.Event{
+			Err: err,
+			Tags: map[string]string{
+				"component": "worker_lifecycle",
+				"operation": "cleanup_state",
+			},
+			Details: map[string]any{
+				"pod_name": podName,
+			},
+		})
+		return err
+	}
+	return nil
 }
 
 func EnqueueWorkerGracefulShutdown(ctx context.Context, deps Deps, podName string) error {
@@ -87,16 +127,39 @@ func EnqueueWorkerGracefulShutdown(ctx context.Context, deps Deps, podName strin
 		return errors.New("disha: pod_name is required")
 	}
 	if err := deps.Redis.SetCache(ctx, workerSigtermKey(podName), true, workerSigtermTTL); err != nil {
+		sentryutil.Capture(sentryutil.Event{
+			Err: err,
+			Tags: map[string]string{
+				"component": "worker_lifecycle",
+				"operation": "set_sigterm_key",
+			},
+			Details: map[string]any{
+				"pod_name": podName,
+			},
+		})
 		return err
 	}
-	return deps.API.EnqueueJob(ctx, EnqueueJobRequest{
+	if err := deps.API.EnqueueJob(ctx, EnqueueJobRequest{
 		ModuleName: "bots.signal_handler",
 		FuncName:   "on_graceful_shutdown_initiated",
 		Kwargs: map[string]any{
 			"pod_name": podName,
 		},
 		SQSQueue: "fifo-p0-fast-l1",
-	})
+	}); err != nil {
+		sentryutil.Capture(sentryutil.Event{
+			Err: err,
+			Tags: map[string]string{
+				"component": "worker_lifecycle",
+				"operation": "on_graceful_shutdown_initiated",
+			},
+			Details: map[string]any{
+				"pod_name": podName,
+			},
+		})
+		return err
+	}
+	return nil
 }
 
 func workerRegistrationKey(podName, podUID string) string {

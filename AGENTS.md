@@ -14,6 +14,8 @@ Jaideep is an experienced Python backend engineer learning Go by building real p
 - **When debugging, check `app.log` first** — all `log.*` output goes there. `fmt.Print*` goes to stdout/terminal. Logs go to both `app.log` and terminal via `io.MultiWriter`.
 - **After major design decisions or discussions, always update AGENTS.md.** Don't wait to be asked — if a design pattern, architecture choice, or strategy was decided in conversation, persist it immediately.
 - **Use Pipecat as the reference for core calling-system details before implementing.** For call lifecycle, turn-taking, interruption, transport events, idle handling, frame semantics, or shutdown behavior, inspect the local Pipecat source first, mention the relevant Pipecat file/pattern in the reasoning, then implement the simplest equivalent in this Go codebase. Prefer `/Users/jaideepsingh/Projects/disha-backend/.venv/lib/python3.11/site-packages/pipecat` (`pipecat-ai==0.0.108`) and Disha's existing bot code in `/Users/jaideepsingh/Projects/disha-backend/bots` before falling back to public docs.
+- **Discuss design before non-trivial architecture changes.** For pipeline, frame semantics, context aggregation, callback surfaces, transport protocol handling, persistence boundaries, or cross-package dependencies, stop and present the proposed design before implementing. The design note should state the existing pattern, the minimal change, alternatives considered, why the chosen approach fits, and the exact tests to add.
+- **Do not blindly add frame types or broad abstractions.** New frames, `TaskContext` fields, callback fields, long-lived struct dependencies, or shared helpers are architectural changes, not tactical fixes. First prove the behavior cannot fit an existing frame/callback/config/method-level parameter. If a new frame or shared surface is still proposed, discuss it explicitly and wait for approval.
 
 ## Disha Integration Decisions
 
@@ -45,6 +47,15 @@ Jaideep is an experienced Python backend engineer learning Go by building real p
 - **120s no-activity watchdog lives inside `UserIdleProcessor`, not the pipeline/task.** `runCancelWatchdog` (a `Go`-tracked goroutine started in the processor's `Start`) ends the call via `EndTask(EndReasonUserIdle)` after `cancelOnIdleTimeout` (120s) with no activity; it's reset by the same frames the processor already handles — `TranscriptFrame` (user speech / interim), `BotStartedSpeakingFrame`, `BotStoppedSpeakingFrame` — through an internal non-blocking channel. Mirrors Pipecat's `PipelineTask(cancel_on_idle_timeout=True, idle_timeout_secs=120)`. It's a backstop: the 7s idle-prompt loop normally ends a quiet call first (its prompts count as bot activity and reset this timer).
 - Use Disha Redis env names: `DISHA_REDIS_URL` and `DISHA_REDIS_PASSWORD`.
 - `CallEvents` is the one callback surface for lifecycle events and committed turns. Its dispatcher owns a FIFO queue and must be stop-and-drained before `PipelineTask` waits on the shared `WaitGroup`; do not rely only on task context cancellation or cleanup can time out before chunk sync is enqueued.
+- Sentry is initialized directly with `sentry-go` from `SENTRY_DSN`; report errors through the single generic `internal/sentryutil.Capture` helper. It uses tags plus `SetContext("details", ...)` rather than deprecated `SetExtra`, and stays generic (no Disha imports in core) while covering API, Redis, S3, Daily bridge, STT, signal-handler, worker-lifecycle, and abrupt-shutdown paths.
+- Disha `update_conversation` and `run_post_call_operations` must use API-first, queue-on-failure behavior: call the HTTP endpoint, and if it fails enqueue `bots.operations.voice_bot_operations.update_conversation` or `bots.operations.voice_bot_operations.run_post_call_operations` through `/common/enqueue_job` on `p0-fast-l1`.
+- Soniox connect attempts are capped at three with short backoff; after exhaustion the STT processor pushes a fatal `ErrorFrame` so the pipeline ends instead of holding a worker slot forever.
+- Daily bridge join retries three times before failing, matching Disha's Python transport retry pattern. Daily inbound RTVI `client-message` pings must receive RTVI `server-response` pong messages over Daily app messages.
+- Sales-call chunks must carry `main_agent_system_prompt_langfuse_key` using `disha.PromptKey(promptName, promptVersion)` for both user and assistant committed turns.
+- Do not promote one-flow values into broad task context, shared deps, long-lived callback struct fields, or config structs just because a later method needs them. For narrow values like the sales-call prompt key, pass it directly into the processor constructor (`NewContextAggregator(taskCtx, initialMessages, promptKey)`); the aggregator supplies it at the committed-turn boundary and `CallEventCallbacks.Events()` stays a plain default callback mapping.
+- Sales-call initial context kickoff must mirror Python's shape without special startup frame types: Daily user-join pushes the existing Pipecat-style `LLMMessagesAppendFrame(nil, true)`, and `ContextAggregator` consumes it by running the LLM on its current seeded context. Do not mutate core frame semantics or add a one-flow kickoff frame for sales-call startup.
+- Daily RTVI protocol handling stays generic in `DailyRoom`: inbound RTVI `client-ready` app messages should receive a `bot-ready` response with the same id and protocol version `1.2.0`, mirroring Pipecat's `RTVIProcessor.set_bot_ready()` behavior.
+- Known sales-call parity gaps from the 2026-05-30 report: per-conversation Cartesia key and LLM prompt/completion token counts remain open.
 
 ## Project Overview
 
@@ -154,7 +165,7 @@ All processors embed `*BaseProcessor` and take `taskCtx *TaskContext` (plus, for
 NewAudioSourceProcessor(taskCtx)
 NewSTTProcessor(taskCtx)
 NewUserIdleProcessor(taskCtx)
-NewContextAggregator(taskCtx)
+NewContextAggregator(taskCtx, initialMessages, promptKey)
 NewTalkTimeMonitoringProcessor(taskCtx)
 NewLLMProcessor(taskCtx)
 NewTTSProcessor(taskCtx)

@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/jaideep329/talk-go/internal/sentryutil"
 )
 
 const (
@@ -42,8 +44,24 @@ func (c *APIClient) UpdateConversation(ctx context.Context, req UpdateConversati
 	return c.send(ctx, http.MethodPatch, "/bot/update_conversation", req)
 }
 
+func (c *APIClient) UpdateConversationWithFallback(ctx context.Context, req UpdateConversationRequest) error {
+	err := c.UpdateConversation(ctx, req)
+	if err == nil {
+		return nil
+	}
+	return c.enqueueAPIFallback("update_conversation", "bots.operations.voice_bot_operations", "update_conversation", req, err)
+}
+
 func (c *APIClient) RunPostCallOperations(ctx context.Context, req PostCallOperationsRequest) error {
 	return c.send(ctx, http.MethodPost, "/bot/run_post_call_operations", req)
+}
+
+func (c *APIClient) RunPostCallOperationsWithFallback(ctx context.Context, req PostCallOperationsRequest) error {
+	err := c.RunPostCallOperations(ctx, req)
+	if err == nil {
+		return nil
+	}
+	return c.enqueueAPIFallback("run_post_call_operations", "bots.operations.voice_bot_operations", "run_post_call_operations", req, err)
 }
 
 func (c *APIClient) EnqueueJob(ctx context.Context, req EnqueueJobRequest) error {
@@ -64,13 +82,68 @@ func (c *APIClient) send(ctx context.Context, method, path string, body any) err
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
-		return fmt.Errorf("disha: API %s %s failed: %w", method, path, err)
+		wrapped := fmt.Errorf("disha: API %s %s failed: %w", method, path, err)
+		sentryutil.Capture(sentryutil.Event{
+			Err: wrapped,
+			Tags: map[string]string{
+				"component": "disha_api",
+				"method":    method,
+				"path":      path,
+			},
+		})
+		return wrapped
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("disha: API %s %s returned %d: %s", method, path, resp.StatusCode, strings.TrimSpace(string(raw)))
+		wrapped := fmt.Errorf("disha: API %s %s returned %d: %s", method, path, resp.StatusCode, strings.TrimSpace(string(raw)))
+		sentryutil.Capture(sentryutil.Event{
+			Err: wrapped,
+			Tags: map[string]string{
+				"component": "disha_api",
+				"method":    method,
+				"path":      path,
+			},
+			Details: map[string]any{
+				"status": resp.StatusCode,
+			},
+		})
+		return wrapped
 	}
 	return nil
+}
+
+func (c *APIClient) enqueueAPIFallback(operationName, moduleName, funcName string, req any, originalErr error) error {
+	kwargs, err := requestAsMap(req)
+	if err != nil {
+		return fmt.Errorf("disha: build fallback kwargs for %s: %w", operationName, err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), defaultAPITimeout)
+	defer cancel()
+	fallbackReq := EnqueueJobRequest{
+		ModuleName: moduleName,
+		FuncName:   funcName,
+		Kwargs:     kwargs,
+		SQSQueue:   "p0-fast-l1",
+	}
+	if err := c.EnqueueJob(ctx, fallbackReq); err != nil {
+		return fmt.Errorf("disha: %s API failed (%v) and fallback enqueue failed: %w", operationName, originalErr, err)
+	}
+	if c.logger != nil {
+		c.logger.Printf("disha: %s API failed, queued fallback job: %v\n", operationName, originalErr)
+	}
+	return nil
+}
+
+func requestAsMap(req any) (map[string]any, error) {
+	raw, err := json.Marshal(req)
+	if err != nil {
+		return nil, err
+	}
+	var out map[string]any
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
 }

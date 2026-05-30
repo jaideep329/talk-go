@@ -10,7 +10,7 @@ import (
 // downstream.
 func TestContextAggregator_FinalTranscriptEmitsLLMMessages(t *testing.T) {
 	fix := newTestFixture(t)
-	a := NewContextAggregator(fix.TaskCtx)
+	a := NewContextAggregator(fix.TaskCtx, nil, "")
 
 	down, _ := runProcessorTest(t, fix, runConfig{
 		processor: a,
@@ -46,7 +46,7 @@ func TestContextAggregator_InitialMessagesSeedLLMContext(t *testing.T) {
 	a := NewContextAggregator(fix.TaskCtx, []Message{
 		{Role: "system", Content: "seed context"},
 		{Role: "assistant", Content: "hello seed"},
-	})
+	}, "")
 
 	down, _ := runProcessorTest(t, fix, runConfig{
 		processor: a,
@@ -78,7 +78,7 @@ func TestContextAggregator_AppendRunLLMEmitsFirstTurnFromInitialContext(t *testi
 	a := NewContextAggregator(fix.TaskCtx, []Message{
 		{Role: "system", Content: "sales prompt"},
 		{Role: "user", Content: "hello?"},
-	})
+	}, "")
 
 	// Greet-first: append no messages, just run the LLM on the initial
 	// context (what DailyRoom pushes on user join).
@@ -109,7 +109,7 @@ func TestContextAggregator_AppendAddsMessages(t *testing.T) {
 	fix := newTestFixture(t)
 	a := NewContextAggregator(fix.TaskCtx, []Message{
 		{Role: "system", Content: "sales prompt"},
-	})
+	}, "")
 
 	down, _ := runProcessorTest(t, fix, runConfig{
 		processor: a,
@@ -134,7 +134,7 @@ func TestContextAggregator_AppendAddsMessages(t *testing.T) {
 
 func TestContextAggregator_ExplicitEmptyInitialMessagesSkipsDefaultPrompt(t *testing.T) {
 	fix := newTestFixture(t)
-	a := NewContextAggregator(fix.TaskCtx, []Message{})
+	a := NewContextAggregator(fix.TaskCtx, []Message{}, "")
 
 	down, _ := runProcessorTest(t, fix, runConfig{
 		processor: a,
@@ -161,7 +161,7 @@ func TestContextAggregator_ExplicitEmptyInitialMessagesSkipsDefaultPrompt(t *tes
 // words during bot speech triggers an InterruptFrame downstream.
 func TestContextAggregator_BargeInEmitsInterrupt(t *testing.T) {
 	fix := newTestFixture(t)
-	a := NewContextAggregator(fix.TaskCtx)
+	a := NewContextAggregator(fix.TaskCtx, nil, "")
 
 	down, _ := runProcessorTest(t, fix, runConfig{
 		processor: a,
@@ -182,7 +182,7 @@ func TestContextAggregator_BargeInEmitsInterrupt(t *testing.T) {
 // than 3 interim words does NOT trigger an InterruptFrame.
 func TestContextAggregator_NoBargeInBelowThreshold(t *testing.T) {
 	fix := newTestFixture(t)
-	a := NewContextAggregator(fix.TaskCtx)
+	a := NewContextAggregator(fix.TaskCtx, nil, "")
 
 	down, _ := runProcessorTest(t, fix, runConfig{
 		processor: a,
@@ -207,7 +207,7 @@ func TestContextAggregator_NoBargeInBelowThreshold(t *testing.T) {
 // reset_aggregation behavior at the bot-turn boundary.
 func TestContextAggregator_BackchannelDiscardedWhenBotFinishesFirst(t *testing.T) {
 	fix := newTestFixture(t)
-	a := NewContextAggregator(fix.TaskCtx)
+	a := NewContextAggregator(fix.TaskCtx, nil, "")
 
 	source := newQueueProcessor(fix.TaskCtx, "test-source", Upstream)
 	sink := newQueueProcessor(fix.TaskCtx, "test-sink", Downstream)
@@ -261,7 +261,7 @@ func TestContextAggregator_BackchannelDiscardedWhenBotFinishesFirst(t *testing.T
 // transcript is discarded synchronously.
 func TestContextAggregator_BackchannelDiscardedWhileBotStillSpeaking(t *testing.T) {
 	fix := newTestFixture(t)
-	a := NewContextAggregator(fix.TaskCtx)
+	a := NewContextAggregator(fix.TaskCtx, nil, "")
 
 	source := newQueueProcessor(fix.TaskCtx, "test-source", Upstream)
 	sink := newQueueProcessor(fix.TaskCtx, "test-sink", Downstream)
@@ -301,7 +301,7 @@ func TestContextAggregator_BackchannelDiscardedWhileBotStillSpeaking(t *testing.
 // the reset).
 func TestContextAggregator_BargeInPreservesUserTranscript(t *testing.T) {
 	fix := newTestFixture(t)
-	a := NewContextAggregator(fix.TaskCtx)
+	a := NewContextAggregator(fix.TaskCtx, nil, "")
 
 	source := newQueueProcessor(fix.TaskCtx, "test-source", Upstream)
 	sink := newQueueProcessor(fix.TaskCtx, "test-sink", Downstream)
@@ -345,7 +345,7 @@ func TestContextAggregator_BargeInPreservesUserTranscript(t *testing.T) {
 // words as an assistant message.
 func TestContextAggregator_TTSDoneCommitsAssistantMessage(t *testing.T) {
 	fix := newTestFixture(t)
-	a := NewContextAggregator(fix.TaskCtx)
+	a := NewContextAggregator(fix.TaskCtx, nil, "")
 
 	// Drive the aggregator: user message → words spoken → TTSDone.
 	// To emit upstream frames, we'd need a processor downstream that
@@ -400,16 +400,20 @@ func TestContextAggregator_EmitsCommittedTurnCallEventsWithMetrics(t *testing.T)
 	var users []string
 	var assistants []string
 	var metrics []TurnMetrics
+	var userPromptKeys []string
+	var assistantPromptKeys []string
 	fix.TaskCtx.callEvents = newCallEventDispatcher(fix.Logger, CallEvents{
-		OnUserTurnCommitted: func(text string, at time.Time) {
+		OnUserTurnCommitted: func(text string, at time.Time, promptKey string) {
 			users = append(users, text)
+			userPromptKeys = append(userPromptKeys, promptKey)
 		},
-		OnAssistantTurnCommitted: func(text string, at time.Time, m TurnMetrics) {
+		OnAssistantTurnCommitted: func(text string, at time.Time, m TurnMetrics, promptKey string) {
 			assistants = append(assistants, text)
 			metrics = append(metrics, m)
+			assistantPromptKeys = append(assistantPromptKeys, promptKey)
 		},
 	})
-	a := NewContextAggregator(fix.TaskCtx)
+	a := NewContextAggregator(fix.TaskCtx, nil, "sales_call/main_sys-3day_v2_v17")
 
 	fix.TaskCtx.metrics.absorb(NewMetricsFrame([]MetricsData{
 		{Processor: "llm", Label: MetricTTFB, ValueMs: 12},
@@ -429,6 +433,12 @@ func TestContextAggregator_EmitsCommittedTurnCallEventsWithMetrics(t *testing.T)
 	if len(metrics) != 1 || metrics[0].LLMTTFBMs != 12 || metrics[0].TTSTTFBMs != 34 {
 		t.Fatalf("assistant metrics = %+v, want llm=12 tts=34", metrics)
 	}
+	if len(userPromptKeys) != 1 || userPromptKeys[0] != "sales_call/main_sys-3day_v2_v17" {
+		t.Fatalf("user prompt keys = %v, want sales prompt key", userPromptKeys)
+	}
+	if len(assistantPromptKeys) != 1 || assistantPromptKeys[0] != "sales_call/main_sys-3day_v2_v17" {
+		t.Fatalf("assistant prompt keys = %v, want sales prompt key", assistantPromptKeys)
+	}
 }
 
 func TestContextAggregator_UserFirstSpeechLifecycleFiresOnce(t *testing.T) {
@@ -438,7 +448,7 @@ func TestContextAggregator_UserFirstSpeechLifecycleFiresOnce(t *testing.T) {
 		OnUserFirstSpeech: func(at time.Time) { calls <- at },
 	})
 	defer fix.TaskCtx.callEvents.stopAndDrain()
-	a := NewContextAggregator(fix.TaskCtx)
+	a := NewContextAggregator(fix.TaskCtx, nil, "")
 
 	runProcessorTest(t, fix, runConfig{
 		processor: a,

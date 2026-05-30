@@ -48,8 +48,8 @@ type CallEvents struct {
 	OnUserFirstSpeech        func(time.Time)
 	OnBotFirstSpeech         func(time.Time)
 	OnFirstUserAudio         func(time.Time)
-	OnUserTurnCommitted      func(text string, at time.Time)
-	OnAssistantTurnCommitted func(text string, at time.Time, metrics TurnMetrics)
+	OnUserTurnCommitted      func(text string, at time.Time, promptKey string)
+	OnAssistantTurnCommitted func(text string, at time.Time, metrics TurnMetrics, promptKey string)
 	OnCallEnded              func(reason EndReason, stats CallStats)
 }
 

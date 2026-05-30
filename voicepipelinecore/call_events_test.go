@@ -44,22 +44,22 @@ func TestCallEventsDispatchCommittedTurnsInOrder(t *testing.T) {
 	logger := log.New(io.Discard, "", 0)
 	var got []string
 	l := newCallEventDispatcher(logger, CallEvents{
-		OnUserTurnCommitted: func(text string, at time.Time) {
-			got = append(got, "user:"+text)
+		OnUserTurnCommitted: func(text string, at time.Time, promptKey string) {
+			got = append(got, "user:"+text+":"+promptKey)
 		},
-		OnAssistantTurnCommitted: func(text string, at time.Time, metrics TurnMetrics) {
-			got = append(got, "assistant:"+text)
+		OnAssistantTurnCommitted: func(text string, at time.Time, metrics TurnMetrics, promptKey string) {
+			got = append(got, "assistant:"+text+":"+promptKey)
 			if metrics.LLMTTFBMs != 12 {
 				t.Fatalf("LLMTTFBMs = %.1f, want 12", metrics.LLMTTFBMs)
 			}
 		},
 	})
 
-	l.fireUserTurnCommitted("one", time.Now())
-	l.fireAssistantTurnCommitted("two", time.Now(), TurnMetrics{LLMTTFBMs: 12})
+	l.fireUserTurnCommitted("one", time.Now(), "prompt-v1")
+	l.fireAssistantTurnCommitted("two", time.Now(), TurnMetrics{LLMTTFBMs: 12}, "prompt-v1")
 	l.stopAndDrain()
 
-	want := []string{"user:one", "assistant:two"}
+	want := []string{"user:one:prompt-v1", "assistant:two:prompt-v1"}
 	if len(got) != len(want) {
 		t.Fatalf("events = %v, want %v", got, want)
 	}
@@ -74,7 +74,7 @@ func TestCallEventsRecoversAndContinuesAfterCallbackPanic(t *testing.T) {
 	logger := log.New(io.Discard, "", 0)
 	var count int
 	l := newCallEventDispatcher(logger, CallEvents{
-		OnUserTurnCommitted: func(text string, at time.Time) {
+		OnUserTurnCommitted: func(text string, at time.Time, promptKey string) {
 			count++
 			if count == 1 {
 				panic("first callback panic")
@@ -82,8 +82,8 @@ func TestCallEventsRecoversAndContinuesAfterCallbackPanic(t *testing.T) {
 		},
 	})
 
-	l.fireUserTurnCommitted("first", time.Now())
-	l.fireUserTurnCommitted("second", time.Now())
+	l.fireUserTurnCommitted("first", time.Now(), "")
+	l.fireUserTurnCommitted("second", time.Now(), "")
 	l.stopAndDrain()
 
 	if count != 2 {

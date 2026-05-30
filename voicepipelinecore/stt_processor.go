@@ -3,11 +3,13 @@ package voicepipelinecore
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/jaideep329/talk-go/internal/sentryutil"
 )
 
 type SonioxToken struct {
@@ -23,6 +25,11 @@ type SonioxResponseMessage struct {
 // sttDialURL is the Soniox websocket endpoint. Exposed as a package
 // variable so tests can override it to point at an unreachable URL.
 var sttDialURL = "wss://stt-rt.soniox.com/transcribe-websocket"
+
+// Python's CustomSonioxSTTService caps initial connect retries at three
+// attempts with short exponential backoff. Keep these as vars so tests
+// can shorten the retry window without sleeping for seconds.
+var sttConnectRetryDelays = []time.Duration{time.Second, 2 * time.Second}
 
 // STTProcessor uses a single cancellation signal — the embedded
 // BaseProcessor.ctx (referred to via s.ctx). Three things shut it down:
@@ -87,13 +94,13 @@ func sttConfigPayload() map[string]interface{} {
 	}
 }
 
-// connect dials Soniox in an interruptible retry loop. Returns true
-// once the connection is established and configured, false if b.ctx is
-// cancelled first.
-func (s *STTProcessor) connect() bool {
-	for {
+// connect dials Soniox in an interruptible retry loop. It caps retries
+// so a bad key or broken endpoint cannot hold a worker slot forever.
+func (s *STTProcessor) connect() error {
+	maxAttempts := len(sttConnectRetryDelays) + 1
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		if s.ctx.Err() != nil {
-			return false
+			return s.ctx.Err()
 		}
 		conn, _, err := websocket.DefaultDialer.Dial(sttDialURL, nil)
 		if err == nil {
@@ -101,21 +108,27 @@ func (s *STTProcessor) connect() bool {
 			if err == nil {
 				s.websocketConn = conn
 				s.taskCtx.Logger.Println("STT websocket connected")
-				return true
+				return nil
 			}
 			conn.Close()
 		}
-		s.taskCtx.Logger.Printf("STT connect failed: %v, retrying in 1s...", err)
+		if attempt == maxAttempts {
+			return err
+		}
+		delay := sttConnectRetryDelays[attempt-1]
+		s.taskCtx.Logger.Printf("STT connect failed attempt=%d/%d: %v, retrying in %s...", attempt, maxAttempts, err, delay)
 		select {
-		case <-time.After(time.Second):
+		case <-time.After(delay):
 		case <-s.ctx.Done():
-			return false
+			return s.ctx.Err()
 		}
 	}
+	return nil
 }
 
 func (s *STTProcessor) runReader() {
-	if !s.connect() {
+	if err := s.connect(); err != nil {
+		s.handleConnectExhausted(err)
 		return
 	}
 	close(s.connected)
@@ -136,7 +149,8 @@ func (s *STTProcessor) read() {
 				return
 			}
 			s.taskCtx.Logger.Println("STT read error, reconnecting:", err)
-			if !s.connect() {
+			if err := s.connect(); err != nil {
+				s.handleConnectExhausted(err)
 				return
 			}
 			continue
@@ -153,6 +167,19 @@ func (s *STTProcessor) read() {
 			s.PushFrame(NewTranscriptFrame(tok.Text, tok.IsFinal, responseID, resp.Finished), Downstream)
 		}
 	}
+}
+
+func (s *STTProcessor) handleConnectExhausted(err error) {
+	if err == nil || s.ctx.Err() != nil {
+		return
+	}
+	wrapped := fmt.Errorf("Soniox connection failed after %d attempts: %w", len(sttConnectRetryDelays)+1, err)
+	sentryutil.Capture(sentryutil.Event{
+		Err:  wrapped,
+		Tags: map[string]string{"component": "stt", "provider": "soniox"},
+	})
+	s.taskCtx.Logger.Println(wrapped)
+	s.PushError(wrapped.Error(), true)
 }
 
 func (s *STTProcessor) runWriter() {

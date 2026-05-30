@@ -10,12 +10,11 @@ import (
 )
 
 const (
-	// llmLogModule/llmLogFunc target Disha's existing llm_logging_service
-	// singleton via the worker dispatch (module.instance.method), so no
-	// new Python code is needed. The service uploads the payload to S3
-	// and enqueues the DB save itself.
+	// llmLogModule/llmLogFunc target a module-level Disha job wrapper.
+	// Do not enqueue the llm_logging_service singleton method directly:
+	// SQS serialization stores __qualname__ and loses the bound self.
 	llmLogModule = "services.llm_logging_service"
-	llmLogFunc   = "llm_logging_service.log_llm_call_async"
+	llmLogFunc   = "log_llm_call_job"
 	llmLogQueue  = "p1-fast-l1"
 
 	// Matches services.llm_logging_service.EntityType.CALL_CONVERSATION.

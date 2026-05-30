@@ -407,6 +407,13 @@ func (t *TTSProcessor) orchestrator() {
 				if !t.ResetTTSContext() {
 					cartesiaTextSent = false
 				}
+			} else {
+				// Empty turn — no text was sent to Cartesia, so no "done"
+				// event will arrive. Emit TTSDone directly so the turn
+				// still closes (PlaybackSink broadcasts BotStopped and
+				// UserIdle arms). Covers a failed LLM turn and a rare
+				// zero-token response.
+				t.PushFrame(NewTTSDoneFrame(), Downstream)
 			}
 			t.currentAggregation = ""
 			t.pcmBuffer = nil

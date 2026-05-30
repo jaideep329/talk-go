@@ -186,6 +186,23 @@ func (a *ContextAggregator) ProcessFrame(ctx context.Context, frame Frame, dir D
 	case EndFrame:
 		a.taskCtx.Logger.Printf("EndFrame at ContextAggregator: reason=%q\n", f.Reason)
 		a.PushFrame(f, dir)
+	case LLMMessagesAppendFrame:
+		// Append any provided messages to the context, then (if RunLLM)
+		// run a turn on the current context. Pushed on user-join with no
+		// messages + RunLLM to make the bot greet first from the initial
+		// context (system prompt + "hello?" for a fresh call, or prior
+		// chunks + resume note). Consumed here, not forwarded.
+		if len(f.Messages) > 0 {
+			a.messages = append(a.messages, messagesFromInitial(f.Messages)...)
+		}
+		if f.RunLLM {
+			if len(a.messages) == 0 {
+				a.taskCtx.Logger.Println("LLMMessagesAppend run skipped: empty context")
+				return
+			}
+			a.taskCtx.Logger.Println("Running LLM turn from appended context (greet-first / injected)")
+			a.PushFrame(NewLLMMessagesFrame(a.messages), Downstream)
+		}
 	case TranscriptFrame:
 		interimTranscript := a.updateInterimTranscript(f)
 

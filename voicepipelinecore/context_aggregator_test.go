@@ -73,6 +73,65 @@ func TestContextAggregator_InitialMessagesSeedLLMContext(t *testing.T) {
 	}
 }
 
+func TestContextAggregator_AppendRunLLMEmitsFirstTurnFromInitialContext(t *testing.T) {
+	fix := newTestFixture(t)
+	a := NewContextAggregator(fix.TaskCtx, []Message{
+		{Role: "system", Content: "sales prompt"},
+		{Role: "user", Content: "hello?"},
+	})
+
+	// Greet-first: append no messages, just run the LLM on the initial
+	// context (what DailyRoom pushes on user join).
+	down, _ := runProcessorTest(t, fix, runConfig{
+		processor:    a,
+		framesToSend: []Frame{LLMMessagesAppendFrame{RunLLM: true}},
+		settleDelay:  100 * time.Millisecond,
+		sendEndFrame: true,
+	})
+
+	llmMsg, ok := findFrame[LLMMessagesFrame](down)
+	if !ok {
+		t.Fatalf("expected LLMMessagesFrame, got %s", describeFrameTypes(down))
+	}
+	if len(llmMsg.Messages) != 2 {
+		t.Fatalf("message count = %d, want 2 (the initial context)", len(llmMsg.Messages))
+	}
+	if llmMsg.Messages[0]["content"] != "sales prompt" {
+		t.Fatalf("first message = %q, want sales prompt", llmMsg.Messages[0]["content"])
+	}
+	// The append frame itself must be consumed, not forwarded.
+	if _, forwarded := findFrame[LLMMessagesAppendFrame](down); forwarded {
+		t.Fatal("LLMMessagesAppendFrame should be consumed by ContextAggregator, not forwarded")
+	}
+}
+
+func TestContextAggregator_AppendAddsMessages(t *testing.T) {
+	fix := newTestFixture(t)
+	a := NewContextAggregator(fix.TaskCtx, []Message{
+		{Role: "system", Content: "sales prompt"},
+	})
+
+	down, _ := runProcessorTest(t, fix, runConfig{
+		processor: a,
+		framesToSend: []Frame{
+			LLMMessagesAppendFrame{Messages: []Message{{Role: "system", Content: "injected nudge"}}, RunLLM: true},
+		},
+		settleDelay:  100 * time.Millisecond,
+		sendEndFrame: true,
+	})
+
+	llmMsg, ok := findFrame[LLMMessagesFrame](down)
+	if !ok {
+		t.Fatalf("expected LLMMessagesFrame, got %s", describeFrameTypes(down))
+	}
+	if len(llmMsg.Messages) != 2 {
+		t.Fatalf("message count = %d, want 2 (prompt + appended)", len(llmMsg.Messages))
+	}
+	if llmMsg.Messages[1]["content"] != "injected nudge" {
+		t.Fatalf("appended message = %q, want injected nudge", llmMsg.Messages[1]["content"])
+	}
+}
+
 func TestContextAggregator_ExplicitEmptyInitialMessagesSkipsDefaultPrompt(t *testing.T) {
 	fix := newTestFixture(t)
 	a := NewContextAggregator(fix.TaskCtx, []Message{})

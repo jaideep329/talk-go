@@ -249,6 +249,10 @@ func TestBuildRequestGrok(t *testing.T) {
 	if body["stream"] != true {
 		t.Errorf("stream = %v", body["stream"])
 	}
+	streamOptions, ok := body["stream_options"].(map[string]any)
+	if !ok || streamOptions["include_usage"] != true {
+		t.Errorf("stream_options = %v, want include_usage=true", body["stream_options"])
+	}
 	if body["temperature"] != float64(0) {
 		t.Errorf("temperature = %v", body["temperature"])
 	}
@@ -339,6 +343,10 @@ func sseServer(t *testing.T, contents []string) *httptest.Server {
 				flusher.Flush()
 			}
 		}
+		io.WriteString(w, "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":7,\"total_tokens\":18}}\n\n")
+		if flusher != nil {
+			flusher.Flush()
+		}
 		io.WriteString(w, "data: [DONE]\n\n")
 		if flusher != nil {
 			flusher.Flush()
@@ -382,6 +390,9 @@ func TestStreamSuccessAndLog(t *testing.T) {
 		}
 		if lg.Deployment != "GROK_4_1_FNR_EASTUS" {
 			t.Errorf("deployment = %q, want GROK_4_1_FNR_EASTUS", lg.Deployment)
+		}
+		if lg.PromptTokens != 11 || lg.CompletionTokens != 7 {
+			t.Errorf("usage tokens = prompt %d completion %d, want 11/7", lg.PromptTokens, lg.CompletionTokens)
 		}
 	case <-time.After(2 * time.Second):
 		t.Error("expected a CallLog from the sink")

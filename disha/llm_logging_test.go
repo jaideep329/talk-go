@@ -17,15 +17,17 @@ func TestNewLLMLogSinkQueuesModuleLevelWrapper(t *testing.T) {
 	}
 
 	sink(llmrouter.CallLog{
-		Model:           "grok-4-1-fast-non-reasoning",
-		Deployment:      "GROK_4_1_FNR_EASTUS",
-		Messages:        []map[string]string{{"role": "user", "content": "hello"}},
-		ResponseContent: "hi",
-		TTFBMs:          12.5,
-		TotalMs:         48.25,
-		StatusCode:      http.StatusOK,
-		Completed:       true,
-		FinishReason:    "stop",
+		Model:            "grok-4-1-fast-non-reasoning",
+		Deployment:       "GROK_4_1_FNR_EASTUS",
+		Messages:         []map[string]string{{"role": "user", "content": "hello"}},
+		ResponseContent:  "hi",
+		TTFBMs:           12.5,
+		TotalMs:          48.25,
+		PromptTokens:     11,
+		CompletionTokens: 7,
+		StatusCode:       http.StatusOK,
+		Completed:        true,
+		FinishReason:     "stop",
 	})
 
 	var got capturedAPIRequest
@@ -52,7 +54,9 @@ func TestNewLLMLogSinkQueuesModuleLevelWrapper(t *testing.T) {
 		kwargs["entity_type"] != "callconversation" ||
 		kwargs["usecase_type"] != "sales_call_conversation" ||
 		kwargs["deployment"] != "GROK_4_1_FNR_EASTUS" ||
-		kwargs["llm_call_completed"] != true {
+		kwargs["llm_call_completed"] != true ||
+		kwargs["prompt_tokens"] != float64(11) ||
+		kwargs["completion_tokens"] != float64(7) {
 		t.Fatalf("kwargs mismatch: %+v", kwargs)
 	}
 }

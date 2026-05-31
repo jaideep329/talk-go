@@ -23,10 +23,11 @@ func (r *Router) buildRequest(ctx context.Context, cfg endpointConfig, messages 
 	}
 
 	body := map[string]any{
-		"model":       cfg.Model,
-		"stream":      true,
-		"messages":    messages,
-		"temperature": r.temperatureFor(cfg),
+		"model":          cfg.Model,
+		"stream":         true,
+		"stream_options": map[string]any{"include_usage": true},
+		"messages":       messages,
+		"temperature":    r.temperatureFor(cfg),
 	}
 	if cfg.MaxTokens != nil {
 		body["max_tokens"] = *cfg.MaxTokens

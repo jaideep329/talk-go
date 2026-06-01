@@ -10,21 +10,23 @@ import (
 // the bot) decides how to persist it — e.g. enqueue Disha's
 // llm_logging_service. The router stays free of S3/DB/usecase concerns.
 type CallLog struct {
-	Model           string
-	ConfigKey       string
-	Deployment      string
-	Messages        []map[string]string
-	ResponseContent string
-	TTFBMs          float64
-	TotalMs         float64
-	StatusCode      int
-	Completed       bool
-	Interrupted     bool
-	ErrorType       string
-	ErrorMessage    string
-	FinishReason    string
-	UsingFallback   bool
-	SelectedGroup   string
+	Model            string
+	ConfigKey        string
+	Deployment       string
+	Messages         []map[string]string
+	ResponseContent  string
+	PromptTokens     int
+	CompletionTokens int
+	TTFBMs           float64
+	TotalMs          float64
+	StatusCode       int
+	Completed        bool
+	Interrupted      bool
+	ErrorType        string
+	ErrorMessage     string
+	FinishReason     string
+	UsingFallback    bool
+	SelectedGroup    string
 }
 
 // deploymentName mirrors OpenAIConfigHandler.get_deployment_name so the

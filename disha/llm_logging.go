@@ -38,9 +38,10 @@ func newLLMLogSink(api *APIClient, logger *log.Logger, usecaseType, userID, conv
 	}
 	return func(c llmrouter.CallLog) {
 		requestPayload := map[string]any{
-			"model":    c.Model,
-			"messages": c.Messages,
-			"stream":   true,
+			"model":          c.Model,
+			"messages":       c.Messages,
+			"stream":         true,
+			"stream_options": map[string]any{"include_usage": true},
 		}
 		responsePayload := map[string]any{
 			"content":       c.ResponseContent,
@@ -59,8 +60,8 @@ func newLLMLogSink(api *APIClient, logger *log.Logger, usecaseType, userID, conv
 			"model":              c.Model,
 			"request_payload":    requestPayload,
 			"response_payload":   responsePayload,
-			"prompt_tokens":      0,
-			"completion_tokens":  0,
+			"prompt_tokens":      c.PromptTokens,
+			"completion_tokens":  c.CompletionTokens,
 			"ttfb_ms":            c.TTFBMs,
 			"total_time_ms":      c.TotalMs,
 			"user_id":            userID,

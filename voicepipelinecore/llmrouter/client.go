@@ -121,6 +121,7 @@ func (r *Router) Stream(ctx context.Context, messages []map[string]string, onTok
 		statusCode      int
 		errType         string
 		finishReason    string
+		usage           tokenUsage
 	)
 	// Emit the per-call log on the way out (best-effort, off the hot path).
 	defer func() {
@@ -128,20 +129,22 @@ func (r *Router) Stream(ctx context.Context, messages []map[string]string, onTok
 			return
 		}
 		entry := CallLog{
-			Model:           cfg.Model,
-			ConfigKey:       cfg.Key,
-			Deployment:      deploymentName(cfg),
-			Messages:        messages,
-			ResponseContent: responseContent.String(),
-			TTFBMs:          msFromDuration(res.TTFB),
-			TotalMs:         msFromDuration(res.Total),
-			StatusCode:      statusCode,
-			Completed:       err == nil && !res.Interrupted,
-			Interrupted:     res.Interrupted,
-			ErrorType:       errType,
-			FinishReason:    finishReason,
-			UsingFallback:   sel.UsingFallback,
-			SelectedGroup:   sel.SelectedGroup,
+			Model:            cfg.Model,
+			ConfigKey:        cfg.Key,
+			Deployment:       deploymentName(cfg),
+			Messages:         messages,
+			ResponseContent:  responseContent.String(),
+			PromptTokens:     usage.PromptTokens,
+			CompletionTokens: usage.CompletionTokens,
+			TTFBMs:           msFromDuration(res.TTFB),
+			TotalMs:          msFromDuration(res.Total),
+			StatusCode:       statusCode,
+			Completed:        err == nil && !res.Interrupted,
+			Interrupted:      res.Interrupted,
+			ErrorType:        errType,
+			FinishReason:     finishReason,
+			UsingFallback:    sel.UsingFallback,
+			SelectedGroup:    sel.SelectedGroup,
 		}
 		if err != nil {
 			entry.ErrorMessage = err.Error()
@@ -199,13 +202,16 @@ func (r *Router) Stream(ctx context.Context, messages []map[string]string, onTok
 			res.Interrupted = true
 			return res, ctx.Err()
 		}
-		content, fr, done, ok := parseSSEChunk(scanner.Text())
+		content, fr, chunkUsage, hasUsage, done, ok := parseSSEChunk(scanner.Text())
 		if done {
 			sawDone = true
 			break
 		}
 		if !ok {
 			continue
+		}
+		if hasUsage {
+			usage = chunkUsage
 		}
 		if fr != "" {
 			finishReason = fr
@@ -269,16 +275,24 @@ func (r *Router) handleError(configKey string, statusCode int, errMsg string) {
 //   - ok=false for non-data lines / unparseable chunks (skip them).
 //   - content is the text delta (may be ""), finishReason the choice's
 //     finish_reason when present ("stop", "length", "content_filter", …).
-func parseSSEChunk(line string) (content, finishReason string, done, ok bool) {
+//   - usage is present on the stream-options usage chunk, which usually has
+//     no choices and arrives just before [DONE].
+type tokenUsage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
+}
+
+func parseSSEChunk(line string) (content, finishReason string, usage tokenUsage, hasUsage, done, ok bool) {
 	if !strings.HasPrefix(line, "data:") {
-		return "", "", false, false
+		return "", "", tokenUsage{}, false, false, false
 	}
 	data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 	if data == "" {
-		return "", "", false, false
+		return "", "", tokenUsage{}, false, false, false
 	}
 	if data == "[DONE]" {
-		return "", "", true, true
+		return "", "", tokenUsage{}, false, true, true
 	}
 	var chunk struct {
 		Choices []struct {
@@ -287,15 +301,20 @@ func parseSSEChunk(line string) (content, finishReason string, done, ok bool) {
 			} `json:"delta"`
 			FinishReason *string `json:"finish_reason"`
 		} `json:"choices"`
+		Usage *tokenUsage `json:"usage"`
 	}
 	if err := json.Unmarshal([]byte(data), &chunk); err != nil {
-		return "", "", false, false
+		return "", "", tokenUsage{}, false, false, false
+	}
+	if chunk.Usage != nil {
+		usage = *chunk.Usage
+		hasUsage = true
 	}
 	if len(chunk.Choices) == 0 {
-		return "", "", false, true
+		return "", "", usage, hasUsage, false, true
 	}
 	if fr := chunk.Choices[0].FinishReason; fr != nil {
 		finishReason = *fr
 	}
-	return chunk.Choices[0].Delta.Content, finishReason, false, true
+	return chunk.Choices[0].Delta.Content, finishReason, usage, hasUsage, false, true
 }

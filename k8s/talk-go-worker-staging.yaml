@@ -101,6 +101,8 @@ spec:
           value: "$TALK_GO_DEPLOYMENT_NAME"
         - name: FAST_API_PORT
           value: "7860"
+        - name: PERF_DIAGNOSTICS_ENABLED
+          value: "$PERF_DIAGNOSTICS_ENABLED"
         readinessProbe:
           httpGet:
             path: /bot/readiness_check

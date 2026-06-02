@@ -92,6 +92,10 @@ func (r *DailyRoom) recordAudioTiming(name string, elapsed time.Duration) {
 	r.audioTiming.record(name, elapsed)
 }
 
+func (r *DailyRoom) perfDiagnosticsEnabled() bool {
+	return r != nil && r.perfDiag && r.audioTiming != nil
+}
+
 func (r *DailyRoom) monitorAudioTiming() {
 	ticker := time.NewTicker(audioTimingLogInterval)
 	defer ticker.Stop()

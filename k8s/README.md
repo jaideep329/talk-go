@@ -56,9 +56,14 @@ GKE_NAMESPACE=staging
 TALK_GO_DEPLOYMENT_NAME=disha-go-voice-worker-staging
 ARTIFACT_REPOSITORY_NAME=disha-voice-worker-staging
 TALK_GO_MIN_REPLICA_COUNT=1
+PERF_DIAGNOSTICS_ENABLED=0
 ```
 
 It builds and pushes `latest`, optionally refreshes `talk-go-worker-env` from
 local `.prod.env`, applies the manifest with a fresh `POD_TEMPLATE_VERSION`, and
 waits for rollout. The template-version label is what forces Kubernetes to
 replace pods and pull the newly pushed `latest` image.
+
+Set `PERF_DIAGNOSTICS_ENABLED=1` for a profiled staging run. That single flag
+enables Go/Python Pyroscope startup, `process_usage`, and `audio_timing`. Leave it
+at `0` for normal runs so the 20ms audio hot path skips timing instrumentation.

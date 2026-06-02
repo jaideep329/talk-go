@@ -134,19 +134,27 @@ func (p *PlaybackSinkProcessor) runPlayback() {
 		case f := <-p.queueCh:
 			p.handleQueueFrame(f)
 		case tickAt := <-ticker.C:
-			if !lastTick.IsZero() {
+			timingEnabled := p.audioTimingEnabled()
+			if timingEnabled && !lastTick.IsZero() {
 				if lag := tickAt.Sub(lastTick) - 20*time.Millisecond; lag > 0 {
 					p.recordAudioTiming("go_playback_tick_lag", lag)
 				}
 			}
 			lastTick = tickAt
-			start := time.Now()
+			var start time.Time
+			if timingEnabled {
+				start = time.Now()
+			}
 			if p.tick() {
-				p.recordAudioTiming("go_playback_tick_work", time.Since(start))
+				if timingEnabled {
+					p.recordAudioTiming("go_playback_tick_work", time.Since(start))
+				}
 				close(p.endDone)
 				return
 			}
-			p.recordAudioTiming("go_playback_tick_work", time.Since(start))
+			if timingEnabled {
+				p.recordAudioTiming("go_playback_tick_work", time.Since(start))
+			}
 		}
 	}
 }
@@ -240,9 +248,15 @@ func (p *PlaybackSinkProcessor) tick() bool {
 		}
 	}
 mix:
-	start := time.Now()
+	timingEnabled := p.audioTimingEnabled()
+	var start time.Time
+	if timingEnabled {
+		start = time.Now()
+	}
 	pcm := p.mixPCM(botPCM)
-	p.recordAudioTiming("go_playback_mix_pcm", time.Since(start))
+	if timingEnabled {
+		p.recordAudioTiming("go_playback_mix_pcm", time.Since(start))
+	}
 	_ = p.taskCtx.Room.WriteAudioPCM(pcm)
 	return false
 }
@@ -312,11 +326,17 @@ func (p *PlaybackSinkProcessor) botPCMFrame(pcmBytes []byte) []int16 {
 	if samples > framePCM {
 		samples = framePCM
 	}
-	start := time.Now()
+	timingEnabled := p.audioTimingEnabled()
+	var start time.Time
+	if timingEnabled {
+		start = time.Now()
+	}
 	for i := 0; i < samples; i++ {
 		pcm[i] = int16(binary.LittleEndian.Uint16(pcmBytes[i*2:]))
 	}
-	p.recordAudioTiming("go_playback_pcm_bytes_to_samples", time.Since(start))
+	if timingEnabled {
+		p.recordAudioTiming("go_playback_pcm_bytes_to_samples", time.Since(start))
+	}
 	return pcm
 }
 
@@ -325,6 +345,10 @@ func (p *PlaybackSinkProcessor) recordAudioTiming(name string, elapsed time.Dura
 		return
 	}
 	p.taskCtx.Room.recordAudioTiming(name, elapsed)
+}
+
+func (p *PlaybackSinkProcessor) audioTimingEnabled() bool {
+	return p != nil && p.taskCtx != nil && p.taskCtx.Room != nil && p.taskCtx.Room.perfDiagnosticsEnabled()
 }
 
 func (p *PlaybackSinkProcessor) writeSilenceTail() {

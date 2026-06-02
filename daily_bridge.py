@@ -26,6 +26,16 @@ CHANNELS = 1
 stdout_lock = threading.Lock()
 
 
+def perf_diagnostics_enabled():
+    value = os.getenv("PERF_DIAGNOSTICS_ENABLED")
+    if value is not None:
+        return value.strip() == "1"
+    return os.getenv("PYROSCOPE_ENABLED", "").strip() == "1"
+
+
+PERF_DIAGNOSTICS_ENABLED = perf_diagnostics_enabled()
+
+
 class TimingAggregator:
     def __init__(self):
         self.lock = threading.Lock()
@@ -64,7 +74,7 @@ class TimingAggregator:
         return entries
 
 
-timings = TimingAggregator()
+timings = TimingAggregator() if PERF_DIAGNOSTICS_ENABLED else None
 
 
 def emit(event, **data):
@@ -79,8 +89,8 @@ def log(message):
 
 
 def configure_pyroscope():
-    if os.getenv("PYROSCOPE_ENABLED", "").strip() != "1":
-        log("pyroscope disabled")
+    if not PERF_DIAGNOSTICS_ENABLED:
+        log("performance diagnostics disabled")
         return
 
     server_address = os.getenv("PYROSCOPE_SERVER_ADDRESS", "").strip()
@@ -183,13 +193,17 @@ class BridgeHandler(EventHandler):
 
     def on_audio_data(self, participant_id_value, audio, audio_source):
         try:
-            start = time.perf_counter()
-            audio_bytes = bytes(audio.audio_frames)
-            timings.record("py_daily_audio_bytes_copy", time.perf_counter() - start)
-            start = time.perf_counter()
-            data = base64.b64encode(audio_bytes).decode("ascii")
-            timings.record("py_daily_audio_base64_encode", time.perf_counter() - start)
-            start = time.perf_counter()
+            if PERF_DIAGNOSTICS_ENABLED:
+                start = time.perf_counter()
+                audio_bytes = bytes(audio.audio_frames)
+                timings.record("py_daily_audio_bytes_copy", time.perf_counter() - start)
+                start = time.perf_counter()
+                data = base64.b64encode(audio_bytes).decode("ascii")
+                timings.record("py_daily_audio_base64_encode", time.perf_counter() - start)
+                start = time.perf_counter()
+            else:
+                audio_bytes = bytes(audio.audio_frames)
+                data = base64.b64encode(audio_bytes).decode("ascii")
             emit(
                 "audio",
                 participant_id=participant_id_value,
@@ -197,7 +211,8 @@ class BridgeHandler(EventHandler):
                 channels=audio.num_channels,
                 data=data,
             )
-            timings.record("py_daily_audio_emit_stdout", time.perf_counter() - start)
+            if PERF_DIAGNOSTICS_ENABLED:
+                timings.record("py_daily_audio_emit_stdout", time.perf_counter() - start)
         except Exception as exc:
             log(f"audio callback error: {exc}")
 
@@ -291,19 +306,26 @@ def stdin_loop(client, audio_source, stop_event):
         if stop_event.is_set():
             break
         try:
-            start = time.perf_counter()
-            command = json.loads(line)
-            timings.record("py_stdin_json_loads", time.perf_counter() - start)
+            if PERF_DIAGNOSTICS_ENABLED:
+                start = time.perf_counter()
+                command = json.loads(line)
+                timings.record("py_stdin_json_loads", time.perf_counter() - start)
+            else:
+                command = json.loads(line)
         except json.JSONDecodeError:
             continue
         command_type = command.get("type")
         if command_type == "audio":
-            start = time.perf_counter()
-            raw = base64.b64decode(command.get("data") or "")
-            timings.record("py_stdin_audio_base64_decode", time.perf_counter() - start)
-            start = time.perf_counter()
-            audio_source.write_frames(raw)
-            timings.record("py_stdin_audio_write_frames", time.perf_counter() - start)
+            if PERF_DIAGNOSTICS_ENABLED:
+                start = time.perf_counter()
+                raw = base64.b64decode(command.get("data") or "")
+                timings.record("py_stdin_audio_base64_decode", time.perf_counter() - start)
+                start = time.perf_counter()
+                audio_source.write_frames(raw)
+                timings.record("py_stdin_audio_write_frames", time.perf_counter() - start)
+            else:
+                raw = base64.b64decode(command.get("data") or "")
+                audio_source.write_frames(raw)
         elif command_type == "message":
             client.send_app_message(command.get("data"), None)
         elif command_type == "leave":
@@ -311,6 +333,8 @@ def stdin_loop(client, audio_source, stop_event):
 
 
 def timing_loop(stop_event, interval_seconds=10):
+    if not PERF_DIAGNOSTICS_ENABLED or timings is None:
+        return
     while not stop_event.wait(interval_seconds):
         entries = timings.snapshot_and_reset()
         if entries:
@@ -361,9 +385,10 @@ def main():
     signal.signal(signal.SIGTERM, handle_signal)
     signal.signal(signal.SIGINT, handle_signal)
 
-    timing_thread = threading.Thread(target=timing_loop, args=(stop_event,))
-    timing_thread.daemon = True
-    timing_thread.start()
+    if PERF_DIAGNOSTICS_ENABLED:
+        timing_thread = threading.Thread(target=timing_loop, args=(stop_event,))
+        timing_thread.daemon = True
+        timing_thread.start()
 
     if join_room(args, handler, client, audio_track):
         stdin_thread = threading.Thread(target=stdin_loop, args=(client, audio_source, stop_event))
@@ -373,9 +398,10 @@ def main():
             stdin_thread.join(timeout=0.2)
 
     stop_event.set()
-    final_entries = timings.snapshot_and_reset()
-    if final_entries:
-        log("audio_timing " + json.dumps({"event": "audio_timing", "timings": final_entries}, separators=(",", ":")))
+    if PERF_DIAGNOSTICS_ENABLED and timings is not None:
+        final_entries = timings.snapshot_and_reset()
+        if final_entries:
+            log("audio_timing " + json.dumps({"event": "audio_timing", "timings": final_entries}, separators=(",", ":")))
     leave(client)
     time.sleep(0.05)
 

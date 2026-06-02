@@ -6,11 +6,12 @@ import (
 	"strings"
 
 	"github.com/grafana/pyroscope-go"
+	"github.com/jaideep329/talk-go/internal/perfdiag"
 )
 
 func startPyroscopeIfEnabled() func() {
-	if strings.TrimSpace(os.Getenv("PYROSCOPE_ENABLED")) != "1" {
-		log.Println("pyroscope disabled")
+	if !perfdiag.Enabled() {
+		log.Println("performance diagnostics disabled")
 		return func() {}
 	}
 	serverAddress := strings.TrimSpace(os.Getenv("PYROSCOPE_SERVER_ADDRESS"))

@@ -68,6 +68,7 @@ type DailyRoom struct {
 	audioSource *AudioSourceProcessor
 	cmd         *exec.Cmd
 	stdin       io.WriteCloser
+	audioTiming *audioTimingAggregator
 	writeMu     sync.Mutex
 	waitDone    chan struct{}
 	closed      atomic.Bool
@@ -152,6 +153,7 @@ func startDailyRoomAttempt(roomURL, token, python, script string, taskCtx *TaskC
 		audioSource: audioSource,
 		cmd:         cmd,
 		stdin:       stdin,
+		audioTiming: newAudioTimingAggregator(),
 		waitDone:    make(chan struct{}),
 		joinResult:  make(chan error, 1),
 	}
@@ -159,6 +161,10 @@ func startDailyRoomAttempt(roomURL, token, python, script string, taskCtx *TaskC
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start daily bridge: %w", err)
 	}
+	if cmd.Process != nil {
+		room.goTracked(func() { room.monitorProcessUsage(os.Getpid(), cmd.Process.Pid) })
+	}
+	room.goTracked(func() { room.monitorAudioTiming() })
 	room.goTracked(func() { room.readStdout(stdout) })
 	room.goTracked(func() { room.readStderr(stderr) })
 	room.goTracked(func() {
@@ -206,7 +212,13 @@ func (r *DailyRoom) WriteAudioPCM(pcm []byte) error {
 	if len(pcm) == 0 {
 		return nil
 	}
-	return r.writeCommand(dailyBridgeCommand{Type: "audio", Data: base64.StdEncoding.EncodeToString(pcm)})
+	start := time.Now()
+	encoded := base64.StdEncoding.EncodeToString(pcm)
+	r.recordAudioTiming("go_bridge_out_base64_encode", time.Since(start))
+	start = time.Now()
+	err := r.writeCommand(dailyBridgeCommand{Type: "audio", Data: encoded})
+	r.recordAudioTiming("go_bridge_out_json_stdin", time.Since(start))
+	return err
 }
 
 func (r *DailyRoom) Disconnect() {
@@ -291,12 +303,16 @@ func (r *DailyRoom) handleEvent(event dailyBridgeEvent) {
 		}
 		r.endTask(EndReasonClientDisconnect)
 	case "audio":
+		start := time.Now()
 		raw, err := base64.StdEncoding.DecodeString(event.Data)
+		r.recordAudioTiming("go_bridge_in_base64_decode", time.Since(start))
 		if err != nil {
 			r.log("Daily bridge audio decode error: %v", err)
 			return
 		}
+		start = time.Now()
 		r.audioSource.PushPCM(raw, event.SampleRate, event.Channels)
+		r.recordAudioTiming("go_bridge_in_push_pcm", time.Since(start))
 	case "app_message":
 		r.handleAppMessage(event.Message)
 	case "left":

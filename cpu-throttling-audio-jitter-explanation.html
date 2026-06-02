@@ -1,0 +1,398 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TalkGo CPU Throttling and Audio Jitter Notes</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --text: #1f2933;
+      --muted: #5d6875;
+      --border: #d8dee7;
+      --panel: #f7f9fb;
+      --accent: #0f766e;
+      --accent-soft: #e6f4f1;
+      --warn: #92400e;
+      --warn-soft: #fff7ed;
+      --code: #111827;
+    }
+    body {
+      margin: 0;
+      font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: var(--text);
+      background: #fff;
+    }
+    main {
+      max-width: 980px;
+      margin: 0 auto;
+      padding: 36px 28px 56px;
+    }
+    h1, h2, h3 {
+      line-height: 1.2;
+      margin: 0;
+      color: #111827;
+    }
+    h1 {
+      font-size: 30px;
+      margin-bottom: 8px;
+    }
+    h2 {
+      font-size: 21px;
+      margin-top: 34px;
+      padding-top: 22px;
+      border-top: 1px solid var(--border);
+    }
+    h3 {
+      font-size: 16px;
+      margin-top: 22px;
+    }
+    p {
+      margin: 10px 0;
+    }
+    ul, ol {
+      margin: 10px 0 10px 22px;
+      padding: 0;
+    }
+    li {
+      margin: 6px 0;
+    }
+    a {
+      color: var(--accent);
+      text-decoration: none;
+    }
+    a:hover {
+      text-decoration: underline;
+    }
+    code {
+      font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      color: var(--code);
+      background: #eef2f7;
+      border-radius: 4px;
+      padding: 1px 4px;
+    }
+    pre {
+      overflow-x: auto;
+      padding: 14px 16px;
+      background: #0f172a;
+      color: #e5e7eb;
+      border-radius: 6px;
+      font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 14px 0;
+      font-size: 14px;
+    }
+    th, td {
+      text-align: left;
+      vertical-align: top;
+      padding: 9px 10px;
+      border-bottom: 1px solid var(--border);
+    }
+    th {
+      background: var(--panel);
+      font-weight: 650;
+    }
+    .lede {
+      color: var(--muted);
+      font-size: 16px;
+      margin-bottom: 22px;
+    }
+    .callout {
+      border: 1px solid var(--border);
+      background: var(--panel);
+      border-radius: 8px;
+      padding: 14px 16px;
+      margin: 16px 0;
+    }
+    .callout strong {
+      color: #111827;
+    }
+    .warn {
+      border-color: #fed7aa;
+      background: var(--warn-soft);
+      color: var(--warn);
+    }
+    .ok {
+      border-color: #b7e4db;
+      background: var(--accent-soft);
+    }
+    .small {
+      color: var(--muted);
+      font-size: 13px;
+    }
+  </style>
+</head>
+<body>
+<main>
+  <h1>TalkGo CPU Throttling and Audio Jitter Notes</h1>
+  <p class="lede">Why the Opus path exists, how Kubernetes CPU throttling works at <code>100m</code>, and why it hurts a 20ms audio loop.</p>
+
+  <section>
+    <h2>Brief Answer: Why Opus Encode/Decode Exists</h2>
+    <p>
+      In the current code, Opus is used as an internal audio-frame format between <code>TTSProcessor</code> and <code>PlaybackSinkProcessor</code>.
+      Cartesia gives us PCM. <code>TTSProcessor.makeOpusData</code> chunks that PCM into 20ms frames and encodes each frame to Opus before pushing an <code>AudioFrame</code> downstream.
+      Later, <code>PlaybackSinkProcessor.decodeBotFrame</code> decodes the Opus back to PCM so it can mix bot speech with the required background-office audio and then send PCM to Daily through the Python bridge.
+    </p>
+    <div class="callout ok">
+      <strong>Current conclusion:</strong> the Opus step is not required by Daily egress. Daily's <code>CustomAudioSource.write_frames</code> accepts 16-bit linear PCM. For the current architecture, Opus is mostly an internal queue/packet format. Since playback immediately needs PCM again for mixing and Daily writing, this is a real CPU cost with no obvious benefit on the output path.
+    </div>
+    <pre><code>// TTSProcessor: PCM -> Opus -> AudioFrame
+func (t *TTSProcessor) makeOpusData() []byte {
+    frame := make([]int16, 480)      // 20ms at 24kHz mono
+    ...
+    n, err := t.opusEncoder.Encode(frame, opusData)
+    return opusData[:n]
+}
+
+// PlaybackSinkProcessor: Opus -> PCM -> mix with background -> Daily
+func (p *PlaybackSinkProcessor) decodeBotFrame(opusData []byte) []int16 {
+    pcm := make([]int16, framePCM)
+    _, err := p.opusDecoder.Decode(opusData, pcm)
+    return pcm
+}</code></pre>
+  </section>
+
+  <section>
+    <h2>What <code>100m</code> CPU Means</h2>
+    <p>
+      Kubernetes measures CPU in CPU units. <code>1 CPU</code> means one physical or virtual core's worth of CPU time, and <code>100m</code> means <code>0.1 CPU</code>, also described as 100 millicpu or 100 millicores.
+      Kubernetes documents that <code>0.1</code> and <code>100m</code> are equivalent CPU quantities.
+      See <a href="https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/#resource-units-in-kubernetes" target="_blank" rel="noreferrer">Kubernetes: Resource units in Kubernetes</a>.
+    </p>
+    <p>
+      A CPU <em>request</em> affects scheduling and relative CPU share under contention. A CPU <em>limit</em> is a hard cap. With a Linux cgroup CPU limit, the container gets a fixed CPU runtime budget in each CFS quota period.
+      The Linux kernel CFS bandwidth documentation describes this as <code>quota</code> microseconds of CPU time inside each <code>period</code>; once quota is consumed, the cgroup is throttled until the next period.
+      See <a href="https://www.kernel.org/doc/html/v5.10/scheduler/sched-bwc.html" target="_blank" rel="noreferrer">Linux kernel: CFS Bandwidth Control</a>.
+    </p>
+
+    <h3>The Usual 100ms Period</h3>
+    <p>
+      The common/default CFS period is <code>100ms</code>. With that period:
+    </p>
+    <table>
+      <thead>
+        <tr>
+          <th>Kubernetes CPU limit</th>
+          <th>CPU quota per 100ms period</th>
+          <th>Average CPU</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>100m</code></td>
+          <td><code>10ms</code> CPU time</td>
+          <td>10% of one CPU</td>
+        </tr>
+        <tr>
+          <td><code>200m</code></td>
+          <td><code>20ms</code> CPU time</td>
+          <td>20% of one CPU</td>
+        </tr>
+        <tr>
+          <td><code>500m</code></td>
+          <td><code>50ms</code> CPU time</td>
+          <td>50% of one CPU</td>
+        </tr>
+        <tr>
+          <td><code>1000m</code></td>
+          <td><code>100ms</code> CPU time</td>
+          <td>100% of one CPU</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="callout warn">
+      <strong>Important nuance:</strong> the quota is for the whole container cgroup, not for each process. Go, Python, Daily native threads, profiler threads, websocket readers/writers, and logging all spend from the same 10ms budget when the limit is <code>100m</code>.
+    </div>
+  </section>
+
+  <section>
+    <h2>How Throttling Actually Happens</h2>
+    <p>
+      The kernel does not reserve a neat <code>2ms</code> slice for every 20ms audio tick. It gives the cgroup up to its quota inside the current quota period.
+      With <code>100m</code>, the container can run for about <code>10ms</code> of CPU time per <code>100ms</code> period.
+      If the container uses that budget early in the period, all normal CFS-scheduled threads in that cgroup stop running until the period refills.
+    </p>
+    <p>
+      Multi-threading can burn quota faster than wall-clock time. If two runnable threads each run for <code>5ms</code> on two cores, the cgroup has spent <code>10ms</code> CPU in only <code>5ms</code> of wall time.
+      That means a real-time audio loop may miss deadlines even when the average CPU looks close to, or slightly below, the limit.
+    </p>
+
+    <h3>What This Means For A 20ms Audio Loop</h3>
+    <p>
+      Our playback loop wants to do useful work every <code>20ms</code>. Inside each 100ms CFS period there are about five such audio ticks.
+      At <code>100m</code>, those five ticks, plus Python's Daily write path, plus Go TTS work, plus all support goroutines/threads, share only about <code>10ms</code> CPU total.
+    </p>
+    <table>
+      <thead>
+        <tr>
+          <th>Time in one 100ms quota period</th>
+          <th>Audio expectation</th>
+          <th>CPU reality at <code>100m</code></th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>0ms</code></td>
+          <td>Audio tick 1</td>
+          <td>Go/Python can run if quota remains</td>
+        </tr>
+        <tr>
+          <td><code>20ms</code></td>
+          <td>Audio tick 2</td>
+          <td>May run, or may already be throttled</td>
+        </tr>
+        <tr>
+          <td><code>40ms</code></td>
+          <td>Audio tick 3</td>
+          <td>Likely vulnerable if TTS/bridge work used quota early</td>
+        </tr>
+        <tr>
+          <td><code>60ms</code></td>
+          <td>Audio tick 4</td>
+          <td>If throttled, this tick is delayed until quota refill</td>
+        </tr>
+        <tr>
+          <td><code>80ms</code></td>
+          <td>Audio tick 5</td>
+          <td>Same risk</td>
+        </tr>
+        <tr>
+          <td><code>100ms</code></td>
+          <td>Next CFS period</td>
+          <td>Quota refills and blocked threads can run again</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <p>
+      This is why a 20ms audio loop can stutter even when the limit is described as "10% CPU." The audio loop is latency-sensitive, while CPU quota is an accounting mechanism over a larger period.
+      The loop needs timely CPU access, not just acceptable average CPU over a second or a minute.
+    </p>
+  </section>
+
+  <section>
+    <h2>What The Last Call Showed</h2>
+    <p>
+      For conversation <code>183afa9c-8d36-427b-85c2-3b877b185774</code>, the logs and Pyroscope profile showed:
+    </p>
+    <table>
+      <thead>
+        <tr>
+          <th>Signal</th>
+          <th>Observed value</th>
+          <th>Interpretation</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Container CPU</td>
+          <td>Average <code>90m</code>, max <code>99m</code></td>
+          <td>Very close to the <code>100m</code> hard cap.</td>
+        </tr>
+        <tr>
+          <td>Throttling</td>
+          <td><code>14/14</code> samples throttled, about <code>97s</code> total throttled time</td>
+          <td>The container repeatedly exhausted quota and was blocked.</td>
+        </tr>
+        <tr>
+          <td>Per-process CPU</td>
+          <td>Python average <code>64m</code>; Go average <code>26m</code></td>
+          <td>Python/Daily was the larger total CPU consumer.</td>
+        </tr>
+        <tr>
+          <td>Python timing</td>
+          <td><code>py_stdin_audio_write_frames</code> dominated; JSON/base64 were tiny</td>
+          <td>The expensive Python boundary is Daily's native audio write call, not JSON parsing.</td>
+        </tr>
+        <tr>
+          <td>Go Pyroscope</td>
+          <td><code>TTSProcessor.makeOpusData -&gt; opus.Encode</code> was about 56% of Go CPU</td>
+          <td>Go's main avoidable CPU cost is the Opus encode step.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h3>Why Jitter Appeared At The Beginning Of Bot Turns</h3>
+    <p>
+      The beginning of a bot turn is where multiple things become runnable together:
+    </p>
+    <ol>
+      <li>LLM tokens start arriving.</li>
+      <li>TTS starts producing PCM chunks.</li>
+      <li>Go encodes those chunks into Opus frames.</li>
+      <li>Playback decodes Opus back to PCM.</li>
+      <li>Playback mixes bot PCM with required background-office audio.</li>
+      <li>Go writes mixed PCM to the Python bridge every 20ms.</li>
+      <li>Python calls Daily's native <code>CustomAudioSource.write_frames</code>.</li>
+    </ol>
+    <p>
+      That burst competes with the entire container's <code>10ms/100ms</code> CPU budget. If the quota is consumed early, playback ticks are delayed. The user hears those delayed ticks as jitter.
+    </p>
+  </section>
+
+  <section>
+    <h2>Daily <code>write_frames</code> Boundary</h2>
+    <p>
+      The installed <code>daily-python==0.27.0</code> package exposes <code>CustomAudioSource.write_frames</code> from a native extension named <code>daily.abi3.so</code>. There is no Python implementation to tune directly.
+      The type stub says <code>CustomAudioSource</code> accepts 16-bit linear PCM, and the docstring says <code>write_frames</code> blocks unless a completion callback is supplied.
+    </p>
+    <pre><code>def write_frames(
+    self, frame: bytes, completion: Optional[Callable[[int], None]] = None
+) -&gt; int: ...
+
+Docstring summary:
+Writes audio frames to the audio source.
+Blocks if a completion callback is not provided.
+If a completion callback is provided, this function is non-blocking.</code></pre>
+    <p>
+      Daily's Python custom-track guide describes <code>CustomAudioSource</code> as the source you write audio data to for a custom audio track.
+      See <a href="https://daily-co-daily-python.mintlify.app/guides/custom-tracks" target="_blank" rel="noreferrer">Daily Python SDK: Custom Tracks</a>.
+    </p>
+  </section>
+
+  <section>
+    <h2>Implications For Optimization</h2>
+    <p>
+      Since background office audio is a hard requirement, removing continuous audio output is not on the table. The remaining useful optimization paths are:
+    </p>
+    <ol>
+      <li>
+        <strong>Remove the Opus round trip.</strong>
+        Keep bot audio as PCM in the Go pipeline, and let playback mix PCM directly with background PCM. This removes Go's biggest hot path: <code>opus.Encode</code>, plus the corresponding decode.
+      </li>
+      <li>
+        <strong>Experiment with fewer writes to Daily.</strong>
+        If Daily accepts larger PCM chunks well, writing 40ms or 60ms at a time reduces calls through the Python/native boundary. This must be tested carefully because it may increase buffering latency.
+      </li>
+      <li>
+        <strong>Consider non-blocking <code>write_frames</code> only with bounded backpressure.</strong>
+        Passing a completion callback may prevent the Python stdin loop from blocking, but without a strict queue limit it can hide lag instead of removing it.
+      </li>
+      <li>
+        <strong>Native Go Daily media is not a small optimization.</strong>
+        Daily's supported headless server-media path here is the Python SDK backed by native core. A Go-native replacement would likely require unsupported bindings or a larger WebRTC/Daily implementation, and it would still have to do the native media work that <code>write_frames</code> is doing today.
+      </li>
+    </ol>
+  </section>
+
+  <section>
+    <h2>Source Links</h2>
+    <ul>
+      <li><a href="https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/#resource-units-in-kubernetes" target="_blank" rel="noreferrer">Kubernetes: Resource units in Kubernetes</a></li>
+      <li><a href="https://kubernetes.io/docs/tasks/configure-pod-container/assign-cpu-resource/" target="_blank" rel="noreferrer">Kubernetes: Assign CPU Resources to Containers and Pods</a></li>
+      <li><a href="https://www.kernel.org/doc/html/v5.10/scheduler/sched-bwc.html" target="_blank" rel="noreferrer">Linux kernel: CFS Bandwidth Control</a></li>
+      <li><a href="https://daily-co-daily-python.mintlify.app/guides/custom-tracks" target="_blank" rel="noreferrer">Daily Python SDK: Custom Tracks</a></li>
+      <li>Local package inspection: <code>daily-python==0.27.0</code>, <code>daily/__init__.pyi</code>, and native extension <code>daily/daily.abi3.so</code>.</li>
+      <li>Local code references: <code>voicepipelinecore/tts_processor.go</code>, <code>voicepipelinecore/playback_sink_processor.go</code>, and <code>daily_bridge.py</code>.</li>
+    </ul>
+  </section>
+
+  <p class="small">Prepared for TalkGo staging investigation, based on the 100m CPU-limit call data and local source/package inspection.</p>
+</main>
+</body>
+</html>

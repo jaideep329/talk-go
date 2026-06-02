@@ -634,7 +634,9 @@ func (t *TTSProcessor) makeOpusData() []byte {
 	}
 	t.pcmBuffer = t.pcmBuffer[960:]
 	opusData := make([]byte, 1000)
+	start := time.Now()
 	n, err := t.opusEncoder.Encode(frame, opusData)
+	t.recordAudioTiming("go_tts_opus_encode", time.Since(start))
 	if err != nil {
 		t.taskCtx.Logger.Println("opus encode error:", err)
 	}
@@ -691,10 +693,13 @@ func (t *TTSProcessor) readTTSConnectionData() {
 			continue
 		}
 		var resp CartesiaTTSMessage
+		start := time.Now()
 		if err := json.Unmarshal(msg, &resp); err != nil {
+			t.recordAudioTiming("go_tts_json_unmarshal", time.Since(start))
 			t.taskCtx.Logger.Println("TTS json unmarshal error:", err)
 			continue
 		}
+		t.recordAudioTiming("go_tts_json_unmarshal", time.Since(start))
 
 		if resp.Error != "" {
 			if !strings.Contains(resp.Error, "Invalid context ID") {
@@ -705,14 +710,19 @@ func (t *TTSProcessor) readTTSConnectionData() {
 		switch resp.Type {
 		case "chunk":
 			var audioMsg CartesiaTTSAudioChunkMessage
+			start := time.Now()
 			if err := json.Unmarshal(msg, &audioMsg); err != nil {
+				t.recordAudioTiming("go_tts_audio_json_unmarshal", time.Since(start))
 				t.taskCtx.Logger.Println("TTS audio chunk unmarshal error:", err)
 				continue
 			}
+			t.recordAudioTiming("go_tts_audio_json_unmarshal", time.Since(start))
 			if !t.isActiveContext(audioMsg.ContextId) {
 				continue
 			}
+			start = time.Now()
 			audioData, err := base64.StdEncoding.DecodeString(audioMsg.Data)
+			t.recordAudioTiming("go_tts_audio_base64_decode", time.Since(start))
 			if err != nil {
 				t.taskCtx.Logger.Println("base64 decode error:", err)
 				continue
@@ -766,6 +776,13 @@ func (t *TTSProcessor) readTTSConnectionData() {
 			}
 		}
 	}
+}
+
+func (t *TTSProcessor) recordAudioTiming(name string, elapsed time.Duration) {
+	if t == nil || t.taskCtx == nil || t.taskCtx.Room == nil {
+		return
+	}
+	t.taskCtx.Room.recordAudioTiming(name, elapsed)
 }
 
 func drainTTSEvents(ch chan ttsEvent) {

@@ -363,6 +363,157 @@ go test -v -run TestUserIdle ./...  # one processor's tests
 
 - `net/http/pprof` is imported in `main.go` — heap profiles available at `http://localhost:3000/debug/pprof/heap`
 - Typical memory depends on both the Go process and the Python Daily bridge process; check both when profiling local calls.
+- In GKE, use `process_usage` log lines for high-level Go-vs-Python attribution before deeper profilers. `DailyRoom` starts a lightweight sampler for each bridge process and logs one JSON payload every 10s with Go/Python PIDs, process CPU millicores over the sample window, current RSS, RSS high-water mark, and container cgroup CPU throttling (`container_cpu_mcores`, `container_cpu_throttled_periods`, `container_cpu_throttled_ms`, `container_cpu_throttled_fraction`). Query `textPayload:"process_usage"` for a conversation/pod to see whether `/app/talk-go`, `daily_bridge.py`, or container CPU throttling is the main jitter suspect.
+- Pyroscope profiling is gated by `PYROSCOPE_ENABLED=1` plus `PYROSCOPE_SERVER_ADDRESS`, `PYROSCOPE_BASIC_AUTH_USER`, and `PYROSCOPE_BASIC_AUTH_PASSWORD`. Go reports as `talk-go.worker.go`; the Python Daily bridge reports as `talk-go.daily_bridge.python`. Keep labels low-cardinality (`environment`, `deployment`, `pod`, `process`, `language`) and do not add conversation IDs as Pyroscope tags.
+- Use `audio_timing` log lines alongside Pyroscope when chasing jitter. They summarize 10s windows for 20ms-audio-path work such as Go/Python base64+JSON bridge I/O, playback tick lag/work, Opus encode/decode, TTS JSON/base64 decode, and user PCM scanning. Profiles show CPU stacks; `audio_timing` shows deadline misses and where the real-time path is spending wall time.
+
+#### Live Call Investigation Runbook
+
+When Jaideep gives a staging `conversation_id`, check both Cloud Logging and Pyroscope before drawing conclusions. Base the answer on the retrieved logs/profiles only; if one source has no data, say that explicitly.
+
+1. Load local env without printing secrets:
+
+```bash
+set -a
+source .prod.env
+set +a
+```
+
+2. Query Cloud Logging for the call and save the raw result:
+
+```bash
+CONV="<conversation_id>"
+PROJECT="${GCP_PROJECT_ID:-curelinkai}"
+NAMESPACE="${GKE_NAMESPACE:-staging}"
+CONTAINER="talk-go-worker"
+LOG_JSON="/tmp/talk-go-${CONV}.logs.json"
+
+CONV_FILTER='resource.type="k8s_container"
+resource.labels.project_id="'$PROJECT'"
+resource.labels.namespace_name="'$NAMESPACE'"
+resource.labels.container_name="'$CONTAINER'"
+textPayload:"[conv='$CONV']"'
+
+gcloud logging read "$CONV_FILTER" \
+  --project "$PROJECT" \
+  --freshness=24h \
+  --order=asc \
+  --limit=10000 \
+  --format=json > "$LOG_JSON"
+
+jq -r '.[] | [.timestamp, .resource.labels.pod_name, .textPayload] | @tsv' "$LOG_JSON" | less -S
+```
+
+3. Extract the pod and call window from those logs. Use a slightly padded window for follow-up log/profile queries:
+
+```bash
+eval "$(python3 - "$LOG_JSON" <<'PY'
+import json, sys
+from datetime import datetime, timedelta, timezone
+
+with open(sys.argv[1]) as f:
+    rows = json.load(f)
+if not rows:
+    raise SystemExit("no logs found for conversation")
+
+def parse(ts):
+    return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+
+start = parse(rows[0]["timestamp"]) - timedelta(minutes=2)
+end = parse(rows[-1]["timestamp"]) + timedelta(minutes=2)
+pod = rows[0]["resource"]["labels"]["pod_name"]
+
+def emit(name, value):
+    print(f'export {name}="{value}"')
+
+emit("POD", pod)
+emit("START", start.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"))
+emit("END", end.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"))
+PY
+)"
+
+echo "pod=$POD start=$START end=$END"
+```
+
+4. Query the same pod/time window for process attribution, throttling, and audio-path timing:
+
+```bash
+POD_FILTER='resource.type="k8s_container"
+resource.labels.project_id="'$PROJECT'"
+resource.labels.namespace_name="'$NAMESPACE'"
+resource.labels.container_name="'$CONTAINER'"
+resource.labels.pod_name="'$POD'"
+timestamp>="'$START'"
+timestamp<="'$END'"'
+
+gcloud logging read "$POD_FILTER AND (textPayload:\"process_usage\" OR textPayload:\"audio_timing\" OR textPayload:\"pyroscope\")" \
+  --project "$PROJECT" \
+  --order=asc \
+  --limit=10000 \
+  --format='table(timestamp,textPayload)'
+```
+
+Useful quick summaries:
+
+```bash
+jq -r '.[] | select(.textPayload | contains("process_usage {")) | .textPayload | split("process_usage ")[1] | fromjson |
+  [.sample_period_ms, .go_cpu_mcores, .python_cpu_mcores, .container_cpu_mcores, .container_cpu_throttled_ms, .container_cpu_throttled_fraction, .go_rss_bytes, .python_rss_bytes] | @tsv' "$LOG_JSON"
+
+jq -r '.[] | select(.textPayload | contains("audio_timing {")) | [.timestamp, .textPayload] | @tsv' "$LOG_JSON"
+```
+
+If `process_usage` / `audio_timing` entries are missing from `LOG_JSON`, rerun the pod-window query above with `--format=json > "/tmp/talk-go-${CONV}.pod.logs.json"` and summarize from that file instead.
+
+5. Query Pyroscope for the same pod/time window. Prefer `profilecli` because it can export pprof files for local inspection:
+
+```bash
+export PROFILECLI_URL="$PYROSCOPE_SERVER_ADDRESS"
+export PROFILECLI_USERNAME="$PYROSCOPE_BASIC_AUTH_USER"
+export PROFILECLI_PASSWORD="$PYROSCOPE_BASIC_AUTH_PASSWORD"
+
+GO_QUERY='{service_name="talk-go.worker.go",pod="'$POD'"}'
+PY_QUERY='{service_name="talk-go.daily_bridge.python",pod="'$POD'"}'
+
+profilecli query series --query="$GO_QUERY" --from="$START" --to="$END" --output=json
+profilecli query series --query="$PY_QUERY" --from="$START" --to="$END" --output=json
+```
+
+Use the CPU `__profile_type__` shown by `query series` for each process, normally `process_cpu:cpu:nanoseconds:cpu:nanoseconds`. Then export and inspect both profiles:
+
+```bash
+CPU_TYPE="process_cpu:cpu:nanoseconds:cpu:nanoseconds"
+
+profilecli query profile \
+  --profile-type="$CPU_TYPE" \
+  --query="$GO_QUERY" \
+  --from="$START" --to="$END" \
+  --output="pprof=/tmp/talk-go-${CONV}-go.pprof"
+
+profilecli query profile \
+  --profile-type="$CPU_TYPE" \
+  --query="$PY_QUERY" \
+  --from="$START" --to="$END" \
+  --output="pprof=/tmp/talk-go-${CONV}-python.pprof"
+
+go tool pprof -top -nodecount=30 /tmp/talk-go-${CONV}-go.pprof
+go tool pprof -top -cum -nodecount=30 /tmp/talk-go-${CONV}-go.pprof
+go tool pprof -top -nodecount=30 /tmp/talk-go-${CONV}-python.pprof
+go tool pprof -top -cum -nodecount=30 /tmp/talk-go-${CONV}-python.pprof
+```
+
+If `profilecli` is missing, install it with `go install github.com/grafana/pyroscope/cmd/profilecli@latest` or use the HTTP API fallback:
+
+```bash
+curl -sG "$PYROSCOPE_SERVER_ADDRESS/pyroscope/render" \
+  -u "$PYROSCOPE_BASIC_AUTH_USER:$PYROSCOPE_BASIC_AUTH_PASSWORD" \
+  --data-urlencode "query=${CPU_TYPE}${GO_QUERY}" \
+  --data-urlencode "from=$START" \
+  --data-urlencode "until=$END" \
+  --data-urlencode "format=json" \
+  | jq '.flamebearer.names[0:30], .timeline'
+```
+
+6. Report in this order: call window and pod; `process_usage` averages/peaks and throttling; top `audio_timing` max/avg offenders; Go Pyroscope top stacks; Python Pyroscope top stacks; gaps or missing data. Remember that the Python profile can under-attribute native Daily SDK CPU, so if `process_usage` says Python is hot but Pyroscope does not show matching Python stacks, call that out as native/unattributed Python-process CPU rather than guessing.
 
 ### Known Issues / Gotchas
 

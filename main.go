@@ -38,6 +38,8 @@ func main() {
 	appLog, _ := os.Create("app.log")
 	log.SetOutput(io.MultiWriter(os.Stderr, appLog))
 	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
+	stopPyroscope := startPyroscopeIfEnabled()
+	defer stopPyroscope()
 	if dsn := strings.TrimSpace(os.Getenv("SENTRY_DSN")); dsn != "" {
 		if err := sentry.Init(sentry.ClientOptions{
 			Dsn:              dsn,

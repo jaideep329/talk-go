@@ -2,6 +2,7 @@
 import argparse
 import base64
 import json
+import os
 import signal
 import sys
 import threading
@@ -25,6 +26,47 @@ CHANNELS = 1
 stdout_lock = threading.Lock()
 
 
+class TimingAggregator:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.stats = {}
+
+    def record(self, name, elapsed_seconds):
+        elapsed_ms = max(0.0, elapsed_seconds * 1000.0)
+        with self.lock:
+            stat = self.stats.setdefault(
+                name,
+                {"count": 0, "total_ms": 0.0, "max_ms": 0.0},
+            )
+            stat["count"] += 1
+            stat["total_ms"] += elapsed_ms
+            if elapsed_ms > stat["max_ms"]:
+                stat["max_ms"] = elapsed_ms
+
+    def snapshot_and_reset(self):
+        with self.lock:
+            stats = self.stats
+            self.stats = {}
+        entries = []
+        for name, stat in sorted(stats.items()):
+            count = stat["count"]
+            if count <= 0:
+                continue
+            entries.append(
+                {
+                    "name": name,
+                    "count": count,
+                    "avg_ms": round(stat["total_ms"] / count, 3),
+                    "max_ms": round(stat["max_ms"], 3),
+                    "total_ms": round(stat["total_ms"], 3),
+                }
+            )
+        return entries
+
+
+timings = TimingAggregator()
+
+
 def emit(event, **data):
     payload = {"event": event, **data}
     with stdout_lock:
@@ -34,6 +76,66 @@ def emit(event, **data):
 
 def log(message):
     print(message, file=sys.stderr, flush=True)
+
+
+def configure_pyroscope():
+    if os.getenv("PYROSCOPE_ENABLED", "").strip() != "1":
+        log("pyroscope disabled")
+        return
+
+    server_address = os.getenv("PYROSCOPE_SERVER_ADDRESS", "").strip()
+    basic_auth_username = os.getenv("PYROSCOPE_BASIC_AUTH_USER", "").strip()
+    basic_auth_password = os.getenv("PYROSCOPE_BASIC_AUTH_PASSWORD", "").strip()
+    if not server_address or not basic_auth_username or not basic_auth_password:
+        log("pyroscope disabled: missing server address or basic auth credentials")
+        return
+    try:
+        sample_rate = int(os.getenv("PYROSCOPE_PYTHON_SAMPLE_RATE", "100"))
+    except ValueError:
+        sample_rate = 100
+
+    try:
+        import pyroscope
+    except Exception as exc:
+        log(f"pyroscope import failed: {exc}")
+        return
+
+    application_name = os.getenv(
+        "PYROSCOPE_PYTHON_APPLICATION_NAME",
+        "talk-go.daily_bridge.python",
+    ).strip()
+    tags = {
+        "environment": os.getenv("PYROSCOPE_ENVIRONMENT")
+        or os.getenv("ENVIRONMENT")
+        or os.getenv("SENTRY_ENVIRONMENT")
+        or "",
+        "deployment": os.getenv("GKE_DEPLOYMENT_NAME") or os.getenv("FLY_APP_NAME") or "",
+        "pod": os.getenv("HOSTNAME") or "",
+        "node": os.getenv("NODE_NAME") or "",
+        "process": "daily-bridge",
+        "language": "python",
+    }
+    tags = {key: value for key, value in tags.items() if value}
+    kwargs = {
+        "application_name": application_name,
+        "server_address": server_address,
+        "basic_auth_username": basic_auth_username,
+        "basic_auth_password": basic_auth_password,
+        "sample_rate": sample_rate,
+        "oncpu": True,
+        "gil_only": os.getenv("PYROSCOPE_PYTHON_GIL_ONLY", "0").strip() == "1",
+        "enable_logging": False,
+        "tags": tags,
+    }
+    tenant_id = os.getenv("PYROSCOPE_TENANT_ID", "").strip()
+    if tenant_id:
+        kwargs["tenant_id"] = tenant_id
+    try:
+        pyroscope.configure(**kwargs)
+    except Exception as exc:
+        log(f"pyroscope configure failed: {exc}")
+        return
+    log(f"pyroscope enabled: application={application_name}")
 
 
 def participant_id(participant):
@@ -81,13 +183,21 @@ class BridgeHandler(EventHandler):
 
     def on_audio_data(self, participant_id_value, audio, audio_source):
         try:
+            start = time.perf_counter()
+            audio_bytes = bytes(audio.audio_frames)
+            timings.record("py_daily_audio_bytes_copy", time.perf_counter() - start)
+            start = time.perf_counter()
+            data = base64.b64encode(audio_bytes).decode("ascii")
+            timings.record("py_daily_audio_base64_encode", time.perf_counter() - start)
+            start = time.perf_counter()
             emit(
                 "audio",
                 participant_id=participant_id_value,
                 sample_rate=audio.sample_rate,
                 channels=audio.num_channels,
-                data=base64.b64encode(bytes(audio.audio_frames)).decode("ascii"),
+                data=data,
             )
+            timings.record("py_daily_audio_emit_stdout", time.perf_counter() - start)
         except Exception as exc:
             log(f"audio callback error: {exc}")
 
@@ -181,17 +291,30 @@ def stdin_loop(client, audio_source, stop_event):
         if stop_event.is_set():
             break
         try:
+            start = time.perf_counter()
             command = json.loads(line)
+            timings.record("py_stdin_json_loads", time.perf_counter() - start)
         except json.JSONDecodeError:
             continue
         command_type = command.get("type")
         if command_type == "audio":
+            start = time.perf_counter()
             raw = base64.b64decode(command.get("data") or "")
+            timings.record("py_stdin_audio_base64_decode", time.perf_counter() - start)
+            start = time.perf_counter()
             audio_source.write_frames(raw)
+            timings.record("py_stdin_audio_write_frames", time.perf_counter() - start)
         elif command_type == "message":
             client.send_app_message(command.get("data"), None)
         elif command_type == "leave":
             break
+
+
+def timing_loop(stop_event, interval_seconds=10):
+    while not stop_event.wait(interval_seconds):
+        entries = timings.snapshot_and_reset()
+        if entries:
+            log("audio_timing " + json.dumps({"event": "audio_timing", "timings": entries}, separators=(",", ":")))
 
 
 def leave(client):
@@ -215,6 +338,8 @@ def leave(client):
 
 
 def main():
+    configure_pyroscope()
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--room-url", required=True)
     parser.add_argument("--token", default="")
@@ -236,6 +361,10 @@ def main():
     signal.signal(signal.SIGTERM, handle_signal)
     signal.signal(signal.SIGINT, handle_signal)
 
+    timing_thread = threading.Thread(target=timing_loop, args=(stop_event,))
+    timing_thread.daemon = True
+    timing_thread.start()
+
     if join_room(args, handler, client, audio_track):
         stdin_thread = threading.Thread(target=stdin_loop, args=(client, audio_source, stop_event))
         stdin_thread.daemon = True
@@ -244,6 +373,9 @@ def main():
             stdin_thread.join(timeout=0.2)
 
     stop_event.set()
+    final_entries = timings.snapshot_and_reset()
+    if final_entries:
+        log("audio_timing " + json.dumps({"event": "audio_timing", "timings": final_entries}, separators=(",", ":")))
     leave(client)
     time.sleep(0.05)
 

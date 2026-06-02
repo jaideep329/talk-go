@@ -133,17 +133,27 @@ func (p *PlaybackSinkProcessor) runPlayback() {
 	ticker := time.NewTicker(20 * time.Millisecond)
 	defer ticker.Stop()
 
+	var lastTick time.Time
 	for {
 		select {
 		case <-p.ctx.Done():
 			return
 		case f := <-p.queueCh:
 			p.handleQueueFrame(f)
-		case <-ticker.C:
+		case tickAt := <-ticker.C:
+			if !lastTick.IsZero() {
+				if lag := tickAt.Sub(lastTick) - 20*time.Millisecond; lag > 0 {
+					p.recordAudioTiming("go_playback_tick_lag", lag)
+				}
+			}
+			lastTick = tickAt
+			start := time.Now()
 			if p.tick() {
+				p.recordAudioTiming("go_playback_tick_work", time.Since(start))
 				close(p.endDone)
 				return
 			}
+			p.recordAudioTiming("go_playback_tick_work", time.Since(start))
 		}
 	}
 }
@@ -237,7 +247,9 @@ func (p *PlaybackSinkProcessor) tick() bool {
 		}
 	}
 mix:
+	start := time.Now()
 	pcm := p.mixPCM(botPCM)
+	p.recordAudioTiming("go_playback_mix_pcm", time.Since(start))
 	_ = p.taskCtx.Room.WriteAudioPCM(pcm)
 	return false
 }
@@ -295,12 +307,21 @@ func (p *PlaybackSinkProcessor) mixPCM(botPCM []int16) []byte {
 
 func (p *PlaybackSinkProcessor) decodeBotFrame(opusData []byte) []int16 {
 	pcm := make([]int16, framePCM)
+	start := time.Now()
 	_, err := p.opusDecoder.Decode(opusData, pcm)
+	p.recordAudioTiming("go_playback_opus_decode", time.Since(start))
 	if err != nil {
 		p.taskCtx.Logger.Println("playback opus decode error:", err)
 		return nil
 	}
 	return pcm
+}
+
+func (p *PlaybackSinkProcessor) recordAudioTiming(name string, elapsed time.Duration) {
+	if p == nil || p.taskCtx == nil || p.taskCtx.Room == nil {
+		return
+	}
+	p.taskCtx.Room.recordAudioTiming(name, elapsed)
 }
 
 func (p *PlaybackSinkProcessor) writeSilenceTail() {

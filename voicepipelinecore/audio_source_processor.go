@@ -50,10 +50,12 @@ func (a *AudioSourceProcessor) PushPCM(pcmBytes []byte, sampleRate, channels int
 	if len(pcmBytes) == 0 {
 		return
 	}
+	start := time.Now()
 	samples := make([]int16, len(pcmBytes)/2)
 	for i := range samples {
 		samples[i] = int16(binary.LittleEndian.Uint16(pcmBytes[i*2:]))
 	}
+	a.recordAudioTiming("go_audio_source_pcm_scan", time.Since(start))
 	a.maybeMarkFirstUserAudio(samples)
 	a.PushFrame(NewAudioFrame(pcmBytes), Downstream)
 }
@@ -66,4 +68,11 @@ func (a *AudioSourceProcessor) ProcessFrame(ctx context.Context, frame Frame, di
 	default:
 		a.PushFrame(frame, dir)
 	}
+}
+
+func (a *AudioSourceProcessor) recordAudioTiming(name string, elapsed time.Duration) {
+	if a == nil || a.taskCtx == nil || a.taskCtx.Room == nil {
+		return
+	}
+	a.taskCtx.Room.recordAudioTiming(name, elapsed)
 }

@@ -128,30 +128,29 @@
 <body>
 <main>
   <h1>TalkGo CPU Throttling and Audio Jitter Notes</h1>
-  <p class="lede">Why the Opus path exists, how Kubernetes CPU throttling works at <code>100m</code>, and why it hurts a 20ms audio loop.</p>
+  <p class="lede">Why the Opus path existed, how Kubernetes CPU throttling works at <code>100m</code>, and why it hurts a 20ms audio loop.</p>
 
   <section>
-    <h2>Brief Answer: Why Opus Encode/Decode Exists</h2>
+    <h2>Brief Answer: Why Opus Encode/Decode Existed</h2>
     <p>
-      In the current code, Opus is used as an internal audio-frame format between <code>TTSProcessor</code> and <code>PlaybackSinkProcessor</code>.
-      Cartesia gives us PCM. <code>TTSProcessor.makeOpusData</code> chunks that PCM into 20ms frames and encodes each frame to Opus before pushing an <code>AudioFrame</code> downstream.
-      Later, <code>PlaybackSinkProcessor.decodeBotFrame</code> decodes the Opus back to PCM so it can mix bot speech with the required background-office audio and then send PCM to Daily through the Python bridge.
+      Before the PCM-path change, Opus was used as an internal audio-frame format between <code>TTSProcessor</code> and <code>PlaybackSinkProcessor</code>.
+      Cartesia gives us PCM. The old <code>TTSProcessor.makeOpusData</code> path chunked that PCM into 20ms frames and encoded each frame to Opus before pushing an <code>AudioFrame</code> downstream.
+      Later, the old <code>PlaybackSinkProcessor.decodeBotFrame</code> path decoded the Opus back to PCM so it could mix bot speech with the required background-office audio and then send PCM to Daily through the Python bridge.
     </p>
     <div class="callout ok">
-      <strong>Current conclusion:</strong> the Opus step is not required by Daily egress. Daily's <code>CustomAudioSource.write_frames</code> accepts 16-bit linear PCM. For the current architecture, Opus is mostly an internal queue/packet format. Since playback immediately needs PCM again for mixing and Daily writing, this is a real CPU cost with no obvious benefit on the output path.
+      <strong>Implemented conclusion:</strong> the Opus step is not required by Daily egress. Daily's <code>CustomAudioSource.write_frames</code> accepts 16-bit linear PCM. For the current architecture, Opus was mostly an internal queue/packet format. Since playback immediately needs PCM again for mixing and Daily writing, the branch now keeps TTS audio as raw 20ms PCM frames inside Go.
     </div>
-    <pre><code>// TTSProcessor: PCM -> Opus -> AudioFrame
-func (t *TTSProcessor) makeOpusData() []byte {
-    frame := make([]int16, 480)      // 20ms at 24kHz mono
-    ...
-    n, err := t.opusEncoder.Encode(frame, opusData)
-    return opusData[:n]
+    <pre><code>// TTSProcessor: PCM -> AudioFrame
+func (t *TTSProcessor) nextPCMFrame() []byte {
+    frame := make([]byte, framePCMBytes) // 20ms at 24kHz mono
+    copy(frame, t.pcmBuffer[:framePCMBytes])
+    return frame
 }
 
-// PlaybackSinkProcessor: Opus -> PCM -> mix with background -> Daily
-func (p *PlaybackSinkProcessor) decodeBotFrame(opusData []byte) []int16 {
+// PlaybackSinkProcessor: PCM bytes -> samples -> mix with background -> Daily
+func (p *PlaybackSinkProcessor) botPCMFrame(pcmBytes []byte) []int16 {
     pcm := make([]int16, framePCM)
-    _, err := p.opusDecoder.Decode(opusData, pcm)
+    ...
     return pcm
 }</code></pre>
   </section>
@@ -324,8 +323,8 @@ func (p *PlaybackSinkProcessor) decodeBotFrame(opusData []byte) []int16 {
     <ol>
       <li>LLM tokens start arriving.</li>
       <li>TTS starts producing PCM chunks.</li>
-      <li>Go encodes those chunks into Opus frames.</li>
-      <li>Playback decodes Opus back to PCM.</li>
+      <li>Go chunks those bytes into 20ms PCM frames.</li>
+      <li>Playback converts PCM bytes to samples.</li>
       <li>Playback mixes bot PCM with required background-office audio.</li>
       <li>Go writes mixed PCM to the Python bridge every 20ms.</li>
       <li>Python calls Daily's native <code>CustomAudioSource.write_frames</code>.</li>
@@ -363,7 +362,7 @@ If a completion callback is provided, this function is non-blocking.</code></pre
     <ol>
       <li>
         <strong>Remove the Opus round trip.</strong>
-        Keep bot audio as PCM in the Go pipeline, and let playback mix PCM directly with background PCM. This removes Go's biggest hot path: <code>opus.Encode</code>, plus the corresponding decode.
+        This branch keeps bot audio as PCM in the Go pipeline, and lets playback mix PCM directly with background PCM. This removes Go's biggest historical hot path: <code>opus.Encode</code>, plus the corresponding decode.
       </li>
       <li>
         <strong>Experiment with fewer writes to Daily.</strong>

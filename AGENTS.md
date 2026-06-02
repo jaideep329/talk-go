@@ -121,7 +121,7 @@ Core pipeline files live under `voicepipelinecore/` unless marked as root-level.
 | `llmrouter/` (sub-package) | Live-LLM resilience: model-group + endpoint registry (`groups.go`), Redis endpoint-health parse/selection + blacklist write-back (`health.go`, `selection.go`), per-provider OpenAI-format request building + SSE streaming (`providers.go`, `client.go`), Vertex OAuth token minting over stdlib crypto with the SA key lazily fetched from S3 (`vertex_token.go`, `s3.go`), lock-guarded re-poll trigger to the Python US endpoint (`poll_trigger.go`), and the best-effort `CallLog`/`LogSink` (`logging.go`). Implements `voicepipelinecore.LLMClient`; depends on a narrow `RedisStore` interface (satisfied by `disha.RedisClient`). The poll-trigger URL and Vertex creds path are read from env by the router itself; the core package never imports it — the bot wires only the group, Redis, and LogSink |
 | `phonetic_filter.go` | Core phonetic-replacement filter applied to text before each Cartesia send (token→replacement map injected by the bot via `NewTTSProcessor`). Returning `""` drops a non-speakable fragment, matching Python's `PhoneticTextFilter` |
 | `tts_processor.go` | Cartesia client + sentence aggregator + EndFrame drain controller. **Three goroutines per session:** `runReader` (lazy connect + websocket read, emits typed events on `ttsEvents`), `orchestrator` (owns ALL TTS state — aggregation, synthesis, shutdown — and drives Cartesia), and base input/process loops. `ProcessFrame` is a thin relay over a `commands` channel. EndFrame blocks `ProcessFrame` until orchestrator forwards it; this lets PlaybackSink/etc. shut down in pipeline order. Synthesis state is a single bool `cartesiaTextSent` ("does Cartesia owe us a `done` event?") — replaces the older 3-state enum and the older boolean pair. No explicit pending-end timer; the global `wg.Wait` 10s timeout in `completeEnd` is the ultimate escape hatch if Cartesia hangs on `done`. Context-id validation via `atomic.Value`. `ttsDialURL` is a package var; orchestrator waits on `connected` before processing commands |
-| `playback_sink_processor.go` | Writes outbound PCM to the Daily bridge. **Three goroutines:** base input/process loops + a `runPlayback` goroutine with the 20ms ticker. `ProcessFrame` relays through `queueCh`; `runPlayback` owns `playbackQueue`, opus decode for TTS frames, the background mixer, and pacing. Fires `OnBotFirstSpeech` on the first played audio frame and `Broadcast`s `BotStartedSpeakingFrame`; broadcasts `BotStoppedSpeakingFrame` after `TTSDoneFrame` (both directions, per Pipecat's MediaSender pattern). On `InterruptFrame` walks `playbackQueue` preserving `!IsInterruptible()` frames (EndFrame survives the purge). On `EndFrame` writes a short silence tail before forwarding (matches Pipecat's `audio_out_end_silence_secs`). Metrics (E2E latency) |
+| `playback_sink_processor.go` | Writes outbound PCM to the Daily bridge. **Three goroutines:** base input/process loops + a `runPlayback` goroutine with the 20ms ticker. `ProcessFrame` relays through `queueCh`; `runPlayback` owns `playbackQueue`, PCM conversion for TTS frames, the background mixer, and pacing. Fires `OnBotFirstSpeech` on the first played audio frame and `Broadcast`s `BotStartedSpeakingFrame`; broadcasts `BotStoppedSpeakingFrame` after `TTSDoneFrame` (both directions, per Pipecat's MediaSender pattern). On `InterruptFrame` walks `playbackQueue` preserving `!IsInterruptible()` frames (EndFrame survives the purge). On `EndFrame` writes a short silence tail before forwarding (matches Pipecat's `audio_out_end_silence_secs`). Metrics (E2E latency) |
 
 #### Testing infrastructure (Pipecat parity)
 
@@ -253,7 +253,7 @@ The `interruptSent` gate is what protects legitimate barge-in turns: when the us
 
 **LLMResponseStartFrame carries timestamp:** `StartedAt time.Time` is set by LLM when the turn begins. PlaybackSink uses it for accurate E2E latency measurement (measures from LLM turn start to first audio frame played).
 
-**Word timestamp interleaving in TTS:** TTS tracks `audioTimePushed` (seconds) and buffers `pendingWords` from Cartesia timestamp messages. After each opus frame is pushed, words whose `start <= audioTimePushed` are emitted as `WordTimestampFrame`. This means words arrive at PlaybackSink in the correct playback order.
+**Word timestamp interleaving in TTS:** TTS tracks `audioTimePushed` (seconds) and buffers `pendingWords` from Cartesia timestamp messages. After each 20ms PCM frame is pushed, words whose `start <= audioTimePushed` are emitted as `WordTimestampFrame`. This means words arrive at PlaybackSink in the correct playback order.
 
 **Commit timing:** Assistant text is committed to conversation history when `TTSDoneFrame` flows upstream from PlaybackSink through TTS → LLM → ContextAggregator (normal completion) or on barge-in (partial text from internally accumulated words). NOT deferred to next turn.
 
@@ -278,8 +278,7 @@ Cleanup happens only when the queued `EndFrame` propagates through the pipeline 
 
 ### Key Technical Details
 
-- **Audio formats**: Soniox expects s16le/16kHz/mono. The Daily bridge sends Go 16kHz mono PCM for user audio and accepts 24kHz mono PCM for bot audio. Cartesia outputs s16le/24kHz/mono. TTS still emits Opus-framed `AudioFrame`s internally, and PlaybackSink decodes those back to PCM before mixing and writing to Daily.
-- **Opus decode**: PlaybackSink uses `opus.NewDecoder(24000, 1)` to decode internal TTS audio frames before mixing.
+- **Audio formats**: Soniox expects s16le/16kHz/mono. The Daily bridge sends Go 16kHz mono PCM for user audio and accepts 24kHz mono PCM for bot audio. Cartesia outputs s16le/24kHz/mono. TTS emits internal `AudioFrame`s as raw 20ms s16le/24kHz/mono PCM chunks, and PlaybackSink converts those bytes to samples before mixing and writing PCM to Daily. Do not reintroduce an internal Opus encode/decode round trip unless the output boundary itself changes to require encoded media.
 - **Pacing**: PCM frames must be sent to Daily at real-time pace (one 20ms frame per tick) or the browser jitter buffer overflows and drops audio.
 - **Websocket idle timeouts**: Soniox and Cartesia close connections after ~15-20s of no data. Pipeline is initialized lazily on client connect.
 - **Concurrent websocket writes**: gorilla/websocket panics on concurrent writes. Each ws has exactly one writer goroutine (STT's `writeAudioWebsocket`; TTS writes only from the orchestrator goroutine).
@@ -333,7 +332,6 @@ For the local Disha bridge, use `DISHA_API_URL=http://localhost:8000`, `DISHA_RE
 ### Dependencies
 
 - `github.com/gorilla/websocket` — websocket client for Soniox and Cartesia only (UI events no longer use a custom WebSocket)
-- `github.com/hraban/opus` — CGO wrapper around libopus (requires `brew install opus opusfile pkg-config`)
 - `github.com/hajimehoshi/go-mp3` — MP3 decoding for background office sound
 - `github.com/redis/go-redis/v9` — Disha Redis client
 - `github.com/alicebob/miniredis/v2` — Redis unit-test server
@@ -342,7 +340,6 @@ For the local Disha bridge, use `DISHA_API_URL=http://localhost:8000`, `DISHA_RE
 ### Build & Run
 
 ```bash
-brew install opus opusfile pkg-config  # one-time
 go build ./...
 ./talk-go  # or: go run .
 # Open http://localhost:3000, click Connect
@@ -365,7 +362,7 @@ go test -v -run TestUserIdle ./...  # one processor's tests
 - Typical memory depends on both the Go process and the Python Daily bridge process; check both when profiling local calls.
 - In GKE, use `process_usage` log lines for high-level Go-vs-Python attribution before deeper profilers. `DailyRoom` starts a lightweight sampler for each bridge process and logs one JSON payload every 10s with Go/Python PIDs, process CPU millicores over the sample window, current RSS, RSS high-water mark, and container cgroup CPU throttling (`container_cpu_mcores`, `container_cpu_throttled_periods`, `container_cpu_throttled_ms`, `container_cpu_throttled_fraction`). Query `textPayload:"process_usage"` for a conversation/pod to see whether `/app/talk-go`, `daily_bridge.py`, or container CPU throttling is the main jitter suspect.
 - Pyroscope profiling is gated by `PYROSCOPE_ENABLED=1` plus `PYROSCOPE_SERVER_ADDRESS`, `PYROSCOPE_BASIC_AUTH_USER`, and `PYROSCOPE_BASIC_AUTH_PASSWORD`. Go reports as `talk-go.worker.go`; the Python Daily bridge reports as `talk-go.daily_bridge.python`. Keep labels low-cardinality (`environment`, `deployment`, `pod`, `process`, `language`) and do not add conversation IDs as Pyroscope tags.
-- Use `audio_timing` log lines alongside Pyroscope when chasing jitter. They summarize 10s windows for 20ms-audio-path work such as Go/Python base64+JSON bridge I/O, playback tick lag/work, Opus encode/decode, TTS JSON/base64 decode, and user PCM scanning. Profiles show CPU stacks; `audio_timing` shows deadline misses and where the real-time path is spending wall time.
+- Use `audio_timing` log lines alongside Pyroscope when chasing jitter. They summarize 10s windows for 20ms-audio-path work such as Go/Python base64+JSON bridge I/O, playback tick lag/work, PCM frame copy/conversion, TTS JSON/base64 decode, and user PCM scanning. Profiles show CPU stacks; `audio_timing` shows deadline misses and where the real-time path is spending wall time.
 
 #### Live Call Investigation Runbook
 
@@ -517,7 +514,7 @@ curl -sG "$PYROSCOPE_SERVER_ADDRESS/pyroscope/render" \
 
 ### Known Issues / Gotchas
 
-- Audio can sound choppy if Opus frames aren't paced at 20ms intervals — use `time.Ticker`, not `time.Sleep`
+- Audio can sound choppy if PCM frames aren't paced at 20ms intervals — use `time.Ticker`, not `time.Sleep`
 - `/connect` requires an existing Daily `room_url` and accepts `token`/`bot_token`; it does not create rooms. When `conversation_id` is supplied by JSON body or query param, it routes through the common `disha.Bot` boundary; `bot_type` is optional and defaults to `sales_call`.
 - `/connect` must create `PipelineTask`s from a detached/background context, not `r.Context()`: Disha Create Room calls `/connect` internally, and Go cancels `r.Context()` when the HTTP handler returns, which would stop STT/AudioSource immediately after room creation.
 - Upstream frames (WordTimestampFrame, TTSDoneFrame, BotStarted/StoppedSpeakingFrame) pass through TTS and LLM as forwarding hops to reach ContextAggregator and UserIdleProcessor; the `default: PushFrame(frame, dir)` in each processor handles this

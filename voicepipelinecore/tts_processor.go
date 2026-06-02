@@ -3,7 +3,6 @@ package voicepipelinecore
 import (
 	"context"
 	"encoding/base64"
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"math/rand/v2"
@@ -16,7 +15,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/gorilla/websocket"
-	"github.com/hraban/opus"
 )
 
 func endsWithPunctuation(s string) bool {
@@ -106,7 +104,6 @@ type TTSProcessor struct {
 	connected chan struct{} // closed when websocketConn is established
 
 	websocketConn *websocket.Conn
-	opusEncoder   *opus.Encoder
 	closeOnce     sync.Once // idempotent websocket close
 }
 
@@ -149,18 +146,13 @@ type CartesiaTTSDoneMessage struct {
 // filter itself is built and owned here, so the dictionary never has to
 // live on the shared TaskContext. A nil/empty dict means no filtering.
 func NewTTSProcessor(taskCtx *TaskContext, phoneticDict map[string]string) *TTSProcessor {
-	opusEncoder, err := opus.NewEncoder(24000, 1, opus.AppVoIP)
-	if err != nil {
-		taskCtx.Logger.Println("opus encoder init failed:", err)
-	}
 	t := &TTSProcessor{
-		taskCtx:     taskCtx,
-		metrics:     NewProcessorMetrics("tts"),
-		phonetic:    newPhoneticFilter(phoneticDict),
-		opusEncoder: opusEncoder,
-		commands:    make(chan ttsCommand, 100),
-		ttsEvents:   make(chan ttsEvent, 100),
-		connected:   make(chan struct{}),
+		taskCtx:   taskCtx,
+		metrics:   NewProcessorMetrics("tts"),
+		phonetic:  newPhoneticFilter(phoneticDict),
+		commands:  make(chan ttsCommand, 100),
+		ttsEvents: make(chan ttsEvent, 100),
+		connected: make(chan struct{}),
 	}
 	t.BaseProcessor = NewBaseProcessor("TTS", t, taskCtx)
 	return t
@@ -583,13 +575,13 @@ func (t *TTSProcessor) handleAudioChunkData(audioData []byte) {
 	}
 	t.pcmBuffer = append(t.pcmBuffer, audioData...)
 
-	for len(t.pcmBuffer) >= 960 {
-		opusFrame := t.makeOpusData()
-		if opusFrame == nil {
+	for len(t.pcmBuffer) >= framePCMBytes {
+		pcmFrame := t.nextPCMFrame()
+		if pcmFrame == nil {
 			break
 		}
-		t.PushFrame(NewAudioFrame(opusFrame), Downstream)
-		t.audioTimePushed += 0.02 // 20ms per opus frame
+		t.PushFrame(NewAudioFrame(pcmFrame), Downstream)
+		t.audioTimePushed += 0.02 // 20ms per PCM frame
 		t.emitPendingWords()
 	}
 }
@@ -609,12 +601,12 @@ func (t *TTSProcessor) pushRemainingAudioFrames() {
 		return
 	}
 	if len(t.pcmBuffer) > 0 {
-		for len(t.pcmBuffer) < 960 {
-			t.pcmBuffer = append(t.pcmBuffer, 0, 0)
+		for len(t.pcmBuffer) < framePCMBytes {
+			t.pcmBuffer = append(t.pcmBuffer, 0)
 		}
-		opusFrame := t.makeOpusData()
-		if opusFrame != nil {
-			t.PushFrame(NewAudioFrame(opusFrame), Downstream)
+		pcmFrame := t.nextPCMFrame()
+		if pcmFrame != nil {
+			t.PushFrame(NewAudioFrame(pcmFrame), Downstream)
 			t.audioTimePushed += 0.02
 		}
 	}
@@ -624,23 +616,16 @@ func (t *TTSProcessor) pushRemainingAudioFrames() {
 	t.pendingWords = nil
 }
 
-func (t *TTSProcessor) makeOpusData() []byte {
-	if len(t.pcmBuffer) < 960 {
+func (t *TTSProcessor) nextPCMFrame() []byte {
+	if len(t.pcmBuffer) < framePCMBytes {
 		return nil
 	}
-	frame := make([]int16, 480)
-	for i := 0; i < 480; i++ {
-		frame[i] = int16(binary.LittleEndian.Uint16(t.pcmBuffer[i*2:]))
-	}
-	t.pcmBuffer = t.pcmBuffer[960:]
-	opusData := make([]byte, 1000)
 	start := time.Now()
-	n, err := t.opusEncoder.Encode(frame, opusData)
-	t.recordAudioTiming("go_tts_opus_encode", time.Since(start))
-	if err != nil {
-		t.taskCtx.Logger.Println("opus encode error:", err)
-	}
-	return opusData[:n]
+	frame := make([]byte, framePCMBytes)
+	copy(frame, t.pcmBuffer[:framePCMBytes])
+	t.pcmBuffer = t.pcmBuffer[framePCMBytes:]
+	t.recordAudioTiming("go_tts_pcm_frame_copy", time.Since(start))
+	return frame
 }
 
 // --- Cartesia websocket reader ---

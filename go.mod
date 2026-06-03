@@ -14,6 +14,7 @@ require (
 	github.com/livekit/server-sdk-go/v2 v2.13.3
 	github.com/pion/webrtc/v4 v4.2.3
 	github.com/redis/go-redis/v9 v9.17.2
+	gopkg.in/hraban/opus.v2 v2.0.0-20230925203106-0188a62cb302
 )
 
 require (
@@ -85,6 +86,5 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260427160629-7cedc36a6bc4 // indirect
 	google.golang.org/grpc v1.80.0 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
-	gopkg.in/hraban/opus.v2 v2.0.0-20230925203106-0188a62cb302 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

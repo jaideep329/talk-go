@@ -13,10 +13,11 @@ import (
 
 	lkmedia "github.com/livekit/media-sdk"
 	"github.com/livekit/protocol/livekit"
-	"github.com/livekit/protocol/logger"
 	lksdk "github.com/livekit/server-sdk-go/v2"
 	lkpcm "github.com/livekit/server-sdk-go/v2/pkg/media"
 	"github.com/pion/webrtc/v4"
+	pionmedia "github.com/pion/webrtc/v4/pkg/media"
+	"gopkg.in/hraban/opus.v2"
 
 	"github.com/jaideep329/talk-go/internal/perfdiag"
 	"github.com/jaideep329/talk-go/internal/sentryutil"
@@ -39,7 +40,11 @@ type LiveKitRoom struct {
 	audioSource *AudioSourceProcessor
 
 	room     *lksdk.Room
-	outTrack *lkpcm.PCMLocalTrack
+	outTrack *lksdk.LocalTrack
+
+	opusMu        sync.Mutex
+	opusEncoder   *opus.Encoder
+	opusEncodeBuf []byte
 
 	audioTiming *audioTimingAggregator
 	perfDiag    bool
@@ -149,12 +154,18 @@ func startLiveKitRoomAttempt(roomURL, roomName, token string, taskCtx *TaskConte
 	}
 	r.room = room
 
-	outTrack, err := lkpcm.NewPCMLocalTrack(liveKitOutputSampleRate, 1, logger.GetLogger())
+	// Let Pion bind the negotiated Opus clock/channels/fmtp. WebRTC Opus is
+	// commonly advertised as audio/opus/48000/2 even when the payload is mono.
+	outTrack, err := lksdk.NewLocalTrack(webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus})
 	if err != nil {
 		r.Disconnect()
-		return nil, fmt.Errorf("create livekit pcm track: %w", err)
+		return nil, fmt.Errorf("create livekit opus track: %w", err)
 	}
 	r.outTrack = outTrack
+	if err := r.resetOpusEncoder(); err != nil {
+		r.Disconnect()
+		return nil, fmt.Errorf("create livekit opus encoder: %w", err)
+	}
 	if _, err := room.LocalParticipant.PublishTrack(outTrack, &lksdk.TrackPublicationOptions{
 		Name:   "talk-go-audio",
 		Source: livekit.TrackSource_MICROPHONE,
@@ -194,7 +205,7 @@ func (r *LiveKitRoom) RoomName() string {
 }
 
 func (r *LiveKitRoom) OutputSampleRate() int {
-	return liveKitOutputSampleRate
+	return defaultOutputSampleRate
 }
 
 func (r *LiveKitRoom) SendAppMessage(v interface{}) error {
@@ -236,26 +247,52 @@ func (r *LiveKitRoom) WriteAudioPCM(pcm []byte) error {
 	if len(pcm)%2 != 0 {
 		pcm = pcm[:len(pcm)-1]
 	}
-	var sample lkmedia.PCM16Sample
+	r.opusMu.Lock()
+	defer r.opusMu.Unlock()
+	if r.opusEncoder == nil {
+		if err := r.resetOpusEncoderLocked(); err != nil {
+			return err
+		}
+	}
+	var sample []int16
 	if r.perfDiagnosticsEnabled() {
 		start := time.Now()
 		sample = pcmBytesToLiveKitSample(pcm)
 		r.recordAudioTiming("go_livekit_out_pcm_bytes_to_samples", time.Since(start))
 
 		start = time.Now()
-		err := r.outTrack.WriteSample(sample)
+		encodedLen, err := r.opusEncoder.Encode(sample, r.opusEncodeBuf)
+		r.recordAudioTiming("go_livekit_out_opus_encode", time.Since(start))
+		if err != nil {
+			return err
+		}
+
+		start = time.Now()
+		err = r.outTrack.WriteSample(pionmedia.Sample{Data: r.opusEncodeBuf[:encodedLen], Duration: playbackFrameDuration}, nil)
 		r.recordAudioTiming("go_livekit_out_write_sample", time.Since(start))
 		return err
 	}
 	sample = pcmBytesToLiveKitSample(pcm)
-	return r.outTrack.WriteSample(sample)
+	encodedLen, err := r.opusEncoder.Encode(sample, r.opusEncodeBuf)
+	if err != nil {
+		return err
+	}
+	return r.outTrack.WriteSample(pionmedia.Sample{Data: r.opusEncodeBuf[:encodedLen], Duration: playbackFrameDuration}, nil)
 }
 
 func (r *LiveKitRoom) ClearAudioBuffer() {
-	if r == nil || r.outTrack == nil {
+	if r == nil {
 		return
 	}
-	r.outTrack.ClearQueue()
+	r.opusMu.Lock()
+	defer r.opusMu.Unlock()
+	if err := r.resetOpusEncoderLocked(); err != nil {
+		r.log("[%s] LiveKit opus encoder reset error: %v", r.roomName, err)
+		sentryutil.Capture(sentryutil.Event{
+			Err:  err,
+			Tags: map[string]string{"component": "livekit", "operation": "opus_encoder_reset"},
+		})
+	}
 }
 
 func (r *LiveKitRoom) Disconnect() {
@@ -557,6 +594,24 @@ func (r *LiveKitRoom) log(format string, args ...interface{}) {
 	}
 }
 
+func (r *LiveKitRoom) resetOpusEncoder() error {
+	r.opusMu.Lock()
+	defer r.opusMu.Unlock()
+	return r.resetOpusEncoderLocked()
+}
+
+func (r *LiveKitRoom) resetOpusEncoderLocked() error {
+	enc, err := opus.NewEncoder(defaultOutputSampleRate, 1, opus.AppVoIP)
+	if err != nil {
+		return err
+	}
+	r.opusEncoder = enc
+	if len(r.opusEncodeBuf) < liveKitOpusMaxPacket {
+		r.opusEncodeBuf = make([]byte, liveKitOpusMaxPacket)
+	}
+	return nil
+}
+
 type liveKitPCMWriter struct {
 	room          *LiveKitRoom
 	participantID string
@@ -604,8 +659,8 @@ func firstNonEmptyString(values ...string) string {
 	return ""
 }
 
-func pcmBytesToLiveKitSample(pcm []byte) lkmedia.PCM16Sample {
-	sample := make(lkmedia.PCM16Sample, len(pcm)/2)
+func pcmBytesToLiveKitSample(pcm []byte) []int16 {
+	sample := make([]int16, len(pcm)/2)
 	for i := range sample {
 		sample[i] = int16(binary.LittleEndian.Uint16(pcm[i*2:]))
 	}

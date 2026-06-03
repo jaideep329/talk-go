@@ -6,6 +6,8 @@ import (
 	"time"
 )
 
+const customOutputSampleRate = 48000
+
 type testOutputRoom struct {
 	outputSampleRate int
 }
@@ -24,10 +26,10 @@ func (r *testOutputRoom) perfDiagnosticsEnabled() bool            { return false
 
 func TestTTSUsesRoomOutputSampleRateForFrames(t *testing.T) {
 	fix := newTestFixture(t)
-	fix.TaskCtx.Room = &testOutputRoom{outputSampleRate: liveKitOutputSampleRate}
+	fix.TaskCtx.Room = &testOutputRoom{outputSampleRate: customOutputSampleRate}
 	p := NewTTSProcessor(fix.TaskCtx, nil)
 
-	wantFrameBytes := pcmFrameBytesForRate(liveKitOutputSampleRate)
+	wantFrameBytes := pcmFrameBytesForRate(customOutputSampleRate)
 	input := make([]byte, wantFrameBytes+4)
 	for i := range input {
 		input[i] = byte(i % 251)
@@ -37,24 +39,24 @@ func TestTTSUsesRoomOutputSampleRateForFrames(t *testing.T) {
 	frame := p.nextPCMFrame()
 
 	if len(frame) != wantFrameBytes {
-		t.Fatalf("expected %d-byte 48k PCM frame, got %d", wantFrameBytes, len(frame))
+		t.Fatalf("expected %d-byte PCM frame, got %d", wantFrameBytes, len(frame))
 	}
 	if !bytes.Equal(frame, input[:wantFrameBytes]) {
 		t.Fatal("PCM frame bytes were modified")
 	}
 	if !bytes.Equal(p.pcmBuffer, input[wantFrameBytes:]) {
-		t.Fatal("PCM buffer was not advanced by exactly one 48k frame")
+		t.Fatal("PCM buffer was not advanced by exactly one frame")
 	}
 }
 
 func TestPlaybackUsesRoomOutputSampleRateForFrames(t *testing.T) {
 	fix := newTestFixture(t)
-	room := &testOutputRoom{outputSampleRate: liveKitOutputSampleRate}
+	room := &testOutputRoom{outputSampleRate: customOutputSampleRate}
 	fix.TaskCtx.Room = room
 	p := NewPlaybackSinkProcessor(fix.TaskCtx)
 
-	wantSamples := pcmSamplesPerFrameForRate(liveKitOutputSampleRate)
-	wantBytes := pcmFrameBytesForRate(liveKitOutputSampleRate)
+	wantSamples := pcmSamplesPerFrameForRate(customOutputSampleRate)
+	wantBytes := pcmFrameBytesForRate(customOutputSampleRate)
 	if p.frameSamples != wantSamples || p.frameBytes != wantBytes {
 		t.Fatalf("playback frame shape = %d samples/%d bytes, want %d/%d", p.frameSamples, p.frameBytes, wantSamples, wantBytes)
 	}
@@ -72,7 +74,7 @@ func TestRoomOutputSampleRates(t *testing.T) {
 	if got := (&DailyRoom{}).OutputSampleRate(); got != defaultOutputSampleRate {
 		t.Fatalf("Daily output sample rate = %d, want %d", got, defaultOutputSampleRate)
 	}
-	if got := (&LiveKitRoom{}).OutputSampleRate(); got != liveKitOutputSampleRate {
-		t.Fatalf("LiveKit output sample rate = %d, want %d", got, liveKitOutputSampleRate)
+	if got := (&LiveKitRoom{}).OutputSampleRate(); got != defaultOutputSampleRate {
+		t.Fatalf("LiveKit output sample rate = %d, want %d", got, defaultOutputSampleRate)
 	}
 }

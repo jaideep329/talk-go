@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/binary"
 	"io"
-	"math"
 	"os"
 	"time"
 
@@ -47,7 +46,7 @@ type PlaybackSinkProcessor struct {
 	playbackQueue   []Frame
 }
 
-func loadBackgroundPCM(path string, outputSampleRate int, logger interface{ Printf(string, ...interface{}) }) []int16 {
+func loadBackgroundPCM(path string, logger interface{ Printf(string, ...interface{}) }) []int16 {
 	f, err := os.Open(path)
 	if err != nil {
 		logger.Printf("Background audio not found (%s), mixing disabled\n", path)
@@ -60,7 +59,6 @@ func loadBackgroundPCM(path string, outputSampleRate int, logger interface{ Prin
 		logger.Printf("Background MP3 decode error: %v\n", err)
 		return nil
 	}
-	sourceSampleRate := dec.SampleRate()
 
 	raw, err := io.ReadAll(dec)
 	if err != nil {
@@ -75,19 +73,13 @@ func loadBackgroundPCM(path string, outputSampleRate int, logger interface{ Prin
 		right := int16(binary.LittleEndian.Uint16(raw[i*4+2:]))
 		mono[i] = int16((int32(left) + int32(right)) / 2)
 	}
-	if outputSampleRate <= 0 {
-		outputSampleRate = defaultOutputSampleRate
-	}
-	if sourceSampleRate > 0 && sourceSampleRate != outputSampleRate {
-		mono = resamplePCMLinear(mono, sourceSampleRate, outputSampleRate)
-	}
-	logger.Printf("Background audio loaded: %d samples (%.1fs at %dHz)\n", len(mono), float64(len(mono))/float64(outputSampleRate), outputSampleRate)
+	logger.Printf("Background audio loaded: %d samples (%.1fs at %dHz)\n", len(mono), float64(len(mono))/float64(dec.SampleRate()), dec.SampleRate())
 	return mono
 }
 
 func NewPlaybackSinkProcessor(taskCtx *TaskContext) *PlaybackSinkProcessor {
 	outputSampleRate := outputSampleRateFromRoom(taskCtx)
-	bgPCM := loadBackgroundPCM("background-office-sound.mp3", outputSampleRate, taskCtx.Logger)
+	bgPCM := loadBackgroundPCM("background-office-sound.mp3", taskCtx.Logger)
 
 	p := &PlaybackSinkProcessor{
 		taskCtx:          taskCtx,
@@ -397,40 +389,4 @@ func (p *PlaybackSinkProcessor) bytesPerFrame() int {
 		return framePCMBytes
 	}
 	return p.frameBytes
-}
-
-func resamplePCMLinear(input []int16, sourceRate, targetRate int) []int16 {
-	if len(input) == 0 || sourceRate <= 0 || targetRate <= 0 || sourceRate == targetRate {
-		return input
-	}
-	outLen := int(math.Round(float64(len(input)) * float64(targetRate) / float64(sourceRate)))
-	if outLen <= 0 {
-		return nil
-	}
-	if len(input) == 1 {
-		out := make([]int16, outLen)
-		for i := range out {
-			out[i] = input[0]
-		}
-		return out
-	}
-	out := make([]int16, outLen)
-	step := float64(sourceRate) / float64(targetRate)
-	for i := range out {
-		pos := float64(i) * step
-		idx := int(pos)
-		if idx >= len(input)-1 {
-			out[i] = input[len(input)-1]
-			continue
-		}
-		frac := pos - float64(idx)
-		sample := float64(input[idx])*(1-frac) + float64(input[idx+1])*frac
-		if sample > 32767 {
-			sample = 32767
-		} else if sample < -32768 {
-			sample = -32768
-		}
-		out[i] = int16(math.Round(sample))
-	}
-	return out
 }

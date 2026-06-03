@@ -4,7 +4,7 @@ import "time"
 
 const (
 	defaultOutputSampleRate = 24000
-	liveKitOutputSampleRate = 48000
+	liveKitOpusMaxPacket    = 4000
 	playbackFrameDuration   = 20 * time.Millisecond
 	pcmBytesPerSample       = 2
 

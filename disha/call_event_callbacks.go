@@ -155,6 +155,9 @@ func (c *CallEventCallbacks) enqueueDailyMetrics(stats voicepipelinecore.CallSta
 	if c == nil || c.api == nil || stats.MeetingID == "" || stats.UserSessionID == "" {
 		return
 	}
+	if stats.TransportType != "" && stats.TransportType != "daily" {
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), postCallRequestTimeout)
 	defer cancel()
 	req := EnqueueJobRequest{

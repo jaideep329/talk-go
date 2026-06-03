@@ -82,6 +82,8 @@ type TTSProcessor struct {
 	metrics  *ProcessorMetrics
 	phonetic *phoneticFilter
 
+	outputSampleRate int
+
 	// Aggregation state (orchestrator only)
 	currentAggregation string
 	currentContextId   string
@@ -147,12 +149,13 @@ type CartesiaTTSDoneMessage struct {
 // live on the shared TaskContext. A nil/empty dict means no filtering.
 func NewTTSProcessor(taskCtx *TaskContext, phoneticDict map[string]string) *TTSProcessor {
 	t := &TTSProcessor{
-		taskCtx:   taskCtx,
-		metrics:   NewProcessorMetrics("tts"),
-		phonetic:  newPhoneticFilter(phoneticDict),
-		commands:  make(chan ttsCommand, 100),
-		ttsEvents: make(chan ttsEvent, 100),
-		connected: make(chan struct{}),
+		taskCtx:          taskCtx,
+		metrics:          NewProcessorMetrics("tts"),
+		phonetic:         newPhoneticFilter(phoneticDict),
+		outputSampleRate: outputSampleRateFromRoom(taskCtx),
+		commands:         make(chan ttsCommand, 100),
+		ttsEvents:        make(chan ttsEvent, 100),
+		connected:        make(chan struct{}),
 	}
 	t.BaseProcessor = NewBaseProcessor("TTS", t, taskCtx)
 	return t
@@ -477,7 +480,7 @@ func (t *TTSProcessor) sendTextToTTS(text string) bool {
 		"model_id":       "sonic-3",
 		"transcript":     speakable,
 		"voice":          map[string]interface{}{"mode": "id", "id": "95d51f79-c397-46f9-b49a-23763d3eaa2d"},
-		"output_format":  map[string]interface{}{"container": "raw", "encoding": "pcm_s16le", "sample_rate": 24000},
+		"output_format":  map[string]interface{}{"container": "raw", "encoding": "pcm_s16le", "sample_rate": t.outputRate()},
 		"language":       "hi",
 		"context_id":     t.currentContextId,
 		"continue":       true,
@@ -501,7 +504,7 @@ func (t *TTSProcessor) ResetTTSContext() bool {
 		"model_id":      "sonic-3",
 		"transcript":    "",
 		"voice":         map[string]interface{}{"mode": "id", "id": "95d51f79-c397-46f9-b49a-23763d3eaa2d"},
-		"output_format": map[string]interface{}{"container": "raw", "encoding": "pcm_s16le", "sample_rate": 24000},
+		"output_format": map[string]interface{}{"container": "raw", "encoding": "pcm_s16le", "sample_rate": t.outputRate()},
 		"context_id":    t.currentContextId,
 		"continue":      false,
 	}
@@ -575,7 +578,8 @@ func (t *TTSProcessor) handleAudioChunkData(audioData []byte) {
 	}
 	t.pcmBuffer = append(t.pcmBuffer, audioData...)
 
-	for len(t.pcmBuffer) >= framePCMBytes {
+	frameBytes := t.frameBytes()
+	for len(t.pcmBuffer) >= frameBytes {
 		pcmFrame := t.nextPCMFrame()
 		if pcmFrame == nil {
 			break
@@ -601,7 +605,8 @@ func (t *TTSProcessor) pushRemainingAudioFrames() {
 		return
 	}
 	if len(t.pcmBuffer) > 0 {
-		for len(t.pcmBuffer) < framePCMBytes {
+		frameBytes := t.frameBytes()
+		for len(t.pcmBuffer) < frameBytes {
 			t.pcmBuffer = append(t.pcmBuffer, 0)
 		}
 		pcmFrame := t.nextPCMFrame()
@@ -617,7 +622,8 @@ func (t *TTSProcessor) pushRemainingAudioFrames() {
 }
 
 func (t *TTSProcessor) nextPCMFrame() []byte {
-	if len(t.pcmBuffer) < framePCMBytes {
+	frameBytes := t.frameBytes()
+	if len(t.pcmBuffer) < frameBytes {
 		return nil
 	}
 	timingEnabled := t.audioTimingEnabled()
@@ -625,13 +631,24 @@ func (t *TTSProcessor) nextPCMFrame() []byte {
 	if timingEnabled {
 		start = time.Now()
 	}
-	frame := make([]byte, framePCMBytes)
-	copy(frame, t.pcmBuffer[:framePCMBytes])
-	t.pcmBuffer = t.pcmBuffer[framePCMBytes:]
+	frame := make([]byte, frameBytes)
+	copy(frame, t.pcmBuffer[:frameBytes])
+	t.pcmBuffer = t.pcmBuffer[frameBytes:]
 	if timingEnabled {
 		t.recordAudioTiming("go_tts_pcm_frame_copy", time.Since(start))
 	}
 	return frame
+}
+
+func (t *TTSProcessor) outputRate() int {
+	if t == nil || t.outputSampleRate <= 0 {
+		return defaultOutputSampleRate
+	}
+	return t.outputSampleRate
+}
+
+func (t *TTSProcessor) frameBytes() int {
+	return pcmFrameBytesForRate(t.outputRate())
 }
 
 // --- Cartesia websocket reader ---

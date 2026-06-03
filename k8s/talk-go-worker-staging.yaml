@@ -95,14 +95,6 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: status.podIP
-        - name: GKE_DEPLOYMENT_NAME
-          value: "$TALK_GO_DEPLOYMENT_NAME"
-        - name: FLY_APP_NAME
-          value: "$TALK_GO_DEPLOYMENT_NAME"
-        - name: FAST_API_PORT
-          value: "7860"
-        - name: PERF_DIAGNOSTICS_ENABLED
-          value: "$PERF_DIAGNOSTICS_ENABLED"
         readinessProbe:
           httpGet:
             path: /bot/readiness_check

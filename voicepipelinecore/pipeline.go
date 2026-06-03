@@ -78,7 +78,7 @@ func (p *Pipeline) Stop() {
 type TaskContext struct {
 	Ctx        context.Context
 	Logger     *log.Logger
-	Room       *DailyRoom
+	Room       RoomTransport
 	UIEvents   *UIEventSender
 	Metrics    func(MetricsFrame)
 	EndTask    func(reason EndReason)
@@ -287,8 +287,8 @@ func (t *PipelineTask) runCleanup(frame EndFrame) {
 	// via the shared WaitGroup below.
 	t.Pipeline.Stop()
 
-	// Disconnect the Daily bridge before waiting. This closes the media
-	// callbacks and unblocks the bridge goroutines so the WaitGroup can
+	// Disconnect the room transport before waiting. This closes media
+	// callbacks and unblocks transport goroutines so the WaitGroup can
 	// drain.
 	if t.TaskCtx.Room != nil {
 		t.TaskCtx.Room.Disconnect()
@@ -321,7 +321,7 @@ func (t *PipelineTask) runCleanup(frame EndFrame) {
 		stats.TotalUserDurationSec = t.callStats.TotalDurationSec(endedAt)
 		stats.FirstUserAudioFrameAt = t.callStats.FirstUserAudioFrameAt()
 	}
-	stats.MeetingID, stats.BotSessionID, stats.UserSessionID = t.TaskCtx.UIEvents.DailySession()
+	stats.TransportType, stats.MeetingID, stats.BotSessionID, stats.UserSessionID = t.TaskCtx.UIEvents.TransportSession()
 	stats.DebugLogs = t.TaskCtx.UIEvents.Snapshot()
 	if t.onCallEnded != nil {
 		func() {

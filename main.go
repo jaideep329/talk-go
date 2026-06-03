@@ -69,7 +69,14 @@ func main() {
 	http.HandleFunc("/bot/mark_machine_reserved", requireMethod(http.MethodPost, handleMarkMachineReserved))
 	http.HandleFunc("/bot/trigger_exit", requireMethod(http.MethodPost, handleTriggerExit))
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		http.ServeFile(w, r, "daily-client.html")
+		switch r.URL.Path {
+		case "/", "/daily-client.html":
+			http.ServeFile(w, r, "daily-client.html")
+		case "/livekit-client.html", "/LiveKitClient.html", "/LifeKitClient.html":
+			http.ServeFile(w, r, "livekit-client.html")
+		default:
+			http.NotFound(w, r)
+		}
 	})
 	addr := serverAddr()
 	log.Println("HTTP server listening on", addr)
@@ -92,6 +99,7 @@ type connectRequest struct {
 	ConversationID string `json:"conversation_id"`
 	BotType        string `json:"bot_type"`
 	RoomURL        string `json:"room_url"`
+	RoomName       string `json:"room_name"`
 	Token          string `json:"token"`
 	BotToken       string `json:"bot_token"`
 }
@@ -118,12 +126,19 @@ func handleConnect(w http.ResponseWriter, r *http.Request) {
 	if task.TaskCtx != nil && task.TaskCtx.Room != nil {
 		roomName = task.TaskCtx.Room.RoomName()
 	}
+	transportType := ""
+	if task.TaskCtx != nil && task.TaskCtx.UIEvents != nil {
+		transportType, _, _, _ = task.TaskCtx.UIEvents.TransportSession()
+	}
+	if strings.TrimSpace(transportType) == "" {
+		transportType = "daily"
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{
 		"room_url":       req.RoomURL,
 		"token":          req.Token,
 		"room_name":      roomName,
-		"transport_type": "daily",
+		"transport_type": transportType,
 	})
 }
 
@@ -132,6 +147,7 @@ func readConnectRequest(r *http.Request) connectRequest {
 		ConversationID: strings.TrimSpace(r.URL.Query().Get("conversation_id")),
 		BotType:        strings.TrimSpace(r.URL.Query().Get("bot_type")),
 		RoomURL:        strings.TrimSpace(r.URL.Query().Get("room_url")),
+		RoomName:       strings.TrimSpace(r.URL.Query().Get("room_name")),
 		Token:          strings.TrimSpace(r.URL.Query().Get("token")),
 		BotToken:       strings.TrimSpace(r.URL.Query().Get("bot_token")),
 	}
@@ -146,6 +162,9 @@ func readConnectRequest(r *http.Request) connectRequest {
 			}
 			if body.RoomURL != "" {
 				req.RoomURL = strings.TrimSpace(body.RoomURL)
+			}
+			if body.RoomName != "" {
+				req.RoomName = strings.TrimSpace(body.RoomName)
 			}
 			if body.Token != "" {
 				req.Token = strings.TrimSpace(body.Token)
@@ -180,6 +199,7 @@ func buildConnectTask(ctx context.Context, req connectRequest) (*voicepipelineco
 	return disha.NewBotTask(ctx, bot, disha.BotTaskRequest{
 		ConversationID: req.ConversationID,
 		RoomURL:        req.RoomURL,
+		RoomName:       req.RoomName,
 		RoomToken:      botToken,
 	}, dishaDeps)
 }

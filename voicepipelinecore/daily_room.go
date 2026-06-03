@@ -212,6 +212,10 @@ func (r *DailyRoom) RoomName() string {
 	return r.roomName
 }
 
+func (r *DailyRoom) OutputSampleRate() int {
+	return defaultOutputSampleRate
+}
+
 func (r *DailyRoom) SendAppMessage(v interface{}) error {
 	return r.writeCommand(dailyBridgeCommand{Type: "message", Data: v})
 }
@@ -232,6 +236,8 @@ func (r *DailyRoom) WriteAudioPCM(pcm []byte) error {
 	r.recordAudioTiming("go_bridge_out_json_stdin", time.Since(start))
 	return err
 }
+
+func (r *DailyRoom) ClearAudioBuffer() {}
 
 func (r *DailyRoom) Disconnect() {
 	if r == nil || !r.closed.CompareAndSwap(false, true) {

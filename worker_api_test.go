@@ -114,7 +114,7 @@ func TestHandleCreateWorkerRoomReturnsConflictWhenActive(t *testing.T) {
 		t.Fatal("tryStart returned false")
 	}
 
-	body := `{"room_url":"https://room.daily.co/test","token":"user-token","conversation_id":"conv-1","bot_worker_type":"sales_call"}`
+	body := `{"room_url":"https://room.daily.co/test","room_name":"test","token":"user-token","conversation_id":"conv-1","bot_worker_type":"sales_call"}`
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/bot/create_worker_room", strings.NewReader(body))
 	handleCreateWorkerRoom(rec, req)

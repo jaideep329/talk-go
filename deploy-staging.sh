@@ -9,7 +9,6 @@ ARTIFACT_REPOSITORY_NAME="${ARTIFACT_REPOSITORY_NAME:-disha-voice-worker-staging
 GKE_NAMESPACE="${GKE_NAMESPACE:-staging}"
 TALK_GO_DEPLOYMENT_NAME="${TALK_GO_DEPLOYMENT_NAME:-disha-go-voice-worker-staging}"
 TALK_GO_MIN_REPLICA_COUNT="${TALK_GO_MIN_REPLICA_COUNT:-1}"
-PERF_DIAGNOSTICS_ENABLED="${PERF_DIAGNOSTICS_ENABLED:-0}"
 
 # Target cluster is pinned here so the deploy NEVER follows whatever the local
 # kubectl current-context happens to be. All kubectl calls below run against
@@ -51,7 +50,6 @@ echo "  context: ${KUBE_CONTEXT} (pinned)"
 echo "  namespace: ${GKE_NAMESPACE}"
 echo "  deployment: ${TALK_GO_DEPLOYMENT_NAME}"
 echo "  image: ${IMAGE}"
-echo "  perf diagnostics: ${PERF_DIAGNOSTICS_ENABLED}"
 
 echo "Building image..."
 docker build --platform=linux/amd64 -t "$IMAGE" .
@@ -59,16 +57,16 @@ docker build --platform=linux/amd64 -t "$IMAGE" .
 echo "Pushing image..."
 docker push "$IMAGE"
 
-if [[ -f .prod.env ]]; then
-  echo "Updating talk-go-worker-env secret from .prod.env..."
-  kubectl --context "$KUBE_CONTEXT" create secret generic talk-go-worker-env \
-    --namespace "$GKE_NAMESPACE" \
-    --from-env-file=.prod.env \
-    --dry-run=client -o yaml \
-    | kubectl --context "$KUBE_CONTEXT" apply -f -
-else
-  echo "Skipping secret update: .prod.env not found"
+if [[ ! -f .prod.env ]]; then
+  echo ".prod.env is required for staging deploys because runtime env is loaded from talk-go-worker-env." >&2
+  exit 1
 fi
+echo "Updating talk-go-worker-env secret from .prod.env..."
+kubectl --context "$KUBE_CONTEXT" create secret generic talk-go-worker-env \
+  --namespace "$GKE_NAMESPACE" \
+  --from-env-file=.prod.env \
+  --dry-run=client -o yaml \
+  | kubectl --context "$KUBE_CONTEXT" apply -f -
 
 echo "Applying Kubernetes manifest..."
 export GCP_PROJECT_ID
@@ -76,10 +74,9 @@ export ARTIFACT_REPOSITORY_NAME
 export GKE_NAMESPACE
 export TALK_GO_DEPLOYMENT_NAME
 export TALK_GO_MIN_REPLICA_COUNT
-export PERF_DIAGNOSTICS_ENABLED
 export POD_TEMPLATE_VERSION
 
-envsubst '$TALK_GO_DEPLOYMENT_NAME $ARTIFACT_REPOSITORY_NAME $GKE_NAMESPACE $GCP_PROJECT_ID $POD_TEMPLATE_VERSION $TALK_GO_MIN_REPLICA_COUNT $PERF_DIAGNOSTICS_ENABLED' \
+envsubst '$TALK_GO_DEPLOYMENT_NAME $ARTIFACT_REPOSITORY_NAME $GKE_NAMESPACE $GCP_PROJECT_ID $POD_TEMPLATE_VERSION $TALK_GO_MIN_REPLICA_COUNT' \
   < k8s/talk-go-worker-staging.yaml \
   | kubectl --context "$KUBE_CONTEXT" apply -f -
 

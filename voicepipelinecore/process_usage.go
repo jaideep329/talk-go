@@ -35,6 +35,7 @@ type cgroupCPUSnapshot struct {
 
 type processUsageLog struct {
 	Event                         string  `json:"event"`
+	TransportType                 string  `json:"transport_type,omitempty"`
 	RoomName                      string  `json:"room_name,omitempty"`
 	GoPID                         int     `json:"go_pid"`
 	PythonPID                     int     `json:"python_pid"`
@@ -93,11 +94,66 @@ func (r *DailyRoom) monitorProcessUsage(goPID, pythonPID int) {
 }
 
 func (r *DailyRoom) emitProcessUsage(prevGo, currGo, prevPython, currPython processUsageSnapshot, prevCgroup, currCgroup cgroupCPUSnapshot, elapsed time.Duration) {
+	entry := buildProcessUsageLog("daily", r.roomName, prevGo, currGo, prevPython, currPython, prevCgroup, currCgroup, elapsed)
+	raw, err := json.Marshal(entry)
+	if err != nil {
+		r.log("process_usage marshal error: %v", err)
+		return
+	}
+	r.log("process_usage %s", raw)
+}
+
+func (r *LiveKitRoom) monitorProcessUsage(goPID int) {
+	prevGo, goErr := readProcessUsageSnapshot(goPID)
+	prevCgroup, cgroupErr := readCgroupCPUSnapshot()
+	if goErr != nil || cgroupErr != nil {
+		r.log("process_usage monitor init error: transport=livekit go_pid=%d go_err=%v cgroup_err=%v", goPID, goErr, cgroupErr)
+	}
+	r.log("process_usage monitor started: transport=livekit go_pid=%d interval=%s", goPID, processUsageLogInterval)
+
+	lastAt := time.Now()
+	ticker := time.NewTicker(processUsageLogInterval)
+	defer ticker.Stop()
+
+	done := taskDone(r.taskCtx)
+	for {
+		select {
+		case <-ticker.C:
+			now := time.Now()
+			currGo, currGoErr := readProcessUsageSnapshot(goPID)
+			currCgroup, currCgroupErr := readCgroupCPUSnapshot()
+			if currGoErr != nil || currCgroupErr != nil {
+				r.log("process_usage read error: transport=livekit go_pid=%d go_err=%v cgroup_err=%v", goPID, currGoErr, currCgroupErr)
+			}
+			r.emitProcessUsage(prevGo, currGo, prevCgroup, currCgroup, now.Sub(lastAt))
+			prevGo = currGo
+			prevCgroup = currCgroup
+			lastAt = now
+		case <-r.closedCh:
+			return
+		case <-done:
+			return
+		}
+	}
+}
+
+func (r *LiveKitRoom) emitProcessUsage(prevGo, currGo processUsageSnapshot, prevCgroup, currCgroup cgroupCPUSnapshot, elapsed time.Duration) {
+	entry := buildProcessUsageLog("livekit", r.roomName, prevGo, currGo, processUsageSnapshot{}, processUsageSnapshot{}, prevCgroup, currCgroup, elapsed)
+	raw, err := json.Marshal(entry)
+	if err != nil {
+		r.log("process_usage marshal error: %v", err)
+		return
+	}
+	r.log("process_usage %s", raw)
+}
+
+func buildProcessUsageLog(transportType, roomName string, prevGo, currGo, prevPython, currPython processUsageSnapshot, prevCgroup, currCgroup cgroupCPUSnapshot, elapsed time.Duration) processUsageLog {
 	periods := uint64Delta(prevCgroup.nrPeriods, currCgroup.nrPeriods)
 	throttledPeriods := uint64Delta(prevCgroup.nrThrottled, currCgroup.nrThrottled)
-	entry := processUsageLog{
+	return processUsageLog{
 		Event:                         "process_usage",
-		RoomName:                      r.roomName,
+		TransportType:                 transportType,
+		RoomName:                      roomName,
 		GoPID:                         currGo.pid,
 		PythonPID:                     currPython.pid,
 		SamplePeriodMS:                elapsed.Milliseconds(),
@@ -116,12 +172,6 @@ func (r *DailyRoom) emitProcessUsage(prevGo, currGo, prevPython, currPython proc
 		GoRSSHWMBytes:                 currGo.rssHWMBytes,
 		PythonRSSHWMBytes:             currPython.rssHWMBytes,
 	}
-	raw, err := json.Marshal(entry)
-	if err != nil {
-		r.log("process_usage marshal error: %v", err)
-		return
-	}
-	r.log("process_usage %s", raw)
 }
 
 func cpuMcores(prev, curr processUsageSnapshot, elapsed time.Duration) int64 {

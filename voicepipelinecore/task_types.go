@@ -30,6 +30,7 @@ func normalizeEndReason(reason EndReason) EndReason {
 
 // CallStats is delivered with CallEvents.OnCallEnded.
 type CallStats struct {
+	TransportType         string
 	TotalUserDurationSec  float64
 	FirstUserAudioFrameAt time.Time
 	EndedAt               time.Time

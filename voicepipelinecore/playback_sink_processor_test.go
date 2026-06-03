@@ -30,3 +30,20 @@ func TestPlaybackBotPCMFrameConvertsRawPCMBytes(t *testing.T) {
 		}
 	}
 }
+
+func TestResampleMonoPCMDownsamplesBackground(t *testing.T) {
+	input := make([]int16, 240)
+	for i := range input {
+		input[i] = int16(i)
+	}
+
+	got := resampleMonoPCM(input, 24000, 8000)
+	if len(got) != 80 {
+		t.Fatalf("resampled length = %d, want 80", len(got))
+	}
+	for i := 0; i < 5; i++ {
+		if got[i] != input[i*3] {
+			t.Fatalf("sample %d = %d, want %d", i, got[i], input[i*3])
+		}
+	}
+}

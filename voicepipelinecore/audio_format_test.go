@@ -77,4 +77,7 @@ func TestRoomOutputSampleRates(t *testing.T) {
 	if got := (&LiveKitRoom{}).OutputSampleRate(); got != defaultOutputSampleRate {
 		t.Fatalf("LiveKit output sample rate = %d, want %d", got, defaultOutputSampleRate)
 	}
+	if got := (&LiveKitRoom{outCodec: liveKitOutputCodecPCMU}).OutputSampleRate(); got != liveKitPCMUOutputRate {
+		t.Fatalf("LiveKit PCMU output sample rate = %d, want %d", got, liveKitPCMUOutputRate)
+	}
 }

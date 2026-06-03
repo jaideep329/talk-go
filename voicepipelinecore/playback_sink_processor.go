@@ -46,7 +46,7 @@ type PlaybackSinkProcessor struct {
 	playbackQueue   []Frame
 }
 
-func loadBackgroundPCM(path string, logger interface{ Printf(string, ...interface{}) }) []int16 {
+func loadBackgroundPCM(path string, targetSampleRate int, logger interface{ Printf(string, ...interface{}) }) []int16 {
 	f, err := os.Open(path)
 	if err != nil {
 		logger.Printf("Background audio not found (%s), mixing disabled\n", path)
@@ -73,13 +73,21 @@ func loadBackgroundPCM(path string, logger interface{ Printf(string, ...interfac
 		right := int16(binary.LittleEndian.Uint16(raw[i*4+2:]))
 		mono[i] = int16((int32(left) + int32(right)) / 2)
 	}
-	logger.Printf("Background audio loaded: %d samples (%.1fs at %dHz)\n", len(mono), float64(len(mono))/float64(dec.SampleRate()), dec.SampleRate())
+	sourceSampleRate := dec.SampleRate()
+	if targetSampleRate > 0 && sourceSampleRate > 0 && targetSampleRate != sourceSampleRate {
+		mono = resampleMonoPCM(mono, sourceSampleRate, targetSampleRate)
+	}
+	logSampleRate := sourceSampleRate
+	if targetSampleRate > 0 {
+		logSampleRate = targetSampleRate
+	}
+	logger.Printf("Background audio loaded: %d samples (%.1fs at %dHz)\n", len(mono), float64(len(mono))/float64(logSampleRate), logSampleRate)
 	return mono
 }
 
 func NewPlaybackSinkProcessor(taskCtx *TaskContext) *PlaybackSinkProcessor {
 	outputSampleRate := outputSampleRateFromRoom(taskCtx)
-	bgPCM := loadBackgroundPCM("background-office-sound.mp3", taskCtx.Logger)
+	bgPCM := loadBackgroundPCM("background-office-sound.mp3", outputSampleRate, taskCtx.Logger)
 
 	p := &PlaybackSinkProcessor{
 		taskCtx:          taskCtx,
@@ -93,6 +101,30 @@ func NewPlaybackSinkProcessor(taskCtx *TaskContext) *PlaybackSinkProcessor {
 	}
 	p.BaseProcessor = NewBaseProcessor("PlaybackSink", p, taskCtx)
 	return p
+}
+
+func resampleMonoPCM(samples []int16, sourceRate, targetRate int) []int16 {
+	if len(samples) == 0 || sourceRate <= 0 || targetRate <= 0 || sourceRate == targetRate {
+		return samples
+	}
+	outLen := (len(samples)*targetRate + sourceRate/2) / sourceRate
+	if outLen <= 0 {
+		return nil
+	}
+	out := make([]int16, outLen)
+	for i := range out {
+		posNum := i * sourceRate
+		idx := posNum / targetRate
+		if idx >= len(samples)-1 {
+			out[i] = samples[len(samples)-1]
+			continue
+		}
+		rem := posNum % targetRate
+		a := int(samples[idx])
+		b := int(samples[idx+1])
+		out[i] = int16((a*(targetRate-rem) + b*rem) / targetRate)
+	}
+	return out
 }
 
 func (p *PlaybackSinkProcessor) Start(ctx context.Context) {

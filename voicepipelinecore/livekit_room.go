@@ -29,9 +29,17 @@ const (
 	liveKitJoinRetryDelay = time.Second
 	liveKitBotIdentity    = "talk-go-bot"
 
+	liveKitOutCodecEnv         = "LIVEKIT_OUT_CODEC"
 	liveKitOpusComplexityEnv   = "LIVEKIT_OPUS_COMPLEXITY"
 	liveKitOpusBitrateEnv      = "LIVEKIT_OPUS_BITRATE"
 	liveKitOpusMaxBandwidthEnv = "LIVEKIT_OPUS_MAX_BANDWIDTH"
+)
+
+type liveKitOutputCodec string
+
+const (
+	liveKitOutputCodecOpus liveKitOutputCodec = "opus"
+	liveKitOutputCodecPCMU liveKitOutputCodec = "pcmu"
 )
 
 // LiveKitRoom owns the Go-native LiveKit media/signalling connection.
@@ -46,6 +54,7 @@ type LiveKitRoom struct {
 
 	room     *lksdk.Room
 	outTrack *lksdk.LocalTrack
+	outCodec liveKitOutputCodec
 
 	opusMu        sync.Mutex
 	opusEncoder   *opus.Encoder
@@ -108,11 +117,16 @@ func JoinLiveKitRoom(roomURL, roomName, token string, taskCtx *TaskContext, audi
 }
 
 func startLiveKitRoomAttempt(roomURL, roomName, token string, taskCtx *TaskContext, audioSource *AudioSourceProcessor) (*LiveKitRoom, error) {
+	outCodec, err := liveKitOutputCodecFromEnv()
+	if err != nil {
+		return nil, err
+	}
 	r := &LiveKitRoom{
 		roomURL:     roomURL,
 		roomName:    roomName,
 		taskCtx:     taskCtx,
 		audioSource: audioSource,
+		outCodec:    outCodec,
 		perfDiag:    perfdiag.Enabled(),
 		closedCh:    make(chan struct{}),
 		tracks:      make(map[string]*lkpcm.PCMRemoteTrack),
@@ -159,24 +173,26 @@ func startLiveKitRoomAttempt(roomURL, roomName, token string, taskCtx *TaskConte
 	}
 	r.room = room
 
-	// Let Pion bind the negotiated Opus clock/channels/fmtp. WebRTC Opus is
-	// commonly advertised as audio/opus/48000/2 even when the payload is mono.
-	outTrack, err := lksdk.NewLocalTrack(webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus})
+	outTrack, err := lksdk.NewLocalTrack(r.outCodecCapability())
 	if err != nil {
 		r.Disconnect()
-		return nil, fmt.Errorf("create livekit opus track: %w", err)
+		return nil, fmt.Errorf("create livekit %s track: %w", r.outCodec, err)
 	}
 	r.outTrack = outTrack
-	if err := r.resetOpusEncoder(); err != nil {
-		r.Disconnect()
-		return nil, fmt.Errorf("create livekit opus encoder: %w", err)
+	if r.outCodec == liveKitOutputCodecOpus {
+		// Let Pion bind the negotiated Opus clock/channels/fmtp. WebRTC Opus is
+		// commonly advertised as audio/opus/48000/2 even when the payload is mono.
+		if err := r.resetOpusEncoder(); err != nil {
+			r.Disconnect()
+			return nil, fmt.Errorf("create livekit opus encoder: %w", err)
+		}
 	}
 	if _, err := room.LocalParticipant.PublishTrack(outTrack, &lksdk.TrackPublicationOptions{
 		Name:   "talk-go-audio",
 		Source: livekit.TrackSource_MICROPHONE,
 	}); err != nil {
 		r.Disconnect()
-		return nil, fmt.Errorf("publish livekit audio track: %w", err)
+		return nil, fmt.Errorf("publish livekit %s track: %w", r.outCodec, err)
 	}
 
 	at := time.Now()
@@ -210,6 +226,9 @@ func (r *LiveKitRoom) RoomName() string {
 }
 
 func (r *LiveKitRoom) OutputSampleRate() int {
+	if r != nil && r.outCodec == liveKitOutputCodecPCMU {
+		return liveKitPCMUOutputRate
+	}
 	return defaultOutputSampleRate
 }
 
@@ -249,6 +268,13 @@ func (r *LiveKitRoom) WriteAudioPCM(pcm []byte) error {
 	if r == nil || r.outTrack == nil || len(pcm) == 0 || r.closed.Load() {
 		return nil
 	}
+	if r.outCodec == liveKitOutputCodecPCMU {
+		return r.writeAudioPCMU(pcm)
+	}
+	return r.writeAudioOpus(pcm)
+}
+
+func (r *LiveKitRoom) writeAudioOpus(pcm []byte) error {
 	if len(pcm)%2 != 0 {
 		pcm = pcm[:len(pcm)-1]
 	}
@@ -285,8 +311,26 @@ func (r *LiveKitRoom) WriteAudioPCM(pcm []byte) error {
 	return r.outTrack.WriteSample(pionmedia.Sample{Data: r.opusEncodeBuf[:encodedLen], Duration: playbackFrameDuration}, nil)
 }
 
+func (r *LiveKitRoom) writeAudioPCMU(pcm []byte) error {
+	if r.perfDiagnosticsEnabled() {
+		start := time.Now()
+		payload := pcm16BytesToPCMU(pcm)
+		r.recordAudioTiming("go_livekit_out_pcm16_to_pcmu", time.Since(start))
+
+		start = time.Now()
+		err := r.outTrack.WriteSample(pionmedia.Sample{Data: payload, Duration: playbackFrameDuration}, nil)
+		r.recordAudioTiming("go_livekit_out_write_sample", time.Since(start))
+		return err
+	}
+	payload := pcm16BytesToPCMU(pcm)
+	return r.outTrack.WriteSample(pionmedia.Sample{Data: payload, Duration: playbackFrameDuration}, nil)
+}
+
 func (r *LiveKitRoom) ClearAudioBuffer() {
 	if r == nil {
+		return
+	}
+	if r.outCodec == liveKitOutputCodecPCMU {
 		return
 	}
 	r.opusMu.Lock()
@@ -603,6 +647,25 @@ func (r *LiveKitRoom) resetOpusEncoder() error {
 	r.opusMu.Lock()
 	defer r.opusMu.Unlock()
 	return r.resetOpusEncoderLocked()
+}
+
+func liveKitOutputCodecFromEnv() (liveKitOutputCodec, error) {
+	raw := strings.TrimSpace(strings.ToLower(os.Getenv(liveKitOutCodecEnv)))
+	switch raw {
+	case "", string(liveKitOutputCodecOpus):
+		return liveKitOutputCodecOpus, nil
+	case string(liveKitOutputCodecPCMU), "g711", "g711u", "mulaw", "mu-law", "ulaw", "u-law":
+		return liveKitOutputCodecPCMU, nil
+	default:
+		return "", fmt.Errorf("%s must be opus or pcmu", liveKitOutCodecEnv)
+	}
+}
+
+func (r *LiveKitRoom) outCodecCapability() webrtc.RTPCodecCapability {
+	if r != nil && r.outCodec == liveKitOutputCodecPCMU {
+		return webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypePCMU, ClockRate: liveKitPCMUOutputRate}
+	}
+	return webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus}
 }
 
 func (r *LiveKitRoom) resetOpusEncoderLocked() error {

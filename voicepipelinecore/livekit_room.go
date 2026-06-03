@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -27,6 +28,10 @@ const (
 	liveKitJoinRetries    = 3
 	liveKitJoinRetryDelay = time.Second
 	liveKitBotIdentity    = "talk-go-bot"
+
+	liveKitOpusComplexityEnv   = "LIVEKIT_OPUS_COMPLEXITY"
+	liveKitOpusBitrateEnv      = "LIVEKIT_OPUS_BITRATE"
+	liveKitOpusMaxBandwidthEnv = "LIVEKIT_OPUS_MAX_BANDWIDTH"
 )
 
 // LiveKitRoom owns the Go-native LiveKit media/signalling connection.
@@ -605,11 +610,65 @@ func (r *LiveKitRoom) resetOpusEncoderLocked() error {
 	if err != nil {
 		return err
 	}
+	if err := configureLiveKitOpusEncoder(enc); err != nil {
+		return err
+	}
 	r.opusEncoder = enc
 	if len(r.opusEncodeBuf) < liveKitOpusMaxPacket {
 		r.opusEncodeBuf = make([]byte, liveKitOpusMaxPacket)
 	}
 	return nil
+}
+
+func configureLiveKitOpusEncoder(enc *opus.Encoder) error {
+	if enc == nil {
+		return nil
+	}
+	if raw := strings.TrimSpace(os.Getenv(liveKitOpusComplexityEnv)); raw != "" {
+		complexity, err := strconv.Atoi(raw)
+		if err != nil || complexity < 0 || complexity > 10 {
+			return fmt.Errorf("%s must be an integer from 0 to 10", liveKitOpusComplexityEnv)
+		}
+		if err := enc.SetComplexity(complexity); err != nil {
+			return fmt.Errorf("set %s=%d: %w", liveKitOpusComplexityEnv, complexity, err)
+		}
+	}
+	if raw := strings.TrimSpace(os.Getenv(liveKitOpusBitrateEnv)); raw != "" {
+		bitrate, err := strconv.Atoi(raw)
+		if err != nil || bitrate < 500 || bitrate > 512000 {
+			return fmt.Errorf("%s must be an integer from 500 to 512000 bits/s", liveKitOpusBitrateEnv)
+		}
+		if err := enc.SetBitrate(bitrate); err != nil {
+			return fmt.Errorf("set %s=%d: %w", liveKitOpusBitrateEnv, bitrate, err)
+		}
+	}
+	if raw := strings.TrimSpace(os.Getenv(liveKitOpusMaxBandwidthEnv)); raw != "" {
+		bandwidth, err := parseLiveKitOpusBandwidth(raw)
+		if err != nil {
+			return err
+		}
+		if err := enc.SetMaxBandwidth(bandwidth); err != nil {
+			return fmt.Errorf("set %s=%s: %w", liveKitOpusMaxBandwidthEnv, raw, err)
+		}
+	}
+	return nil
+}
+
+func parseLiveKitOpusBandwidth(raw string) (opus.Bandwidth, error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "narrowband", "narrow", "nb":
+		return opus.Narrowband, nil
+	case "mediumband", "medium", "mb":
+		return opus.Mediumband, nil
+	case "wideband", "wide", "wb":
+		return opus.Wideband, nil
+	case "superwideband", "super-wideband", "super_wideband", "superwide", "swb":
+		return opus.SuperWideband, nil
+	case "fullband", "full", "fb":
+		return opus.Fullband, nil
+	default:
+		return 0, fmt.Errorf("%s must be one of narrowband, mediumband, wideband, superwideband, fullband", liveKitOpusMaxBandwidthEnv)
+	}
 }
 
 type liveKitPCMWriter struct {

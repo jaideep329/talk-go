@@ -314,6 +314,12 @@ DISHA_REDIS_PASSWORD=...
 REDIS_DB=0
 DAILY_BRIDGE_PYTHON=/Users/jaideepsingh/Projects/disha-backend/.venv/bin/python
 
+# LiveKit outbound Opus tuning for low-CPU staging calls.
+# Unset values use libopus defaults; staging currently tests these values.
+LIVEKIT_OPUS_COMPLEXITY=1
+LIVEKIT_OPUS_BITRATE=20000
+LIVEKIT_OPUS_MAX_BANDWIDTH=wideband
+
 # Live LLM router (sales call) — model switching across endpoints.
 # Per-region Grok (OpenAI-compatible base URLs ending in /openai/v1):
 GROK_4_1_FNR_EASTUS_API_KEY=...
@@ -363,6 +369,7 @@ go test -v -run TestUserIdle ./...  # one processor's tests
 - `net/http/pprof` is imported in `main.go` — heap profiles available at `http://localhost:3000/debug/pprof/heap`
 - Typical memory depends on both the Go process and the Python Daily bridge process; check both when profiling local calls.
 - Performance diagnostics are gated by the single canonical flag `PERF_DIAGNOSTICS_ENABLED=1`. Keep that flag in `.prod.env`; `deploy-staging.sh` refreshes the `talk-go-worker-env` secret from `.prod.env` and does not accept a separate deploy-command override. When the flag is unset/`0`, Go and Python do not start Pyroscope, `process_usage`, or `audio_timing`, and the 20ms audio hot paths skip timing measurements entirely. For backward compatibility only, `PYROSCOPE_ENABLED=1` enables diagnostics when `PERF_DIAGNOSTICS_ENABLED` is absent.
+- LiveKit outbound Opus CPU tuning is controlled from `.prod.env` with `LIVEKIT_OPUS_COMPLEXITY`, `LIVEKIT_OPUS_BITRATE` (bits/s), and `LIVEKIT_OPUS_MAX_BANDWIDTH` (`narrowband`, `mediumband`, `wideband`, `superwideband`, `fullband`). The current low-CPU experiment uses complexity `1`, bitrate `20000`, and `wideband`; unset values leave libopus defaults in place. Complexity is the primary CPU knob, bandwidth is secondary, and bitrate mainly changes the quality/size target.
 - In GKE diagnostics mode, use `process_usage` log lines for high-level process attribution before deeper profilers. `DailyRoom` starts a lightweight sampler for Go plus the Python bridge process; `LiveKitRoom` samples Go plus container cgroup CPU because there is no Python bridge. Logs are one JSON payload every 10s with `transport_type`, Go/Python PIDs, process CPU millicores over the sample window, current RSS, RSS high-water mark, and container cgroup CPU throttling (`container_cpu_mcores`, `container_cpu_throttled_periods`, `container_cpu_throttled_ms`, `container_cpu_throttled_fraction`). Query `textPayload:"process_usage"` for a conversation/pod to see whether `/app/talk-go`, `daily_bridge.py`, or container CPU throttling is the main jitter suspect. For LiveKit, `python_*` fields are zero/false by design.
 - Pyroscope profiling also requires `PYROSCOPE_SERVER_ADDRESS`, `PYROSCOPE_BASIC_AUTH_USER`, and `PYROSCOPE_BASIC_AUTH_PASSWORD`. Go reports as `talk-go.worker.go`; the Python Daily bridge reports as `talk-go.daily_bridge.python`. Keep labels low-cardinality (`environment`, `deployment`, `pod`, `process`, `language`) and do not add conversation IDs as Pyroscope tags.
 - In diagnostics mode, use `audio_timing` log lines alongside Pyroscope when chasing jitter. They summarize 10s windows for 20ms-audio-path work such as Go/Python base64+JSON bridge I/O, LiveKit data publish/unmarshal, LiveKit PCM sample copy/conversion, LiveKit outbound Opus encode (`go_livekit_out_opus_encode`), playback tick lag/work, PCM frame copy/conversion, TTS JSON/base64 decode, and user PCM scanning. Profiles show CPU stacks; `audio_timing` shows deadline misses and where the real-time path is spending wall time.

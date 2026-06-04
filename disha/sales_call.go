@@ -17,7 +17,7 @@ const (
 
 	// salesModelGroup is the LLM model group the sales call selects from.
 	// Matches Python's model_group="grok-4.1-fast-sales".
-	salesModelGroup = "gpt-4.1"
+	salesModelGroup = "grok-4.1-fast-sales"
 
 	// salesUsecaseType matches Python's
 	// UsecaseType.SALES_CALL_CONVERSATION; it tags this call's LLM logs.

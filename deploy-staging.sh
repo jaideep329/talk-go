@@ -4,11 +4,45 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
 
+ENV_FILE=".staging.env"
+if [[ ! -f "$ENV_FILE" ]]; then
+  echo "$ENV_FILE is required for staging deploys because deploy and runtime env are loaded from it." >&2
+  exit 1
+fi
+
+load_env_file() {
+  local file="$1"
+  local line key value
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%$'\r'}"
+    [[ -z "$line" || "$line" == \#* ]] && continue
+    if [[ "$line" == export\ * ]]; then
+      line="${line#export }"
+    fi
+    [[ "$line" == *=* ]] || continue
+
+    key="${line%%=*}"
+    key="${key//[[:space:]]/}"
+    value="${line#*=}"
+    if [[ "$value" == \"*\" && "$value" == *\" && ${#value} -ge 2 ]]; then
+      value="${value:1:${#value}-2}"
+    elif [[ "$value" == \'*\' && "$value" == *\' && ${#value} -ge 2 ]]; then
+      value="${value:1:${#value}-2}"
+    fi
+
+    if [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+      printf -v "$key" '%s' "$value"
+      export "$key"
+    fi
+  done < "$file"
+}
+
+load_env_file "$ENV_FILE"
+
 GCP_PROJECT_ID="${GCP_PROJECT_ID:-curelinkai}"
 ARTIFACT_REPOSITORY_NAME="${ARTIFACT_REPOSITORY_NAME:-disha-voice-worker-staging}"
 GKE_NAMESPACE="${GKE_NAMESPACE:-staging}"
-TALK_GO_DEPLOYMENT_NAME="${TALK_GO_DEPLOYMENT_NAME:-disha-go-voice-worker-staging}"
-TALK_GO_MIN_REPLICA_COUNT="${TALK_GO_MIN_REPLICA_COUNT:-1}"
+GKE_DEPLOYMENT_NAME="${GKE_DEPLOYMENT_NAME:-disha-go-voice-worker-staging}"
 
 # Target cluster is pinned here so the deploy NEVER follows whatever the local
 # kubectl current-context happens to be. All kubectl calls below run against
@@ -48,7 +82,7 @@ fi
 echo "Deploying TalkGo staging"
 echo "  context: ${KUBE_CONTEXT} (pinned)"
 echo "  namespace: ${GKE_NAMESPACE}"
-echo "  deployment: ${TALK_GO_DEPLOYMENT_NAME}"
+echo "  deployment: ${GKE_DEPLOYMENT_NAME}"
 echo "  image: ${IMAGE}"
 
 echo "Building image..."
@@ -57,38 +91,44 @@ docker build --platform=linux/amd64 -t "$IMAGE" .
 echo "Pushing image..."
 docker push "$IMAGE"
 
-if [[ ! -f .prod.env ]]; then
-  echo ".prod.env is required for staging deploys because runtime env is loaded from talk-go-worker-env." >&2
-  exit 1
-fi
-echo "Updating talk-go-worker-env secret from .prod.env..."
+echo "Updating talk-go-worker-env secret from ${ENV_FILE}..."
 kubectl --context "$KUBE_CONTEXT" create secret generic talk-go-worker-env \
   --namespace "$GKE_NAMESPACE" \
-  --from-env-file=.prod.env \
+  --from-env-file="$ENV_FILE" \
   --dry-run=client -o yaml \
   | kubectl --context "$KUBE_CONTEXT" apply -f -
+
+missing_db_env=()
+for var in DB_USER DB_PASSWORD DB_HOST DB_PORT DB_NAME; do
+  if [[ -z "${!var:-}" ]]; then
+    missing_db_env+=("$var")
+  fi
+done
+if (( ${#missing_db_env[@]} > 0 )); then
+  echo "Missing DB env required for k8s/worker-staging.yaml: ${missing_db_env[*]}" >&2
+  exit 1
+fi
 
 echo "Applying Kubernetes manifest..."
 export GCP_PROJECT_ID
 export ARTIFACT_REPOSITORY_NAME
 export GKE_NAMESPACE
-export TALK_GO_DEPLOYMENT_NAME
-export TALK_GO_MIN_REPLICA_COUNT
+export GKE_DEPLOYMENT_NAME
 export POD_TEMPLATE_VERSION
 
-envsubst '$TALK_GO_DEPLOYMENT_NAME $ARTIFACT_REPOSITORY_NAME $GKE_NAMESPACE $GCP_PROJECT_ID $POD_TEMPLATE_VERSION $TALK_GO_MIN_REPLICA_COUNT' \
-  < k8s/talk-go-worker-staging.yaml \
+envsubst '$GKE_DEPLOYMENT_NAME $ARTIFACT_REPOSITORY_NAME $GKE_NAMESPACE $GCP_PROJECT_ID $POD_TEMPLATE_VERSION $DB_USER $DB_PASSWORD $DB_HOST $DB_PORT $DB_NAME' \
+  < k8s/worker-staging.yaml \
   | kubectl --context "$KUBE_CONTEXT" apply -f -
 
 echo "Waiting for rollout..."
-kubectl --context "$KUBE_CONTEXT" rollout status "deployment/${TALK_GO_DEPLOYMENT_NAME}" \
+kubectl --context "$KUBE_CONTEXT" rollout status "deployment/${GKE_DEPLOYMENT_NAME}" \
   --namespace "$GKE_NAMESPACE" \
   --timeout=10m
 
 echo "Current pods:"
 kubectl --context "$KUBE_CONTEXT" get pods \
   --namespace "$GKE_NAMESPACE" \
-  -l "app=${TALK_GO_DEPLOYMENT_NAME}" \
+  -l "app=${GKE_DEPLOYMENT_NAME}" \
   -o wide
 
 echo "Done."

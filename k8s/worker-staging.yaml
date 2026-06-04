@@ -1,10 +1,10 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: $TALK_GO_DEPLOYMENT_NAME
+  name: $GKE_DEPLOYMENT_NAME
   namespace: $GKE_NAMESPACE
   labels:
-    app: $TALK_GO_DEPLOYMENT_NAME
+    app: $GKE_DEPLOYMENT_NAME
 spec:
   strategy:
     type: RollingUpdate
@@ -13,11 +13,11 @@ spec:
       maxUnavailable: 50%
   selector:
     matchLabels:
-      app: $TALK_GO_DEPLOYMENT_NAME
+      app: $GKE_DEPLOYMENT_NAME
   template:
     metadata:
       labels:
-        app: $TALK_GO_DEPLOYMENT_NAME
+        app: $GKE_DEPLOYMENT_NAME
         managed-by: "deployment"
         pod-template-hash-binpack: $POD_TEMPLATE_VERSION
       annotations:
@@ -26,23 +26,30 @@ spec:
       restartPolicy: Always
       priorityClassName: high-priority-worker
       terminationGracePeriodSeconds: 5400
+      # Tolerate the worker pool taint to allow scheduling on worker nodes
       tolerations:
       - key: "workload"
         operator: "Equal"
         value: "worker"
         effect: "NoSchedule"
+      # Require scheduling on worker pool nodes only
       nodeSelector:
         cloud.google.com/gke-nodepool: worker-pool-v3
+      # Affinity-based binpacking for maximum node utilization (3 pods per node)
       affinity:
+        # Pod affinity: STRONG binpacking of same version pods (3 per node for max utilization)
+        # Attracts pods with matching version label
         podAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:
           - weight: 100
             podAffinityTerm:
               labelSelector:
                 matchLabels:
-                  app: $TALK_GO_DEPLOYMENT_NAME
+                  app: $GKE_DEPLOYMENT_NAME
                   pod-template-hash-binpack: $POD_TEMPLATE_VERSION
               topologyKey: kubernetes.io/hostname
+        # Pod anti-affinity: ONLY repel pods with DIFFERENT version during rolling updates
+        # Avoids nodes with old version pods that may be terminating
         podAntiAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
           - labelSelector:
@@ -50,7 +57,7 @@ spec:
               - key: app
                 operator: In
                 values:
-                - $TALK_GO_DEPLOYMENT_NAME
+                - $GKE_DEPLOYMENT_NAME
               - key: pod-template-hash-binpack
                 operator: Exists
               - key: pod-template-hash-binpack
@@ -91,10 +98,20 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: metadata.uid
+        - name: GKE_DEPLOYMENT_NAME
+          value: "$GKE_DEPLOYMENT_NAME"
         - name: POD_IP
           valueFrom:
             fieldRef:
               fieldPath: status.podIP
+#        livenessProbe:
+#          httpGet:
+#            path: /bot/health_check
+#            port: 7860
+#          initialDelaySeconds: 30
+#          periodSeconds: 10
+#          timeoutSeconds: 10
+#          failureThreshold: 3
         readinessProbe:
           httpGet:
             path: /bot/readiness_check
@@ -105,61 +122,82 @@ spec:
           failureThreshold: 3
         resources:
           requests:
-            cpu: "100m"
+            cpu: "120m"
             memory: "100Mi"
           limits:
-            cpu: "100m"
+            cpu: "120m"
             memory: "100Mi"
 ---
+# PostgreSQL connection secret for KEDA to query worker machine availability
+apiVersion: v1
+kind: Secret
+metadata:
+  name: postgresql-connection-string
+  namespace: $GKE_NAMESPACE
+type: Opaque
+stringData:
+  connection: "postgresql://$DB_USER:$DB_PASSWORD@$DB_HOST:$DB_PORT/$DB_NAME?sslmode=require"
+---
+# KEDA ScaledObject - Autoscales deployment based on worker machine availability
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
 metadata:
-  name: talk-go-worker-scaledobject
+  name: $GKE_DEPLOYMENT_NAME-scaledobject
   namespace: $GKE_NAMESPACE
 spec:
   scaleTargetRef:
-    name: $TALK_GO_DEPLOYMENT_NAME
+    name: $GKE_DEPLOYMENT_NAME
   pollingInterval: 10
-  cooldownPeriod: 180
-  minReplicaCount: $TALK_GO_MIN_REPLICA_COUNT
-  maxReplicaCount: 20
+  cooldownPeriod: 120
+  minReplicaCount: 4  # Safety net if query fails
+  maxReplicaCount: 600
   advanced:
     restoreToOriginalReplicaCount: false
     horizontalPodAutoscalerConfig:
       behavior:
         scaleDown:
-          stabilizationWindowSeconds: 180
+          stabilizationWindowSeconds: 120
           policies:
           - type: Percent
             value: 50
-            periodSeconds: 60
+            periodSeconds: 45
         scaleUp:
-          stabilizationWindowSeconds: 30
+          stabilizationWindowSeconds: 10
           policies:
-          - type: Percent
-            value: 100
-            periodSeconds: 20
           - type: Pods
-            value: 5
-            periodSeconds: 20
-          selectPolicy: Min
+            value: 1000
+            periodSeconds: 15
   triggers:
   - type: postgresql
     metadata:
-      query: "SELECT COUNT(*) FROM gkeworkermachines WHERE deployment_name = '$TALK_GO_DEPLOYMENT_NAME' AND status IN ('active', 'reserved', 'provisioning')"
-      targetQueryValue: "0.95"
-      activationQueryValue: "0"
+      query: "SELECT COUNT(*) FROM gkeworkermachines WHERE deployment_name = '$GKE_DEPLOYMENT_NAME' AND status IN ('active', 'reserved', 'provisioning')"
+      targetQueryValue: "0.95"  # Divides result by 10 to get actual replica count
+      activationQueryValue: "0"  # Always active
       connectionFromEnv: POSTGRESQL_CONNECTION_STRING
     authenticationRef:
       name: postgresql-trigger-auth
 ---
+# KEDA TriggerAuthentication - Provides database credentials to KEDA for PostgreSQL access
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: postgresql-trigger-auth
+  namespace: $GKE_NAMESPACE
+spec:
+  secretTargetRef:
+  - parameter: connection
+    name: postgresql-connection-string
+    key: connection
+---
+# PodDisruptionBudget - Ensures minimum pods available during disruptions and deployments
+# With maxUnavailable: 50%, this PDB allows controlled disruption while maintaining service
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
-  name: talk-go-worker-pdb
+  name: $GKE_DEPLOYMENT_NAME-pdb
   namespace: $GKE_NAMESPACE
 spec:
-  minAvailable: 1
+  minAvailable: 5
   selector:
     matchLabels:
-      app: $TALK_GO_DEPLOYMENT_NAME
+      app: $GKE_DEPLOYMENT_NAME

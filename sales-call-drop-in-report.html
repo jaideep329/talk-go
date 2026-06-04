@@ -734,7 +734,7 @@ ENVIRONMENT               # staging/dev -> document:{name}:latest, else :product
         <li><code>ENVIRONMENT</code> &mdash; <code>staging</code>/<code>dev</code> selects the <code>document:{name}:latest</code> Redis key; anything else uses <code>document:{name}:production</code>. Matches Python's <code>_resolve_environment</code>.</li>
         <li>GKE in-cluster files (token, ca.crt, namespace) under <code>/var/run/secrets/kubernetes.io/serviceaccount</code> are read automatically when present. Outside Kubernetes the patcher no-ops.</li>
       </ul>
-      <p>Add <code>SENTRY_DSN</code>, <code>TALK_GO_DEPLOYMENT_NAME</code> and
+      <p>Add <code>SENTRY_DSN</code>, <code>GKE_DEPLOYMENT_NAME</code> and
         <code>ARTIFACT_REPOSITORY_NAME</code> when you promote to staging.</p>
     </section>
 

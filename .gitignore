@@ -1,5 +1,5 @@
 .env
-.prod.env
+.*.env
 *.log
 *.raw
 *.wav

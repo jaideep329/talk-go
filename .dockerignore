@@ -1,7 +1,7 @@
 .git
 .idea
 .env
-.prod.env
+.*.env
 app.log
 *.log
 Dockerfile

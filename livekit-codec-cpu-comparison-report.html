@@ -325,8 +325,8 @@
     <section class="grid">
       <div class="card">
         <div class="metric-label">Best CPU Result</div>
-        <div class="metric-value">PCMU</div>
-        <div class="metric-note">13.3m steady Go CPU on the latest 50m run.</div>
+        <div class="metric-value">PCMU + no interim</div>
+        <div class="metric-note">10.6m steady Go CPU on the latest 50m run.</div>
       </div>
       <div class="card">
         <div class="metric-label">Best Opus Result</div>
@@ -347,9 +347,10 @@
 
     <section class="callout">
       <strong>Executive summary:</strong>
-      PCMU is the lowest CPU option tested so far, but it outputs 8kHz audio and may reduce perceived audio quality.
-      The best Opus-preserving option is the low-complexity wideband configuration. Tick lag is not fully eliminated at
-      50m because some delay is scheduler/quota related rather than a single hot encoding function.
+      PCMU with interim transcript RTVI events disabled is the lowest CPU option tested so far. It reduced steady Go CPU
+      to 10.6m and cut LiveKit data publish volume from 4071 events to 204 events. It did not eliminate tick lag: this
+      run had a 180ms tick-lag outlier even though playback work, write time, JSON work, and throttling were lower than
+      the previous PCMU run. That points to scheduler/quota and turn-timing effects rather than codec work alone.
     </section>
 
     <section>
@@ -374,11 +375,27 @@
               <th>Write Avg/Max</th>
               <th>Encode Avg/Max</th>
               <th>E2E Avg/Max</th>
+              <th>Data Publishes</th>
             </tr>
           </thead>
           <tbody>
             <tr class="highlight">
-              <td>PCMU latest <span class="tag best">lowest CPU</span><br><code>d83e7448</code></td>
+              <td>PCMU no interim <span class="tag best">lowest CPU</span><br><code>36db97dc</code></td>
+              <td>50m</td>
+              <td>PCMU 8kHz, no interim RTVI</td>
+              <td>10.6 / 14</td>
+              <td>121 / 392ms</td>
+              <td>0.019 / 0.053</td>
+              <td>0.366 / 180ms</td>
+              <td>180ms</td>
+              <td>0.036 / 55ms</td>
+              <td>0.024 / 2ms</td>
+              <td>PCMU 0.0017 / 0.033ms</td>
+              <td>1458 / 3137ms</td>
+              <td>204 / 302ms</td>
+            </tr>
+            <tr>
+              <td>PCMU previous<br><code>d83e7448</code></td>
               <td>50m</td>
               <td>PCMU 8kHz</td>
               <td>13.3 / 25</td>
@@ -390,6 +407,7 @@
               <td>0.048 / 100ms</td>
               <td>PCMU 0.0017 / 0.031ms</td>
               <td>1339 / 2053ms</td>
+              <td>4071 / 85ms</td>
             </tr>
             <tr>
               <td>Opus low <span class="tag best">best Opus</span><br><code>1625e9d1</code></td>
@@ -404,6 +422,7 @@
               <td>0.023 / 0.38ms</td>
               <td>Opus 0.064 / 23ms</td>
               <td>1446 / 2241ms</td>
+              <td>1986 / 19ms</td>
             </tr>
             <tr>
               <td>Opus tuned<br><code>ec8ccd9d</code></td>
@@ -418,6 +437,7 @@
               <td>0.040 / 100ms</td>
               <td>Opus 0.137 / 59ms</td>
               <td>1834 / 3300ms</td>
+              <td>1642 / 12ms</td>
             </tr>
             <tr>
               <td>Earlier Opus 50m<br><code>47365358</code></td>
@@ -432,6 +452,7 @@
               <td>0.020 / 0.20ms</td>
               <td>Opus 0.236 / 100ms</td>
               <td>2314 / 2923ms</td>
+              <td>2238 / 14ms</td>
             </tr>
             <tr>
               <td>Opus 60m<br><code>e1d5c05e</code></td>
@@ -446,6 +467,7 @@
               <td>0.026 / 0.47ms</td>
               <td>Opus 0.323 / 100ms</td>
               <td>2348 / 2701ms</td>
+              <td>797 / 8ms</td>
             </tr>
             <tr>
               <td>Custom Opus 100m<br><code>04301678</code></td>
@@ -460,6 +482,7 @@
               <td>0.025 / 2ms</td>
               <td>Opus 0.245 / 2.9ms</td>
               <td>1708 / 1931ms</td>
+              <td>5214 / 36ms</td>
             </tr>
             <tr>
               <td>No background audio 100m<br><code>d9d84d64</code></td>
@@ -474,6 +497,7 @@
               <td>0.031 / 1.5ms</td>
               <td>Opus 0.312 / 47ms</td>
               <td>1407 / 2136ms</td>
+              <td>3101 / 27ms</td>
             </tr>
           </tbody>
         </table>
@@ -484,7 +508,8 @@
       <h2>Pyroscope CPU Stack Comparison</h2>
       <p>
         Percentages are cumulative CPU weight within the profile for each call window. After PCMU, the Opus stack
-        disappears and the remaining output path is mostly LiveKit/Pion RTP write, SRTP, and UDP send.
+        disappears and the remaining output path is mostly LiveKit/Pion RTP write, SRTP, and UDP send. The no-interim
+        run also materially reduced JSON and data-publish CPU.
       </p>
       <div class="table-wrap">
         <table aria-label="Pyroscope CPU stack comparison">
@@ -498,12 +523,25 @@
               <th>WriteSample</th>
               <th>RTP Write</th>
               <th>JSON Unmarshal</th>
+              <th>Data Publish</th>
               <th>Pyroscope</th>
             </tr>
           </thead>
           <tbody>
             <tr class="highlight">
-              <td>PCMU latest</td>
+              <td>PCMU no interim</td>
+              <td>1.24s</td>
+              <td>18.5%</td>
+              <td>13.7%</td>
+              <td>0.0%</td>
+              <td>12.1%</td>
+              <td>12.1%</td>
+              <td>2.4%</td>
+              <td>0.8%</td>
+              <td>2.4%</td>
+            </tr>
+            <tr>
+              <td>PCMU previous</td>
               <td>1.81s</td>
               <td>20.4%</td>
               <td>18.2%</td>
@@ -511,6 +549,7 @@
               <td>17.7%</td>
               <td>17.1%</td>
               <td>7.2%</td>
+              <td>2.2%</td>
               <td>2.8%</td>
             </tr>
             <tr>
@@ -522,6 +561,7 @@
               <td>15.5%</td>
               <td>15.1%</td>
               <td>6.8%</td>
+              <td>0.9%</td>
               <td>1.4%</td>
             </tr>
             <tr>
@@ -533,6 +573,7 @@
               <td>9.7%</td>
               <td>9.1%</td>
               <td>4.0%</td>
+              <td>0.3%</td>
               <td>1.2%</td>
             </tr>
             <tr>
@@ -545,6 +586,7 @@
               <td>6.6%</td>
               <td>5.3%</td>
               <td>0.6%</td>
+              <td>0.6%</td>
             </tr>
             <tr>
               <td>Opus 60m</td>
@@ -555,6 +597,7 @@
               <td>0.5%</td>
               <td>0.5%</td>
               <td>3.2%</td>
+              <td>0.0%</td>
               <td>0.7%</td>
             </tr>
             <tr>
@@ -566,6 +609,7 @@
               <td>5.3%</td>
               <td>4.3%</td>
               <td>2.5%</td>
+              <td>0.0%</td>
               <td>0.5%</td>
             </tr>
           </tbody>
@@ -578,7 +622,12 @@
         <h2>Steady CPU Ranking</h2>
         <div class="bar-list" aria-label="Steady Go CPU ranking">
           <div class="bar-row">
-            <div class="bar-label">PCMU 50m</div>
+            <div class="bar-label">PCMU no interim</div>
+            <div class="bar-track"><div class="bar green" style="width:33.9%"></div></div>
+            <div class="bar-value">10.6m</div>
+          </div>
+          <div class="bar-row">
+            <div class="bar-label">PCMU previous</div>
             <div class="bar-track"><div class="bar green" style="width:42.4%"></div></div>
             <div class="bar-value">13.3m</div>
           </div>
@@ -596,6 +645,11 @@
             <div class="bar-label">Earlier Opus 50m</div>
             <div class="bar-track"><div class="bar" style="width:70.1%"></div></div>
             <div class="bar-value">21.9m</div>
+          </div>
+          <div class="bar-row">
+            <div class="bar-label">No BG 100m</div>
+            <div class="bar-track"><div class="bar amber" style="width:80.6%"></div></div>
+            <div class="bar-value">25.3m</div>
           </div>
           <div class="bar-row">
             <div class="bar-label">Custom Opus 100m</div>
@@ -624,6 +678,11 @@
             <div class="bar-value">11ms</div>
           </div>
           <div class="bar-row">
+            <div class="bar-label">PCMU no interim</div>
+            <div class="bar-track"><div class="bar" style="width:70.8%"></div></div>
+            <div class="bar-value">121ms</div>
+          </div>
+          <div class="bar-row">
             <div class="bar-label">Opus 60m</div>
             <div class="bar-track"><div class="bar" style="width:72.0%"></div></div>
             <div class="bar-value">123ms</div>
@@ -634,7 +693,7 @@
             <div class="bar-value">131ms</div>
           </div>
           <div class="bar-row">
-            <div class="bar-label">PCMU 50m</div>
+            <div class="bar-label">PCMU previous</div>
             <div class="bar-track"><div class="bar amber" style="width:93.7%"></div></div>
             <div class="bar-value">160ms</div>
           </div>
@@ -650,12 +709,13 @@
     <section class="notes">
       <h2>Interpretation</h2>
       <ul>
-        <li><strong>PCMU is the lowest CPU result.</strong> It reduced steady Go CPU to 13.3m and removed Opus encode CPU entirely.</li>
-        <li><strong>PCMU does not remove tick lag.</strong> Tick lag still appears because the remaining path is scheduling plus LiveKit/Pion/SRTP/UDP write pressure.</li>
+        <li><strong>PCMU plus no interim events is the lowest CPU result.</strong> It reduced steady Go CPU to 10.6m and removed Opus encode CPU entirely.</li>
+        <li><strong>Disabling interim transcript RTVI events helped signalling CPU.</strong> Data publishes dropped from 4071 to 204, JSON unmarshal dropped from 7.2% to 2.4%, JSON marshal dropped from 4.4% to 1.6%, and profile CPU dropped from 1.81s to 1.24s.</li>
+        <li><strong>PCMU still does not remove tick lag.</strong> The latest run had lower playback work and throttling than the previous PCMU run, but a worse 180ms tick-lag outlier. That lag was not explained by PCMU conversion or normal write cost in the logs.</li>
         <li><strong>The lowest Opus CPU option is c1 / 20k / wideband.</strong> It is about 3m higher steady CPU than PCMU, but keeps Opus quality.</li>
         <li><strong>100m has much lower throttling.</strong> The 100m runs show only 6-11ms steady throttling per 10s window, compared with roughly 130-170ms at 50m.</li>
         <li><strong>Background audio is not a major CPU lever.</strong> The no-background 100m run did not materially reduce steady Go CPU versus the comparable 100m Opus run.</li>
-        <li><strong>Direct RTP writes may only be a small optimization.</strong> PCMU moved the bottleneck to WriteSample/RTP write, but most of that cost is the actual WebRTC write path rather than codec conversion.</li>
+        <li><strong>Remaining CPU is mostly transport write path and runtime overhead.</strong> PCMU moved the bottleneck to WriteSample/RTP write; the no-interim change reduced app-message overhead, but the WebRTC write path remains the largest named CPU area.</li>
       </ul>
     </section>
 
@@ -668,7 +728,7 @@
         <li>Tick lag is a wall-clock measurement. CPU profiles identify what consumes CPU while running, but they do not directly show time spent waiting for CPU after quota throttling.</li>
       </ul>
       <p class="footnote">
-        Compared calls: <code>d83e7448</code>, <code>1625e9d1</code>, <code>ec8ccd9d</code>,
+        Compared calls: <code>36db97dc</code>, <code>d83e7448</code>, <code>1625e9d1</code>, <code>ec8ccd9d</code>,
         <code>47365358</code>, <code>e1d5c05e</code>, <code>04301678</code>, and <code>d9d84d64</code>.
       </p>
     </section>

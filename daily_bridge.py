@@ -269,7 +269,7 @@ def join_room(args, handler, client, audio_track):
                 "microphone": {
                     "sendSettings": {
                         "channelConfig": "mono",
-                        "bitrate": 64000,
+                        "bitrate": 24000,
                     }
                 },
             },

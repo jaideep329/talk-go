@@ -1,0 +1,737 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LiveKit Codec CPU Comparison Report</title>
+  <style>
+    :root {
+      --bg: #f7f8fa;
+      --panel: #ffffff;
+      --panel-soft: #f0f4f8;
+      --text: #172033;
+      --muted: #5b6577;
+      --line: #d9e0e8;
+      --blue: #1d66d1;
+      --green: #15803d;
+      --amber: #b45309;
+      --red: #b91c1c;
+      --slate: #334155;
+      --shadow: 0 10px 30px rgba(20, 32, 50, 0.08);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+      line-height: 1.5;
+    }
+
+    header {
+      background: #182235;
+      color: #fff;
+      padding: 32px 28px 28px;
+    }
+
+    header .inner,
+    main {
+      max-width: 1240px;
+      margin: 0 auto;
+    }
+
+    h1 {
+      margin: 0 0 8px;
+      font-size: 30px;
+      line-height: 1.15;
+      font-weight: 750;
+      letter-spacing: 0;
+    }
+
+    .subtitle {
+      margin: 0;
+      color: #cbd5e1;
+      font-size: 15px;
+      max-width: 900px;
+    }
+
+    main {
+      padding: 24px 28px 48px;
+    }
+
+    section {
+      margin: 0 0 24px;
+    }
+
+    h2 {
+      margin: 0 0 12px;
+      font-size: 19px;
+      letter-spacing: 0;
+    }
+
+    h3 {
+      margin: 18px 0 8px;
+      font-size: 15px;
+      letter-spacing: 0;
+    }
+
+    p {
+      margin: 0 0 12px;
+      color: var(--muted);
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: var(--shadow);
+      padding: 16px;
+    }
+
+    .metric-label {
+      color: var(--muted);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      margin-bottom: 6px;
+    }
+
+    .metric-value {
+      font-size: 24px;
+      font-weight: 760;
+      line-height: 1.1;
+      margin-bottom: 6px;
+    }
+
+    .metric-note {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .callout {
+      background: #eef6ff;
+      border: 1px solid #bed8ff;
+      border-left: 4px solid var(--blue);
+      border-radius: 8px;
+      padding: 14px 16px;
+      color: #1e3a5f;
+    }
+
+    .callout strong {
+      color: #10233f;
+    }
+
+    .table-wrap {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: var(--shadow);
+      overflow: auto;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      min-width: 1120px;
+      font-size: 13px;
+    }
+
+    th,
+    td {
+      border-bottom: 1px solid var(--line);
+      padding: 10px 11px;
+      text-align: right;
+      vertical-align: middle;
+      white-space: nowrap;
+    }
+
+    th {
+      background: #eef2f6;
+      color: #293548;
+      font-weight: 700;
+      font-size: 12px;
+      position: sticky;
+      top: 0;
+      z-index: 1;
+    }
+
+    td:first-child,
+    th:first-child,
+    td:nth-child(3),
+    th:nth-child(3) {
+      text-align: left;
+    }
+
+    tbody tr:last-child td {
+      border-bottom: 0;
+    }
+
+    tbody tr.highlight {
+      background: #f0fdf4;
+    }
+
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      padding: 2px 8px;
+      font-size: 12px;
+      font-weight: 700;
+      border: 1px solid var(--line);
+      background: #fff;
+      color: var(--slate);
+    }
+
+    .tag.best {
+      border-color: #86efac;
+      background: #dcfce7;
+      color: #166534;
+    }
+
+    .tag.warn {
+      border-color: #fed7aa;
+      background: #ffedd5;
+      color: #9a3412;
+    }
+
+    .bar-list {
+      display: grid;
+      gap: 10px;
+    }
+
+    .bar-row {
+      display: grid;
+      grid-template-columns: 190px 1fr 74px;
+      gap: 10px;
+      align-items: center;
+      font-size: 13px;
+    }
+
+    .bar-label {
+      color: var(--slate);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .bar-track {
+      height: 12px;
+      background: #e5eaf0;
+      border-radius: 999px;
+      overflow: hidden;
+    }
+
+    .bar {
+      height: 100%;
+      border-radius: 999px;
+      background: var(--blue);
+    }
+
+    .bar.green {
+      background: var(--green);
+    }
+
+    .bar.amber {
+      background: var(--amber);
+    }
+
+    .bar-value {
+      font-variant-numeric: tabular-nums;
+      color: var(--muted);
+      text-align: right;
+    }
+
+    .two-col {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+
+    .notes {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 16px;
+      box-shadow: var(--shadow);
+    }
+
+    ul {
+      margin: 8px 0 0;
+      padding-left: 20px;
+      color: var(--muted);
+    }
+
+    li {
+      margin: 6px 0;
+    }
+
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.95em;
+      background: #edf2f7;
+      border: 1px solid #d8e1ea;
+      border-radius: 5px;
+      padding: 1px 5px;
+      color: #263348;
+    }
+
+    .footnote {
+      font-size: 12px;
+      color: var(--muted);
+      margin-top: 10px;
+    }
+
+    @media (max-width: 980px) {
+      .grid,
+      .two-col {
+        grid-template-columns: 1fr;
+      }
+
+      header,
+      main {
+        padding-left: 18px;
+        padding-right: 18px;
+      }
+
+      .bar-row {
+        grid-template-columns: 130px 1fr 62px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="inner">
+      <h1>LiveKit Codec CPU Comparison Report</h1>
+      <p class="subtitle">
+        Comparison of recent LiveKit transport experiments using per-call diagnostics:
+        <code>process_usage</code>, <code>audio_timing</code>, and Pyroscope CPU profiles.
+        Generated on June 3, 2026.
+      </p>
+    </div>
+  </header>
+
+  <main>
+    <section class="grid">
+      <div class="card">
+        <div class="metric-label">Best CPU Result</div>
+        <div class="metric-value">PCMU + no interim</div>
+        <div class="metric-note">10.6m steady Go CPU on the latest 50m run.</div>
+      </div>
+      <div class="card">
+        <div class="metric-label">Best Opus Result</div>
+        <div class="metric-value">c1 / 20k / WB</div>
+        <div class="metric-note">16.1m steady Go CPU while keeping Opus output.</div>
+      </div>
+      <div class="card">
+        <div class="metric-label">Lowest Steady Throttle</div>
+        <div class="metric-value">100m</div>
+        <div class="metric-note">6-11ms throttled per 10s, far lower than 50m.</div>
+      </div>
+      <div class="card">
+        <div class="metric-label">Remaining Bottleneck</div>
+        <div class="metric-value">RTP Write</div>
+        <div class="metric-note">After PCMU, CPU shifts to LiveKit/Pion/SRTP/UDP writes.</div>
+      </div>
+    </section>
+
+    <section class="callout">
+      <strong>Executive summary:</strong>
+      PCMU with interim transcript RTVI events disabled is the lowest CPU option tested so far. It reduced steady Go CPU
+      to 10.6m and cut LiveKit data publish volume from 4071 events to 204 events. It did not eliminate tick lag: this
+      run had a 180ms tick-lag outlier even though playback work, write time, JSON work, and throttling were lower than
+      the previous PCMU run. That points to scheduler/quota and turn-timing effects rather than codec work alone.
+    </section>
+
+    <section>
+      <h2>Main Runtime Comparison</h2>
+      <p>
+        Steady metrics drop the first startup <code>process_usage</code> bucket. Throttle values are per 10 second
+        diagnostics window. Tick lag is wall-clock delay in the 20ms playback loop; it is not the same as CPU work time.
+      </p>
+      <div class="table-wrap">
+        <table aria-label="Main runtime comparison">
+          <thead>
+            <tr>
+              <th>Run</th>
+              <th>CPU</th>
+              <th>Config</th>
+              <th>Steady Go mCPU</th>
+              <th>Steady Throttle Avg/Max</th>
+              <th>Throttle Fraction Avg/Max</th>
+              <th>Tick Lag Avg/Max</th>
+              <th>Tick Lag P95 Window Max</th>
+              <th>Playback Work Avg/Max</th>
+              <th>Write Avg/Max</th>
+              <th>Encode Avg/Max</th>
+              <th>E2E Avg/Max</th>
+              <th>Data Publishes</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr class="highlight">
+              <td>PCMU no interim <span class="tag best">lowest CPU</span><br><code>36db97dc</code></td>
+              <td>50m</td>
+              <td>PCMU 8kHz, no interim RTVI</td>
+              <td>10.6 / 14</td>
+              <td>121 / 392ms</td>
+              <td>0.019 / 0.053</td>
+              <td>0.366 / 180ms</td>
+              <td>180ms</td>
+              <td>0.036 / 55ms</td>
+              <td>0.024 / 2ms</td>
+              <td>PCMU 0.0017 / 0.033ms</td>
+              <td>1458 / 3137ms</td>
+              <td>204 / 302ms</td>
+            </tr>
+            <tr>
+              <td>PCMU previous<br><code>d83e7448</code></td>
+              <td>50m</td>
+              <td>PCMU 8kHz</td>
+              <td>13.3 / 25</td>
+              <td>160 / 645ms</td>
+              <td>0.022 / 0.101</td>
+              <td>0.252 / 80ms</td>
+              <td>80ms</td>
+              <td>0.070 / 100ms</td>
+              <td>0.048 / 100ms</td>
+              <td>PCMU 0.0017 / 0.031ms</td>
+              <td>1339 / 2053ms</td>
+              <td>4071 / 85ms</td>
+            </tr>
+            <tr>
+              <td>Opus low <span class="tag best">best Opus</span><br><code>1625e9d1</code></td>
+              <td>50m</td>
+              <td>c1, 20k, wideband</td>
+              <td>16.1 / 20</td>
+              <td>171 / 351ms</td>
+              <td>0.025 / 0.050</td>
+              <td>0.208 / 160ms</td>
+              <td>160ms</td>
+              <td>0.095 / 23ms</td>
+              <td>0.023 / 0.38ms</td>
+              <td>Opus 0.064 / 23ms</td>
+              <td>1446 / 2241ms</td>
+              <td>1986 / 19ms</td>
+            </tr>
+            <tr>
+              <td>Opus tuned<br><code>ec8ccd9d</code></td>
+              <td>50m</td>
+              <td>c3, 24k, superwideband</td>
+              <td>21.9 / 27</td>
+              <td>131 / 300ms</td>
+              <td>0.024 / 0.050</td>
+              <td>0.216 / 80ms</td>
+              <td>80ms</td>
+              <td>0.188 / 100ms</td>
+              <td>0.040 / 100ms</td>
+              <td>Opus 0.137 / 59ms</td>
+              <td>1834 / 3300ms</td>
+              <td>1642 / 12ms</td>
+            </tr>
+            <tr>
+              <td>Earlier Opus 50m<br><code>47365358</code></td>
+              <td>50m</td>
+              <td>Earlier custom Opus</td>
+              <td>21.9 / 28</td>
+              <td>140 / 405ms</td>
+              <td>0.022 / 0.060</td>
+              <td>0.145 / 80ms</td>
+              <td>80ms</td>
+              <td>0.265 / 100ms</td>
+              <td>0.020 / 0.20ms</td>
+              <td>Opus 0.236 / 100ms</td>
+              <td>2314 / 2923ms</td>
+              <td>2238 / 14ms</td>
+            </tr>
+            <tr>
+              <td>Opus 60m<br><code>e1d5c05e</code></td>
+              <td>60m</td>
+              <td>Earlier Opus 60m</td>
+              <td>31.4 / 33</td>
+              <td>123 / 232ms</td>
+              <td>0.028 / 0.050</td>
+              <td>0.195 / 80ms</td>
+              <td>80ms</td>
+              <td>0.376 / 100ms</td>
+              <td>0.026 / 0.47ms</td>
+              <td>Opus 0.323 / 100ms</td>
+              <td>2348 / 2701ms</td>
+              <td>797 / 8ms</td>
+            </tr>
+            <tr>
+              <td>Custom Opus 100m<br><code>04301678</code></td>
+              <td>100m</td>
+              <td>Custom Go Opus</td>
+              <td>25.5 / 32</td>
+              <td>6 / 39ms</td>
+              <td>0.003 / 0.010</td>
+              <td>0.005 / 20ms</td>
+              <td>20ms</td>
+              <td>0.278 / 3ms</td>
+              <td>0.025 / 2ms</td>
+              <td>Opus 0.245 / 2.9ms</td>
+              <td>1708 / 1931ms</td>
+              <td>5214 / 36ms</td>
+            </tr>
+            <tr>
+              <td>No background audio 100m<br><code>d9d84d64</code></td>
+              <td>100m</td>
+              <td>Custom Opus, no background</td>
+              <td>25.3 / 33</td>
+              <td>11 / 74ms</td>
+              <td>0.003 / 0.010</td>
+              <td>0.033 / 80ms</td>
+              <td>40ms</td>
+              <td>0.255 / 101ms</td>
+              <td>0.031 / 1.5ms</td>
+              <td>Opus 0.312 / 47ms</td>
+              <td>1407 / 2136ms</td>
+              <td>3101 / 27ms</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section>
+      <h2>Pyroscope CPU Stack Comparison</h2>
+      <p>
+        Percentages are cumulative CPU weight within the profile for each call window. After PCMU, the Opus stack
+        disappears and the remaining output path is mostly LiveKit/Pion RTP write, SRTP, and UDP send. The no-interim
+        run also materially reduced JSON and data-publish CPU.
+      </p>
+      <div class="table-wrap">
+        <table aria-label="Pyroscope CPU stack comparison">
+          <thead>
+            <tr>
+              <th>Run</th>
+              <th>Profile CPU</th>
+              <th>Playback</th>
+              <th>WriteAudioPCM</th>
+              <th>Opus</th>
+              <th>WriteSample</th>
+              <th>RTP Write</th>
+              <th>JSON Unmarshal</th>
+              <th>Data Publish</th>
+              <th>Pyroscope</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr class="highlight">
+              <td>PCMU no interim</td>
+              <td>1.24s</td>
+              <td>18.5%</td>
+              <td>13.7%</td>
+              <td>0.0%</td>
+              <td>12.1%</td>
+              <td>12.1%</td>
+              <td>2.4%</td>
+              <td>0.8%</td>
+              <td>2.4%</td>
+            </tr>
+            <tr>
+              <td>PCMU previous</td>
+              <td>1.81s</td>
+              <td>20.4%</td>
+              <td>18.2%</td>
+              <td>0.0%</td>
+              <td>17.7%</td>
+              <td>17.1%</td>
+              <td>7.2%</td>
+              <td>2.2%</td>
+              <td>2.8%</td>
+            </tr>
+            <tr>
+              <td>Opus low</td>
+              <td>2.19s</td>
+              <td>48.9%</td>
+              <td>43.8%</td>
+              <td>27.9%</td>
+              <td>15.5%</td>
+              <td>15.1%</td>
+              <td>6.8%</td>
+              <td>0.9%</td>
+              <td>1.4%</td>
+            </tr>
+            <tr>
+              <td>Opus tuned</td>
+              <td>3.29s</td>
+              <td>59.9%</td>
+              <td>56.2%</td>
+              <td>45.3%</td>
+              <td>9.7%</td>
+              <td>9.1%</td>
+              <td>4.0%</td>
+              <td>0.3%</td>
+              <td>1.2%</td>
+            </tr>
+            <tr>
+              <td>Earlier Opus 50m</td>
+              <td>3.19s</td>
+              <td>69.9%</td>
+              <td>67.7%</td>
+              <td>59.6%</td>
+              <td>6.6%</td>
+              <td>6.6%</td>
+              <td>5.3%</td>
+              <td>0.6%</td>
+              <td>0.6%</td>
+            </tr>
+            <tr>
+              <td>Opus 60m</td>
+              <td>4.10s</td>
+              <td>68.8%</td>
+              <td>67.6%</td>
+              <td>67.1%</td>
+              <td>0.5%</td>
+              <td>0.5%</td>
+              <td>3.2%</td>
+              <td>0.0%</td>
+              <td>0.7%</td>
+            </tr>
+            <tr>
+              <td>Custom Opus 100m</td>
+              <td>3.96s</td>
+              <td>76.5%</td>
+              <td>75.8%</td>
+              <td>70.2%</td>
+              <td>5.3%</td>
+              <td>4.3%</td>
+              <td>2.5%</td>
+              <td>0.0%</td>
+              <td>0.5%</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="two-col">
+      <div class="card">
+        <h2>Steady CPU Ranking</h2>
+        <div class="bar-list" aria-label="Steady Go CPU ranking">
+          <div class="bar-row">
+            <div class="bar-label">PCMU no interim</div>
+            <div class="bar-track"><div class="bar green" style="width:33.9%"></div></div>
+            <div class="bar-value">10.6m</div>
+          </div>
+          <div class="bar-row">
+            <div class="bar-label">PCMU previous</div>
+            <div class="bar-track"><div class="bar green" style="width:42.4%"></div></div>
+            <div class="bar-value">13.3m</div>
+          </div>
+          <div class="bar-row">
+            <div class="bar-label">Opus c1 50m</div>
+            <div class="bar-track"><div class="bar green" style="width:51.3%"></div></div>
+            <div class="bar-value">16.1m</div>
+          </div>
+          <div class="bar-row">
+            <div class="bar-label">Opus c3 50m</div>
+            <div class="bar-track"><div class="bar" style="width:70.1%"></div></div>
+            <div class="bar-value">21.9m</div>
+          </div>
+          <div class="bar-row">
+            <div class="bar-label">Earlier Opus 50m</div>
+            <div class="bar-track"><div class="bar" style="width:70.1%"></div></div>
+            <div class="bar-value">21.9m</div>
+          </div>
+          <div class="bar-row">
+            <div class="bar-label">No BG 100m</div>
+            <div class="bar-track"><div class="bar amber" style="width:80.6%"></div></div>
+            <div class="bar-value">25.3m</div>
+          </div>
+          <div class="bar-row">
+            <div class="bar-label">Custom Opus 100m</div>
+            <div class="bar-track"><div class="bar amber" style="width:81.5%"></div></div>
+            <div class="bar-value">25.5m</div>
+          </div>
+          <div class="bar-row">
+            <div class="bar-label">Opus 60m</div>
+            <div class="bar-track"><div class="bar amber" style="width:100%"></div></div>
+            <div class="bar-value">31.4m</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Steady Throttle Ranking</h2>
+        <div class="bar-list" aria-label="Steady throttle ranking">
+          <div class="bar-row">
+            <div class="bar-label">Custom Opus 100m</div>
+            <div class="bar-track"><div class="bar green" style="width:3.5%"></div></div>
+            <div class="bar-value">6ms</div>
+          </div>
+          <div class="bar-row">
+            <div class="bar-label">No BG 100m</div>
+            <div class="bar-track"><div class="bar green" style="width:6.6%"></div></div>
+            <div class="bar-value">11ms</div>
+          </div>
+          <div class="bar-row">
+            <div class="bar-label">PCMU no interim</div>
+            <div class="bar-track"><div class="bar" style="width:70.8%"></div></div>
+            <div class="bar-value">121ms</div>
+          </div>
+          <div class="bar-row">
+            <div class="bar-label">Opus 60m</div>
+            <div class="bar-track"><div class="bar" style="width:72.0%"></div></div>
+            <div class="bar-value">123ms</div>
+          </div>
+          <div class="bar-row">
+            <div class="bar-label">Opus c3 50m</div>
+            <div class="bar-track"><div class="bar" style="width:76.8%"></div></div>
+            <div class="bar-value">131ms</div>
+          </div>
+          <div class="bar-row">
+            <div class="bar-label">PCMU previous</div>
+            <div class="bar-track"><div class="bar amber" style="width:93.7%"></div></div>
+            <div class="bar-value">160ms</div>
+          </div>
+          <div class="bar-row">
+            <div class="bar-label">Opus c1 50m</div>
+            <div class="bar-track"><div class="bar amber" style="width:100%"></div></div>
+            <div class="bar-value">171ms</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="notes">
+      <h2>Interpretation</h2>
+      <ul>
+        <li><strong>PCMU plus no interim events is the lowest CPU result.</strong> It reduced steady Go CPU to 10.6m and removed Opus encode CPU entirely.</li>
+        <li><strong>Disabling interim transcript RTVI events helped signalling CPU.</strong> Data publishes dropped from 4071 to 204, JSON unmarshal dropped from 7.2% to 2.4%, JSON marshal dropped from 4.4% to 1.6%, and profile CPU dropped from 1.81s to 1.24s.</li>
+        <li><strong>PCMU still does not remove tick lag.</strong> The latest run had lower playback work and throttling than the previous PCMU run, but a worse 180ms tick-lag outlier. That lag was not explained by PCMU conversion or normal write cost in the logs.</li>
+        <li><strong>The lowest Opus CPU option is c1 / 20k / wideband.</strong> It is about 3m higher steady CPU than PCMU, but keeps Opus quality.</li>
+        <li><strong>100m has much lower throttling.</strong> The 100m runs show only 6-11ms steady throttling per 10s window, compared with roughly 130-170ms at 50m.</li>
+        <li><strong>Background audio is not a major CPU lever.</strong> The no-background 100m run did not materially reduce steady Go CPU versus the comparable 100m Opus run.</li>
+        <li><strong>Remaining CPU is mostly transport write path and runtime overhead.</strong> PCMU moved the bottleneck to WriteSample/RTP write; the no-interim change reduced app-message overhead, but the WebRTC write path remains the largest named CPU area.</li>
+      </ul>
+    </section>
+
+    <section class="notes">
+      <h2>Data Notes</h2>
+      <ul>
+        <li>All call metrics were taken from per-call Cloud Logging diagnostics and Pyroscope profiles.</li>
+        <li>Container-level aggregate CPU/memory averages were not used as primary evidence.</li>
+        <li>Steady throttling excludes the first 10 second startup bucket, which often includes room join and setup work.</li>
+        <li>Tick lag is a wall-clock measurement. CPU profiles identify what consumes CPU while running, but they do not directly show time spent waiting for CPU after quota throttling.</li>
+      </ul>
+      <p class="footnote">
+        Compared calls: <code>36db97dc</code>, <code>d83e7448</code>, <code>1625e9d1</code>, <code>ec8ccd9d</code>,
+        <code>47365358</code>, <code>e1d5c05e</code>, <code>04301678</code>, and <code>d9d84d64</code>.
+      </p>
+    </section>
+  </main>
+</body>
+</html>

@@ -93,6 +93,38 @@ func TestDailyRoomRespondsToRTVIClientReady(t *testing.T) {
 	}
 }
 
+func TestDailyRoomWriteAudioPCMSkipsTimingWhenDiagnosticsDisabled(t *testing.T) {
+	var out testWriteCloser
+	room := &DailyRoom{
+		stdin:       &out,
+		audioTiming: newAudioTimingAggregator(),
+		perfDiag:    false,
+	}
+
+	if err := room.WriteAudioPCM([]byte{1, 2, 3, 4}); err != nil {
+		t.Fatalf("WriteAudioPCM: %v", err)
+	}
+	if got := room.audioTiming.snapshotAndReset(); len(got) != 0 {
+		t.Fatalf("audio timing entries = %+v, want none", got)
+	}
+}
+
+func TestDailyRoomWriteAudioPCMRecordsTimingWhenDiagnosticsEnabled(t *testing.T) {
+	var out testWriteCloser
+	room := &DailyRoom{
+		stdin:       &out,
+		audioTiming: newAudioTimingAggregator(),
+		perfDiag:    true,
+	}
+
+	if err := room.WriteAudioPCM([]byte{1, 2, 3, 4}); err != nil {
+		t.Fatalf("WriteAudioPCM: %v", err)
+	}
+	if got := room.audioTiming.snapshotAndReset(); len(got) != 2 {
+		t.Fatalf("audio timing entry count = %d, want 2: %+v", len(got), got)
+	}
+}
+
 func TestJoinDailyRoomRetriesBridgeJoin(t *testing.T) {
 	fix := newTestFixture(t)
 	tmp := t.TempDir()

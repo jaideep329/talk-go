@@ -1,0 +1,511 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LiveKit Test Client</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
+  <style>
+    :root {
+      --pico-font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      --pico-font-size: 14px;
+      --accent: #38bdf8;
+      --ok: #22c55e;
+      --warn: #f59e0b;
+      --danger: #ef4444;
+    }
+    body {
+      min-height: 100vh;
+      margin: 0;
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+    }
+    header {
+      padding: 0.9rem 1rem;
+      border-bottom: 1px solid var(--pico-muted-border-color);
+      display: grid;
+      grid-template-columns: minmax(160px, 1fr) auto;
+      gap: 1rem;
+      align-items: center;
+    }
+    h1 {
+      margin: 0;
+      font-size: 1rem;
+      font-weight: 650;
+      letter-spacing: 0;
+    }
+    .status {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      color: var(--pico-muted-color);
+      font-size: 0.8rem;
+    }
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 999px;
+      background: var(--pico-muted-color);
+    }
+    .dot.connected {
+      background: var(--ok);
+    }
+    .dot.connecting {
+      background: var(--warn);
+    }
+    main {
+      min-height: 0;
+      display: grid;
+      grid-template-columns: minmax(300px, 380px) minmax(0, 1fr);
+    }
+    aside {
+      border-right: 1px solid var(--pico-muted-border-color);
+      padding: 1rem;
+      overflow: auto;
+    }
+    .field {
+      margin-bottom: 0.85rem;
+    }
+    .field label {
+      margin-bottom: 0.25rem;
+      font-size: 0.75rem;
+      color: var(--pico-muted-color);
+    }
+    input {
+      margin: 0;
+      font-size: 0.78rem;
+    }
+    .actions {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 0.5rem;
+      margin-top: 1rem;
+    }
+    button {
+      margin: 0;
+      min-height: 2.3rem;
+      padding: 0.35rem 0.55rem;
+      font-size: 0.78rem;
+      white-space: nowrap;
+    }
+    .danger {
+      border-color: var(--danger);
+      color: var(--danger);
+    }
+    .meta {
+      display: grid;
+      gap: 0.35rem;
+      margin-top: 1rem;
+      color: var(--pico-muted-color);
+      font-size: 0.72rem;
+      overflow-wrap: anywhere;
+    }
+    .events {
+      min-height: 0;
+      display: grid;
+      grid-template-rows: auto 1fr;
+    }
+    .events-header {
+      padding: 0.85rem 1rem;
+      border-bottom: 1px solid var(--pico-muted-border-color);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+    }
+    .events-header strong {
+      font-size: 0.85rem;
+    }
+    #event-log {
+      min-height: 0;
+      overflow: auto;
+      padding: 0.75rem;
+      background: #05070a;
+    }
+    .event {
+      border: 1px solid #1f2937;
+      border-radius: 6px;
+      margin-bottom: 0.6rem;
+      background: #0b1017;
+    }
+    .event-title {
+      padding: 0.45rem 0.55rem;
+      border-bottom: 1px solid #1f2937;
+      display: flex;
+      justify-content: space-between;
+      gap: 0.75rem;
+      color: var(--pico-muted-color);
+      font-size: 0.68rem;
+      overflow-wrap: anywhere;
+    }
+    pre {
+      margin: 0;
+      padding: 0.55rem;
+      overflow: auto;
+      color: #d1d5db;
+      background: transparent;
+      font-size: 0.72rem;
+      line-height: 1.45;
+      white-space: pre-wrap;
+    }
+    footer {
+      padding: 0.55rem 1rem;
+      border-top: 1px solid var(--pico-muted-border-color);
+      color: var(--pico-muted-color);
+      font-size: 0.75rem;
+      min-height: 2rem;
+    }
+    #remote-audio {
+      display: none;
+    }
+    @media (max-width: 820px) {
+      header {
+        grid-template-columns: 1fr;
+      }
+      main {
+        grid-template-columns: 1fr;
+      }
+      aside {
+        border-right: 0;
+        border-bottom: 1px solid var(--pico-muted-border-color);
+      }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>LiveKit Test Client</h1>
+    <div class="status">
+      <span id="status-dot" class="dot"></span>
+      <span id="status-text">Disconnected</span>
+    </div>
+  </header>
+
+  <main>
+    <aside>
+      <div class="field">
+        <label for="create-url">Create Fly Room URL</label>
+        <input id="create-url" value="https://disha-staging.curelinktech.in/bot/create_fly_room">
+      </div>
+      <div class="field">
+        <label for="user-id">User ID</label>
+        <input id="user-id" value="a98c527c-5553-4452-acc2-8002b4b5e230">
+      </div>
+      <div class="field">
+        <label for="user-token">Bearer Token</label>
+        <input id="user-token" value="1f41be8d3bb1995d80b86b98c30baf2813b03afd">
+      </div>
+
+      <div class="actions">
+        <button id="join-btn">Join</button>
+        <button id="mute-btn" class="secondary" disabled>Mute</button>
+        <button id="end-btn" class="outline danger" disabled>End</button>
+      </div>
+
+      <div class="meta">
+        <span id="room-url"></span>
+        <span id="room-name"></span>
+      </div>
+    </aside>
+
+    <section class="events">
+      <div class="events-header">
+        <strong>RTVI Events</strong>
+        <button id="clear-btn" class="outline secondary">Clear</button>
+      </div>
+      <div id="event-log"></div>
+    </section>
+  </main>
+
+  <footer id="error"></footer>
+  <div id="remote-audio"></div>
+
+  <script type="module">
+    import {
+      Room,
+      RoomEvent,
+      Track,
+    } from "https://cdn.jsdelivr.net/npm/livekit-client@2.19.0/dist/livekit-client.esm.mjs";
+
+    const el = {
+      createUrl: document.getElementById("create-url"),
+      userId: document.getElementById("user-id"),
+      userToken: document.getElementById("user-token"),
+      join: document.getElementById("join-btn"),
+      mute: document.getElementById("mute-btn"),
+      end: document.getElementById("end-btn"),
+      clear: document.getElementById("clear-btn"),
+      statusText: document.getElementById("status-text"),
+      statusDot: document.getElementById("status-dot"),
+      eventLog: document.getElementById("event-log"),
+      error: document.getElementById("error"),
+      roomUrl: document.getElementById("room-url"),
+      roomName: document.getElementById("room-name"),
+      remoteAudio: document.getElementById("remote-audio"),
+    };
+
+    let room = null;
+    let micEnabled = true;
+    const encoder = new TextEncoder();
+    const decoder = new TextDecoder();
+    applyQueryParams();
+
+    el.join.addEventListener("click", join);
+    el.mute.addEventListener("click", toggleMic);
+    el.end.addEventListener("click", endCall);
+    el.clear.addEventListener("click", () => el.eventLog.replaceChildren());
+
+    async function join() {
+      if (room) return;
+      setError("");
+      setStatus("connecting");
+      el.eventLog.replaceChildren();
+
+      try {
+        const roomInfo = await createFlyRoom();
+      if (!roomInfo.room_url || !roomInfo.token) {
+        throw new Error("Create Fly Room did not return room_url and token");
+      }
+      appendEvent("system", {
+        type: "create-fly-room",
+        room_url: roomInfo.room_url,
+        room_name: roomInfo.room_name || "",
+      });
+
+        room = new Room({
+          adaptiveStream: false,
+          dynacast: false,
+        });
+        wireRoomEvents(room);
+
+        await room.connect(roomInfo.room_url, roomInfo.token, { autoSubscribe: true });
+        try {
+          await room.startAudio();
+        } catch (err) {
+          appendEvent("system", {
+            type: "audio-playback-blocked",
+            message: err.message || String(err),
+          });
+        }
+        await room.localParticipant.setMicrophoneEnabled(true);
+        micEnabled = true;
+
+        el.roomUrl.textContent = `room_url: ${roomInfo.room_url}`;
+        el.roomName.textContent = roomInfo.room_name ? `room_name: ${roomInfo.room_name}` : "";
+        setStatus("connected");
+        await sendData({
+          label: "rtvi-ai",
+          type: "client-ready",
+          id: `client-ready-${Date.now()}`,
+          data: {
+            version: "1.2.0",
+            about: {
+              library: "talk-go-livekit-client",
+              platform: "browser",
+            },
+          },
+        });
+      } catch (err) {
+        console.error(err);
+        setError(err.message || "Join failed");
+        await cleanup();
+      }
+    }
+
+    async function createFlyRoom() {
+      const headers = { "Content-Type": "application/json" };
+      const token = el.userToken.value.trim();
+      if (token) {
+        headers.Authorization = `Bearer ${token}`;
+      }
+
+      const res = await fetch(el.createUrl.value.trim(), {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          user_id: el.userId.value.trim(),
+          environment: "staging",
+          bot_type: "sales_call",
+          resume_enabled: true,
+        }),
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(text || res.statusText);
+      }
+      return res.json();
+    }
+
+    function wireRoomEvents(activeRoom) {
+      activeRoom
+        .on(RoomEvent.Connected, () => appendEvent("system", { type: "connected" }))
+        .on(RoomEvent.ConnectionStateChanged, (state) => appendEvent("system", { type: "state", state }))
+        .on(RoomEvent.Disconnected, () => {
+          appendEvent("system", { type: "disconnected" });
+          cleanup();
+        })
+        .on(RoomEvent.ParticipantConnected, (participant) => appendEvent("system", {
+          type: "participant-connected",
+          identity: participant.identity,
+        }))
+        .on(RoomEvent.ParticipantDisconnected, (participant) => appendEvent("system", {
+          type: "participant-disconnected",
+          identity: participant.identity,
+        }))
+        .on(RoomEvent.TrackSubscribed, (track, publication, participant) => {
+          appendEvent("system", {
+            type: "track-subscribed",
+            kind: track.kind,
+            participant: participant.identity,
+            trackSid: publication.trackSid,
+          });
+          if (track.kind === Track.Kind.Audio) {
+            attachAudio(track, publication.trackSid);
+          }
+        })
+        .on(RoomEvent.TrackUnsubscribed, (track, publication) => {
+          detachAudio(publication.trackSid);
+        })
+        .on(RoomEvent.DataReceived, (payload, participant, kind, topic) => {
+          const text = decoder.decode(payload);
+          let parsed = text;
+          try {
+            parsed = JSON.parse(text);
+          } catch (_) {
+            parsed = { raw: text };
+          }
+          if (parsed && parsed.label === "rtvi-ai") {
+            appendEvent("rtvi", {
+              direction: "in",
+              participant: participant ? participant.identity : "",
+              kind,
+              topic: topic || "",
+              event: parsed,
+            });
+          } else {
+            appendEvent("data", {
+              direction: "in",
+              participant: participant ? participant.identity : "",
+              kind,
+              topic: topic || "",
+              event: parsed,
+            });
+          }
+        });
+    }
+
+    function attachAudio(track, trackSid) {
+      if (document.querySelector(`[data-track-sid="${trackSid}"]`)) return;
+      const audio = track.attach();
+      audio.autoplay = true;
+      audio.playsInline = true;
+      audio.dataset.trackSid = trackSid;
+      audio.play().catch((err) => {
+        appendEvent("system", {
+          type: "audio-element-playback-blocked",
+          trackSid,
+          message: err.message || String(err),
+        });
+      });
+      el.remoteAudio.appendChild(audio);
+    }
+
+    function detachAudio(trackSid) {
+      const node = document.querySelector(`[data-track-sid="${trackSid}"]`);
+      if (node) node.remove();
+    }
+
+    async function toggleMic() {
+      if (!room) return;
+      micEnabled = !micEnabled;
+      await room.localParticipant.setMicrophoneEnabled(micEnabled);
+      el.mute.textContent = micEnabled ? "Mute" : "Unmute";
+    }
+
+    async function endCall() {
+      if (!room) return;
+      try {
+        await sendData({ type: "end_call" });
+        await sleep(300);
+      } catch (err) {
+        console.warn("end_call publish failed:", err);
+      }
+      await cleanup();
+    }
+
+    async function sendData(message) {
+      if (!room) return;
+      await room.localParticipant.publishData(
+        encoder.encode(JSON.stringify(message)),
+        { reliable: true },
+      );
+      if (message && message.label === "rtvi-ai") {
+        appendEvent("rtvi", { direction: "out", event: message });
+      }
+    }
+
+    async function cleanup() {
+      const activeRoom = room;
+      room = null;
+      if (activeRoom) {
+        try {
+          await activeRoom.disconnect(true);
+        } catch (_) {}
+      }
+      el.remoteAudio.replaceChildren();
+      el.roomUrl.textContent = "";
+      el.roomName.textContent = "";
+      micEnabled = true;
+      el.mute.textContent = "Mute";
+      setStatus("disconnected");
+    }
+
+    function appendEvent(label, payload) {
+      const item = document.createElement("article");
+      item.className = "event";
+
+      const title = document.createElement("div");
+      title.className = "event-title";
+      const left = document.createElement("span");
+      left.textContent = label;
+      const right = document.createElement("span");
+      right.textContent = new Date().toLocaleTimeString();
+      title.append(left, right);
+
+      const pre = document.createElement("pre");
+      pre.textContent = JSON.stringify(payload, null, 2);
+      item.append(title, pre);
+      el.eventLog.appendChild(item);
+      el.eventLog.scrollTop = el.eventLog.scrollHeight;
+    }
+
+    function setStatus(status) {
+      const connected = status === "connected";
+      const connecting = status === "connecting";
+      el.statusText.textContent = connected ? "Connected" : connecting ? "Connecting" : "Disconnected";
+      el.statusDot.className = `dot ${connected ? "connected" : connecting ? "connecting" : ""}`;
+      el.join.disabled = connected || connecting;
+      el.mute.disabled = !connected;
+      el.end.disabled = !connected;
+    }
+
+    function setError(message) {
+      el.error.textContent = message || "";
+    }
+
+    function sleep(ms) {
+      return new Promise((resolve) => setTimeout(resolve, ms));
+    }
+
+    function applyQueryParams() {
+      const params = new URLSearchParams(window.location.search);
+      const createUrl = params.get("create_url");
+      const userId = params.get("user_id");
+      const token = params.get("token");
+      if (createUrl) el.createUrl.value = createUrl;
+      if (userId) el.userId.value = userId;
+      if (token) el.userToken.value = token;
+    }
+  </script>
+</body>
+</html>

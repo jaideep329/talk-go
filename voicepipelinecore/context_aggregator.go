@@ -90,10 +90,9 @@ func (a *ContextAggregator) resetInterimTranscript() {
 }
 
 func (a *ContextAggregator) sendLiveTranscript(text string) {
-	if a.taskCtx == nil {
-		return
-	}
-	a.taskCtx.UIEvents.UserTranscription(text, false, time.Now())
+	// Interim user transcription events are intentionally suppressed.
+	// They are high-frequency diagnostics/UI traffic and final RTVI
+	// user-transcription events are still emitted from addUserMessage.
 }
 
 func (a *ContextAggregator) updateInterimTranscript(f TranscriptFrame) string {

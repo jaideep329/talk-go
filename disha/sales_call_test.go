@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -279,10 +280,10 @@ func TestSalesCallBotPlanAssemblesDishaCall(t *testing.T) {
 	if assistantChunk.MainAgentSystemPromptLangfuseKey == nil || *assistantChunk.MainAgentSystemPromptLangfuseKey != "sales_call/main_sys-3day_v2_v17" {
 		t.Fatalf("assistant prompt key = %v, want sales_call/main_sys-3day_v2_v17", assistantChunk.MainAgentSystemPromptLangfuseKey)
 	}
-	if assistantChunk.LLMTTFBMs == nil || *assistantChunk.LLMTTFBMs != 11.1 ||
-		assistantChunk.TTSTTFBMs == nil || *assistantChunk.TTSTTFBMs != 22.2 ||
-		assistantChunk.V2VLatencyMs == nil || *assistantChunk.V2VLatencyMs != 33.3 ||
-		assistantChunk.TextAggregationMs == nil || *assistantChunk.TextAggregationMs != 44.4 {
+	if !floatPtrNear(assistantChunk.LLMTTFBMs, 0.0111) ||
+		!floatPtrNear(assistantChunk.TTSTTFBMs, 0.0222) ||
+		!floatPtrNear(assistantChunk.V2VLatencyMs, 0.0333) ||
+		!floatPtrNear(assistantChunk.TextAggregationMs, 0.0444) {
 		t.Fatalf("assistant metrics mismatch: %+v", assistantChunk)
 	}
 
@@ -447,6 +448,13 @@ func containsAll(haystack string, needles ...string) bool {
 		}
 	}
 	return true
+}
+
+func floatPtrNear(got *float64, want float64) bool {
+	if got == nil {
+		return false
+	}
+	return math.Abs(*got-want) < 1e-9
 }
 
 func TestSalesTalkTimeLimit(t *testing.T) {

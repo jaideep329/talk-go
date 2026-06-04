@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/jaideep329/talk-go/internal/perfdiag"
 	"github.com/jaideep329/talk-go/internal/sentryutil"
 )
 
@@ -68,6 +69,8 @@ type DailyRoom struct {
 	audioSource *AudioSourceProcessor
 	cmd         *exec.Cmd
 	stdin       io.WriteCloser
+	audioTiming *audioTimingAggregator
+	perfDiag    bool
 	writeMu     sync.Mutex
 	waitDone    chan struct{}
 	closed      atomic.Bool
@@ -145,6 +148,7 @@ func startDailyRoomAttempt(roomURL, token, python, script string, taskCtx *TaskC
 		return nil, fmt.Errorf("daily bridge stderr: %w", err)
 	}
 
+	perfDiagEnabled := perfdiag.Enabled()
 	room := &DailyRoom{
 		roomURL:     roomURL,
 		roomName:    dailyRoomNameFromURL(roomURL),
@@ -152,12 +156,22 @@ func startDailyRoomAttempt(roomURL, token, python, script string, taskCtx *TaskC
 		audioSource: audioSource,
 		cmd:         cmd,
 		stdin:       stdin,
+		perfDiag:    perfDiagEnabled,
 		waitDone:    make(chan struct{}),
 		joinResult:  make(chan error, 1),
+	}
+	if perfDiagEnabled {
+		room.audioTiming = newAudioTimingAggregator()
 	}
 
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start daily bridge: %w", err)
+	}
+	if perfDiagEnabled && cmd.Process != nil {
+		room.goTracked(func() { room.monitorProcessUsage(os.Getpid(), cmd.Process.Pid) })
+	}
+	if perfDiagEnabled {
+		room.goTracked(func() { room.monitorAudioTiming() })
 	}
 	room.goTracked(func() { room.readStdout(stdout) })
 	room.goTracked(func() { room.readStderr(stderr) })
@@ -198,6 +212,10 @@ func (r *DailyRoom) RoomName() string {
 	return r.roomName
 }
 
+func (r *DailyRoom) OutputSampleRate() int {
+	return defaultOutputSampleRate
+}
+
 func (r *DailyRoom) SendAppMessage(v interface{}) error {
 	return r.writeCommand(dailyBridgeCommand{Type: "message", Data: v})
 }
@@ -206,8 +224,20 @@ func (r *DailyRoom) WriteAudioPCM(pcm []byte) error {
 	if len(pcm) == 0 {
 		return nil
 	}
-	return r.writeCommand(dailyBridgeCommand{Type: "audio", Data: base64.StdEncoding.EncodeToString(pcm)})
+	if !r.perfDiagnosticsEnabled() {
+		encoded := base64.StdEncoding.EncodeToString(pcm)
+		return r.writeCommand(dailyBridgeCommand{Type: "audio", Data: encoded})
+	}
+	start := time.Now()
+	encoded := base64.StdEncoding.EncodeToString(pcm)
+	r.recordAudioTiming("go_bridge_out_base64_encode", time.Since(start))
+	start = time.Now()
+	err := r.writeCommand(dailyBridgeCommand{Type: "audio", Data: encoded})
+	r.recordAudioTiming("go_bridge_out_json_stdin", time.Since(start))
+	return err
 }
+
+func (r *DailyRoom) ClearAudioBuffer() {}
 
 func (r *DailyRoom) Disconnect() {
 	if r == nil || !r.closed.CompareAndSwap(false, true) {
@@ -291,12 +321,26 @@ func (r *DailyRoom) handleEvent(event dailyBridgeEvent) {
 		}
 		r.endTask(EndReasonClientDisconnect)
 	case "audio":
-		raw, err := base64.StdEncoding.DecodeString(event.Data)
+		var raw []byte
+		var err error
+		if r.perfDiagnosticsEnabled() {
+			start := time.Now()
+			raw, err = base64.StdEncoding.DecodeString(event.Data)
+			r.recordAudioTiming("go_bridge_in_base64_decode", time.Since(start))
+		} else {
+			raw, err = base64.StdEncoding.DecodeString(event.Data)
+		}
 		if err != nil {
 			r.log("Daily bridge audio decode error: %v", err)
 			return
 		}
-		r.audioSource.PushPCM(raw, event.SampleRate, event.Channels)
+		if r.perfDiagnosticsEnabled() {
+			start := time.Now()
+			r.audioSource.PushPCM(raw, event.SampleRate, event.Channels)
+			r.recordAudioTiming("go_bridge_in_push_pcm", time.Since(start))
+		} else {
+			r.audioSource.PushPCM(raw, event.SampleRate, event.Channels)
+		}
 	case "app_message":
 		r.handleAppMessage(event.Message)
 	case "left":

@@ -1,6 +1,7 @@
 package voicepipelinecore
 
 import (
+	"bytes"
 	"testing"
 	"time"
 )
@@ -114,5 +115,32 @@ func TestTTS_PassesThroughUpstreamFrames(t *testing.T) {
 	}
 	if c := countFrames[BotStoppedSpeakingFrame](up); c != 1 {
 		t.Errorf("expected BotStoppedSpeakingFrame to pass upstream, got %d", c)
+	}
+}
+
+func TestTTS_NextPCMFrameUsesRawPCMBytes(t *testing.T) {
+	input := make([]byte, framePCMBytes+4)
+	for i := range input {
+		input[i] = byte(i % 251)
+	}
+
+	p := &TTSProcessor{pcmBuffer: append([]byte(nil), input...)}
+	frame := p.nextPCMFrame()
+
+	if len(frame) != framePCMBytes {
+		t.Fatalf("expected %d-byte PCM frame, got %d", framePCMBytes, len(frame))
+	}
+	if !bytes.Equal(frame, input[:framePCMBytes]) {
+		t.Fatal("PCM frame bytes were modified")
+	}
+	if !bytes.Equal(p.pcmBuffer, input[framePCMBytes:]) {
+		t.Fatal("PCM buffer was not advanced by exactly one frame")
+	}
+	frame[0] ^= 0xff
+	if bytes.Equal(frame[:1], input[:1]) {
+		t.Fatal("test setup did not mutate returned frame")
+	}
+	if !bytes.Equal(p.pcmBuffer, input[framePCMBytes:]) {
+		t.Fatal("returned PCM frame aliases the remaining buffer")
 	}
 }

@@ -23,16 +23,21 @@ Jaideep is an experienced Python backend engineer learning Go by building real p
 - **Core vs. business integration:** the `voicepipelinecore/` package is the call/pipeline framework and must stay free of business logic: no Redis, HTTP clients, conversation IDs, prompts, Disha end-reason policies, or persistence. Business packages such as `disha/` assemble the pipeline themselves (`SalesCallBot.BuildTask`) and hook in via `TaskConfig.CallEvents` plus direct processor-constructor params (initial messages, max talk-time, phonetic dict, the `LLMClient`). The `voicepipelinecore/llmrouter` sub-package is the one allowed exception: it may import `net/http`/`crypto` and read Redis/env, but the core package never imports it — the bot injects it. If core code starts needing `import ".../disha"` or `if conversationID != ""`, add a callback or constructor param instead.
 - Use the existing Disha `POST /common/enqueue_job` endpoint for Disha background jobs. Payload shape is `module_name`, `func_name`, `kwargs`, `sqs_queue`; do not use or create `/bot/enqueue_job`. This covers Redis-to-Postgres chunk sync, GKE worker registration DB ops, and worker cleanup.
 - Mirror Disha's current `VoiceBotAPIService` auth behavior: it sends no auth header. The Go Disha client should not send Authorization unless a token/header scheme is later added explicitly.
-- Keep using Daily app messages for frontend UI events and inbound control messages. Frontend events must be RTVI-format `rtvi-ai` entries; the same entries are buffered and uploaded as the S3 debug log at call end. Do not reintroduce a custom `/ws` route or a separate debug-log event stream.
+- Keep using the active room transport's signalling channel for frontend UI events and inbound control messages: Daily app messages for Daily calls, reliable LiveKit data packets for LiveKit calls. Frontend events must be RTVI-format `rtvi-ai` entries; the same entries are buffered and uploaded as the S3 debug log at call end. Do not reintroduce a custom `/ws` route or a separate debug-log event stream.
 - For local end-to-end testing, the browser page should exercise Disha's Create Room flow: `daily-client.html` calls `POST http://localhost:8000/bot/create_room`, Disha creates the Daily room/token and conversation, Disha calls talk-go `/connect` with `room_url`, `token`, and `bot_token`, and the browser joins the returned Daily room. Do not paste bearer/API tokens into the browser page; the current local Create Room path does not require auth.
+- For staging LiveKit smoke testing, `livekit-client.html` is served by talk-go at `/livekit-client.html` plus `/LiveKitClient.html` and `/LifeKitClient.html`. It defaults to Disha staging `POST https://disha-staging.curelinktech.in/bot/create_fly_room`, accepts `create_url`, `user_id`, and `token` query-param overrides, sends `environment="staging"` and `bot_type="sales_call"`, sends optional dummy bearer auth, joins the returned LiveKit room, publishes mic audio, sends `end_call` over reliable data packets, and displays raw inbound RTVI/data events.
 - For GKE/staging compatibility, expose Disha worker-compatible routes under `/bot`: `POST /bot/create_worker_room`, `GET /bot/has_active_session`, `GET /bot/health_check`, `GET /bot/pre_stop_check`, `GET /bot/readiness_check`, `POST /bot/mark_machine_reserved`, and `POST /bot/trigger_exit`. `create_worker_room` must return quickly and start the bot in the background because Disha forwards to the pod with a short timeout.
-- On worker startup, if `HOSTNAME`, `POD_UID`, and `FLY_APP_NAME`/`GKE_DEPLOYMENT_NAME` are set, register the pod like Disha's Python worker: check Redis key `registered_pod:{pod_name}:{pod_uid}`, enqueue `bots.gke_pod_manager.register_worker_pod_db_ops` on `fifo-p0-fast-l1` via `/common/enqueue_job`, then set the Redis key for 24h. Do not run a local SQS worker in Go.
+- LiveKit is enabled only for Disha `/bot/create_fly_room` staging sales calls. Disha keeps the external API contract as `room_url` + `token`; for LiveKit `room_url` is the LiveKit server URL, and the token carries the room grant. The internal worker payload includes common `room_name` for both Daily and LiveKit, and does not send `transport_type`; talk-go chooses Daily for Daily room URLs and LiveKit for non-Daily room URLs. `/bot/create_room` local testing stays Daily.
+- On worker startup, if `HOSTNAME`, `POD_UID`, and `GKE_DEPLOYMENT_NAME` are set, register the pod like Disha's Python worker: check Redis key `registered_pod:{pod_name}:{pod_uid}`, enqueue `bots.gke_pod_manager.register_worker_pod_db_ops` on `fifo-p0-fast-l1` via `/common/enqueue_job`, then set the Redis key for 24h. Do not run a local SQS worker in Go.
+- Disha backend worker registration should use the normal scaling-buffer schedule, but when the registering `app_name` matches the env-backed TalkGo `GKE_DEPLOYMENT_NAME`, halve the computed available-machine buffer before deciding whether a matching provisioning machine should be marked reserved.
 - On worker call cleanup, clear the in-memory worker active/reserved flags and enqueue `bots.signal_handler.cleanup_state` on `p0-fast-l1` via `/common/enqueue_job` when `HOSTNAME` is available.
 - On `SIGTERM`, mirror Disha's Python `bots/signal_handler.py`: handle the first signal only, write Redis key `pod_sigterm:{pod_name}` for 2h, and enqueue `bots.signal_handler.on_graceful_shutdown_initiated` on `fifo-p0-fast-l1` via `/common/enqueue_job`. Idle pods can exit after the enqueue so Kubernetes rollouts do not hang; active/reserved pods stay alive and Disha's background job/state manager decides whether cleanup should proceed.
-- The GKE deployment name is independent from the image repository. For staging/prod, run TalkGo as a new deployment in the existing voice-worker cluster (for example `TALK_GO_DEPLOYMENT_NAME=disha-go-voice-worker-staging`) and store the image in the existing worker Artifact Registry repository (for example `ARTIFACT_REPOSITORY_NAME=disha-voice-worker-staging`). The Disha API base URL can come from either `DISHA_API_URL` or Disha's existing `API_BASE_URL`.
+- Deployment scripts must be runnable as plain commands with no caller-exported env vars and no inline `VAR=value ./script.sh` assumptions. Read deploy/runtime values from repo env files such as `.staging.env` or `.prod.env` inside the script, then pass them internally to `envsubst`, `kubectl`, Docker, etc. Do not ask Jaideep to export shell vars for deploys.
+- The GKE deployment name is independent from the image repository. For staging/prod, run TalkGo as a new deployment in the existing voice-worker clusters using Disha-style deployment variables and store the image in the matching existing worker Artifact Registry repository. Staging uses `deploy-staging.sh`, `.staging.env`, `k8s/worker-staging.yaml`, `GKE_DEPLOYMENT_NAME=disha-go-voice-worker-staging`, `ARTIFACT_REPOSITORY_NAME=disha-voice-worker-staging`, cluster `disha-voice-worker-staging` in `us-east1`, and namespace `staging`. Prod uses `deploy-prod.sh`, `.prod.env`, `k8s/worker.yaml`, `GKE_DEPLOYMENT_NAME=disha-go-voice-worker-prod`, `ARTIFACT_REPOSITORY_NAME=disha-voice-worker-prod`, cluster `disha-voice-worker-prod` in `us-east4`, and namespace `prod`; `deploy-prod.sh` must refuse obvious staging-looking API/Redis/bucket/repository/cluster/namespace values before touching the prod cluster. The manifests preserve Disha backend worker scheduling, affinity, KEDA, and PDB shape; prod `worker.yaml` uses the Disha prod worker resource posture, while staging keeps its current lower sizing. The KEDA Postgres scaler query mirrors Disha backend `k8s/worker.yaml`'s scaling-buffer-schedule query, except TalkGo halves the scheduled buffer before adding the deployment's active/reserved/provisioning worker count. Keep KEDA/PDB object names deployment-scoped so this worker does not overwrite Disha's worker scaler/PDB in the same namespace. The Disha API base URL can come from either `DISHA_API_URL` or Disha's existing `API_BASE_URL`.
 - Disha's current DB enum only supports `talktime_exhausted` and `user_idle`. Internal client-disconnect reasons should map to `null`/omitted `end_reason` in `run_post_call_operations`.
 - Normal Python sales-call cleanup does not set `end_type`; keep TalkGo `end_type` untouched/null. Only set `end_reason` for the same Python cases: `user_idle` during idle shutdown and `talktime_exhausted` during talk-time exhaustion. Client disconnect stays null.
 - Match Python RTVI debug-log shape for sales calls. `voicepipelinecore.UIEventSender` is the single RTVI event stream: it publishes each `rtvi-ai` entry over Daily app messages and buffers the same entries. Core only returns those entries through `CallStats.DebugLogs`; it must not know whether they are uploaded or where. Bot-specific Disha code decides whether to upload them by passing a `DebugLogUploader` into the common `CallEventCallbacks`. For sales calls, `sales_call.go` wires an uploader for `debug_log_data/{conversation_id}/log_data.json` through `disha/s3_uploader.go` using `ACCESS_KEY_ID`, `SECRET_KEY_ID`, `AWS_MAIN_REGION`, and `AWS_BUCKET_NAME`; the default `OnCallEnded` uploads logs and passes the resulting object key to post-call operations. Do not pass debug-log stores through `disha.Deps`. Cover the Python-observed event types: `bot-transcription`, `user-transcription`, `bot-started-speaking`, `bot-stopped-speaking`, and `server-message` entries such as `llm_call_result`, metrics, interruptions, talk-time exhaustion, call-ended, and participant-left messages.
+- Interim/live user transcription RTVI events are intentionally disabled to avoid high-frequency signalling/debug-log CPU overhead. `ContextAggregator` still uses interim STT internally for barge-in and idle behavior, but only final committed user transcripts should emit `user-transcription` RTVI entries (`final=true`).
 - After post-call operations, queue Daily metrics collection through `/common/enqueue_job` with `module_name="bots.webhooks"`, `func_name="fetch_and_store_daily_metrics"`, `sqs_queue="p1-fast-l1"`, and kwargs `conversation_id`, `meeting_id`, `bot_session_id`, and `user_session_id` when Daily session IDs are available.
 - Sales prompts are fetched from the Redis-backed `disha.DocumentStore` (`document:{name}:{env}` keys Disha pre-renders from Langfuse), with the prompt name chosen by `campaign_pricing_experiment_flag`. talk-go does not call Langfuse directly. Cartesia stays a single hardcoded key/config by design for now: Python exposes a per-conversation Cartesia key field, but it is effectively a facade over one constant, so do not treat it as a parity gap unless Disha actually starts varying that key.
 - For sales-call LLMs ending with incomplete sentences while reporting `finish_reason=stop`, fix the prompt/context instructions first. Do not add core/TTS sentence-completion heuristics, frame types, or replay filters unless logs prove the transport, TTS, or turn lifecycle actually corrupted a complete model response.
@@ -52,8 +57,9 @@ Jaideep is an experienced Python backend engineer learning Go by building real p
 - Sentry is initialized directly with `sentry-go` from `SENTRY_DSN`; report errors through the single generic `internal/sentryutil.Capture` helper. It uses tags plus `SetContext("details", ...)` rather than deprecated `SetExtra`, and stays generic (no Disha imports in core) while covering API, Redis, S3, Daily bridge, STT, signal-handler, worker-lifecycle, and abrupt-shutdown paths.
 - Disha `update_conversation` and `run_post_call_operations` must use API-first, queue-on-failure behavior: call the HTTP endpoint, and if it fails enqueue `bots.operations.voice_bot_operations.update_conversation` or `bots.operations.voice_bot_operations.run_post_call_operations` through `/common/enqueue_job` on `p0-fast-l1`.
 - Soniox connect attempts are capped at three with short backoff; after exhaustion the STT processor pushes a fatal `ErrorFrame` so the pipeline ends instead of holding a worker slot forever.
-- Daily bridge join retries three times before failing, matching Disha's Python transport retry pattern. Daily inbound RTVI `client-message` pings must receive RTVI `server-response` pong messages over Daily app messages.
+- Daily bridge and LiveKit joins retry three times before failing, matching Disha's Python transport retry pattern. Inbound RTVI `client-message` pings must receive RTVI `server-response` pong messages over the active room transport's signalling channel.
 - Sales-call chunks must carry `main_agent_system_prompt_langfuse_key` using `disha.PromptKey(promptName, promptVersion)` for both user and assistant committed turns.
+- Conversation chunk latency values are persisted in seconds. The Redis JSON keys still use Disha's legacy `_ms` names (`llm_ttfb_ms`, `tts_ttfb_ms`, `v2v_latency_ms`, `text_aggregation_ms`), so convert the core `TurnMetrics` millisecond values at the Disha chunk boundary instead of changing core metric units or renaming fields.
 - Do not promote one-flow values into broad task context, shared deps, long-lived callback struct fields, or config structs just because a later method needs them. For narrow values like the sales-call prompt key, pass it directly into the processor constructor (`NewContextAggregator(taskCtx, initialMessages, promptKey)`); the aggregator supplies it at the committed-turn boundary and `CallEventCallbacks.Events()` stays a plain default callback mapping.
 - Sales-call initial context kickoff must mirror Python's shape without special startup frame types: Daily user-join pushes the existing Pipecat-style `LLMMessagesAppendFrame(nil, true)`, and `ContextAggregator` consumes it by running the LLM on its current seeded context. Do not mutate core frame semantics or add a one-flow kickoff frame for sales-call startup.
 - Daily RTVI protocol handling stays generic in `DailyRoom`: inbound RTVI `client-ready` app messages should receive a `bot-ready` response with the same id and protocol version `1.2.0`, mirroring Pipecat's `RTVIProcessor.set_bot_ready()` behavior.
@@ -121,7 +127,7 @@ Core pipeline files live under `voicepipelinecore/` unless marked as root-level.
 | `llmrouter/` (sub-package) | Live-LLM resilience: model-group + endpoint registry (`groups.go`), Redis endpoint-health parse/selection + blacklist write-back (`health.go`, `selection.go`), per-provider OpenAI-format request building + SSE streaming (`providers.go`, `client.go`), Vertex OAuth token minting over stdlib crypto with the SA key lazily fetched from S3 (`vertex_token.go`, `s3.go`), lock-guarded re-poll trigger to the Python US endpoint (`poll_trigger.go`), and the best-effort `CallLog`/`LogSink` (`logging.go`). Implements `voicepipelinecore.LLMClient`; depends on a narrow `RedisStore` interface (satisfied by `disha.RedisClient`). The poll-trigger URL and Vertex creds path are read from env by the router itself; the core package never imports it — the bot wires only the group, Redis, and LogSink |
 | `phonetic_filter.go` | Core phonetic-replacement filter applied to text before each Cartesia send (token→replacement map injected by the bot via `NewTTSProcessor`). Returning `""` drops a non-speakable fragment, matching Python's `PhoneticTextFilter` |
 | `tts_processor.go` | Cartesia client + sentence aggregator + EndFrame drain controller. **Three goroutines per session:** `runReader` (lazy connect + websocket read, emits typed events on `ttsEvents`), `orchestrator` (owns ALL TTS state — aggregation, synthesis, shutdown — and drives Cartesia), and base input/process loops. `ProcessFrame` is a thin relay over a `commands` channel. EndFrame blocks `ProcessFrame` until orchestrator forwards it; this lets PlaybackSink/etc. shut down in pipeline order. Synthesis state is a single bool `cartesiaTextSent` ("does Cartesia owe us a `done` event?") — replaces the older 3-state enum and the older boolean pair. No explicit pending-end timer; the global `wg.Wait` 10s timeout in `completeEnd` is the ultimate escape hatch if Cartesia hangs on `done`. Context-id validation via `atomic.Value`. `ttsDialURL` is a package var; orchestrator waits on `connected` before processing commands |
-| `playback_sink_processor.go` | Writes outbound PCM to the Daily bridge. **Three goroutines:** base input/process loops + a `runPlayback` goroutine with the 20ms ticker. `ProcessFrame` relays through `queueCh`; `runPlayback` owns `playbackQueue`, opus decode for TTS frames, the background mixer, and pacing. Fires `OnBotFirstSpeech` on the first played audio frame and `Broadcast`s `BotStartedSpeakingFrame`; broadcasts `BotStoppedSpeakingFrame` after `TTSDoneFrame` (both directions, per Pipecat's MediaSender pattern). On `InterruptFrame` walks `playbackQueue` preserving `!IsInterruptible()` frames (EndFrame survives the purge). On `EndFrame` writes a short silence tail before forwarding (matches Pipecat's `audio_out_end_silence_secs`). Metrics (E2E latency) |
+| `playback_sink_processor.go` | Writes outbound PCM to the Daily bridge. **Three goroutines:** base input/process loops + a `runPlayback` goroutine with the 20ms ticker. `ProcessFrame` relays through `queueCh`; `runPlayback` owns `playbackQueue`, PCM conversion for TTS frames, the background mixer, and pacing. Fires `OnBotFirstSpeech` on the first played audio frame and `Broadcast`s `BotStartedSpeakingFrame`; broadcasts `BotStoppedSpeakingFrame` after `TTSDoneFrame` (both directions, per Pipecat's MediaSender pattern). On `InterruptFrame` walks `playbackQueue` preserving `!IsInterruptible()` frames (EndFrame survives the purge). On `EndFrame` writes a short silence tail before forwarding (matches Pipecat's `audio_out_end_silence_secs`). Metrics (E2E latency) |
 
 #### Testing infrastructure (Pipecat parity)
 
@@ -253,7 +259,7 @@ The `interruptSent` gate is what protects legitimate barge-in turns: when the us
 
 **LLMResponseStartFrame carries timestamp:** `StartedAt time.Time` is set by LLM when the turn begins. PlaybackSink uses it for accurate E2E latency measurement (measures from LLM turn start to first audio frame played).
 
-**Word timestamp interleaving in TTS:** TTS tracks `audioTimePushed` (seconds) and buffers `pendingWords` from Cartesia timestamp messages. After each opus frame is pushed, words whose `start <= audioTimePushed` are emitted as `WordTimestampFrame`. This means words arrive at PlaybackSink in the correct playback order.
+**Word timestamp interleaving in TTS:** TTS tracks `audioTimePushed` (seconds) and buffers `pendingWords` from Cartesia timestamp messages. After each 20ms PCM frame is pushed, words whose `start <= audioTimePushed` are emitted as `WordTimestampFrame`. This means words arrive at PlaybackSink in the correct playback order.
 
 **Commit timing:** Assistant text is committed to conversation history when `TTSDoneFrame` flows upstream from PlaybackSink through TTS → LLM → ContextAggregator (normal completion) or on barge-in (partial text from internally accumulated words). NOT deferred to next turn.
 
@@ -278,8 +284,7 @@ Cleanup happens only when the queued `EndFrame` propagates through the pipeline 
 
 ### Key Technical Details
 
-- **Audio formats**: Soniox expects s16le/16kHz/mono. The Daily bridge sends Go 16kHz mono PCM for user audio and accepts 24kHz mono PCM for bot audio. Cartesia outputs s16le/24kHz/mono. TTS still emits Opus-framed `AudioFrame`s internally, and PlaybackSink decodes those back to PCM before mixing and writing to Daily.
-- **Opus decode**: PlaybackSink uses `opus.NewDecoder(24000, 1)` to decode internal TTS audio frames before mixing.
+- **Audio formats**: Soniox expects s16le/16kHz/mono. Daily inbound audio is 16kHz mono PCM from the bridge; LiveKit inbound audio is Opus decoded/resampled by `PCMRemoteTrack` to 16kHz mono PCM for Soniox. Daily outbound bot audio stays 24kHz mono PCM because the Python bridge `CustomAudioSource` is 24k. LiveKit outbound also requests Cartesia s16le/24kHz/mono and emits 20ms 24k PCM `AudioFrame`s, but publishes a lower-level Opus local track instead of `PCMLocalTrack`; `LiveKitRoom.WriteAudioPCM` owns the 20ms PCM->Opus encode via `gopkg.in/hraban/opus.v2` and writes encoded samples to LiveKit with a 48k RTP clock. The local track must advertise only `audio/opus` and let Pion bind the negotiated clock/channels/fmtp; do not hardcode `Channels: 1`, because WebRTC commonly negotiates Opus as `/48000/2` even for mono payloads. `ClearAudioBuffer` resets the Opus encoder state because there is no longer a LiveKit PCM queue. WebRTC audio tracks are still Opus; do not try to send raw PCM as a normal LiveKit audio track. Do not reintroduce an internal Opus encode/decode round trip unless the output boundary itself changes to require encoded media.
 - **Pacing**: PCM frames must be sent to Daily at real-time pace (one 20ms frame per tick) or the browser jitter buffer overflows and drops audio.
 - **Websocket idle timeouts**: Soniox and Cartesia close connections after ~15-20s of no data. Pipeline is initialized lazily on client connect.
 - **Concurrent websocket writes**: gorilla/websocket panics on concurrent writes. Each ws has exactly one writer goroutine (STT's `writeAudioWebsocket`; TTS writes only from the orchestrator goroutine).
@@ -313,6 +318,13 @@ DISHA_REDIS_PASSWORD=...
 REDIS_DB=0
 DAILY_BRIDGE_PYTHON=/Users/jaideepsingh/Projects/disha-backend/.venv/bin/python
 
+# LiveKit outbound Opus tuning for low-CPU staging calls.
+# Unset values use libopus defaults; staging currently tests these values.
+LIVEKIT_OUT_CODEC=pcmu
+LIVEKIT_OPUS_COMPLEXITY=1
+LIVEKIT_OPUS_BITRATE=20000
+LIVEKIT_OPUS_MAX_BANDWIDTH=wideband
+
 # Live LLM router (sales call) — model switching across endpoints.
 # Per-region Grok (OpenAI-compatible base URLs ending in /openai/v1):
 GROK_4_1_FNR_EASTUS_API_KEY=...
@@ -333,7 +345,6 @@ For the local Disha bridge, use `DISHA_API_URL=http://localhost:8000`, `DISHA_RE
 ### Dependencies
 
 - `github.com/gorilla/websocket` — websocket client for Soniox and Cartesia only (UI events no longer use a custom WebSocket)
-- `github.com/hraban/opus` — CGO wrapper around libopus (requires `brew install opus opusfile pkg-config`)
 - `github.com/hajimehoshi/go-mp3` — MP3 decoding for background office sound
 - `github.com/redis/go-redis/v9` — Disha Redis client
 - `github.com/alicebob/miniredis/v2` — Redis unit-test server
@@ -342,7 +353,6 @@ For the local Disha bridge, use `DISHA_API_URL=http://localhost:8000`, `DISHA_RE
 ### Build & Run
 
 ```bash
-brew install opus opusfile pkg-config  # one-time
 go build ./...
 ./talk-go  # or: go run .
 # Open http://localhost:3000, click Connect
@@ -363,10 +373,163 @@ go test -v -run TestUserIdle ./...  # one processor's tests
 
 - `net/http/pprof` is imported in `main.go` — heap profiles available at `http://localhost:3000/debug/pprof/heap`
 - Typical memory depends on both the Go process and the Python Daily bridge process; check both when profiling local calls.
+- Performance diagnostics are gated by the single canonical flag `PERF_DIAGNOSTICS_ENABLED=1`. Keep that flag in the active deploy env file (`.staging.env` or `.prod.env`); the deploy scripts refresh the `talk-go-worker-env` secret from that file and do not accept a separate deploy-command override. When the flag is unset/`0`, Go and Python do not start Pyroscope, `process_usage`, or `audio_timing`, and the 20ms audio hot paths skip timing measurements entirely. For backward compatibility only, `PYROSCOPE_ENABLED=1` enables diagnostics when `PERF_DIAGNOSTICS_ENABLED` is absent.
+- LiveKit outbound codec selection is controlled from the active deploy env file with `LIVEKIT_OUT_CODEC`. Unset/`opus` publishes the existing Opus track at 24kHz PCM input and applies `LIVEKIT_OPUS_COMPLEXITY`, `LIVEKIT_OPUS_BITRATE` (bits/s), and `LIVEKIT_OPUS_MAX_BANDWIDTH` (`narrowband`, `mediumband`, `wideband`, `superwideband`, `fullband`). The current low-CPU experiment sets `LIVEKIT_OUT_CODEC=pcmu`, which publishes an 8kHz G.711 μ-law track and bypasses libopus entirely after mixing; if LiveKit Cloud rejects or fails to forward the PCMU track, roll back by setting `LIVEKIT_OUT_CODEC=opus` or unsetting it. The last Opus-only experiment used complexity `1`, bitrate `20000`, and `wideband`.
+- In GKE diagnostics mode, use `process_usage` log lines for high-level process attribution before deeper profilers. `DailyRoom` starts a lightweight sampler for Go plus the Python bridge process; `LiveKitRoom` samples Go plus container cgroup CPU because there is no Python bridge. Logs are one JSON payload every 10s with `transport_type`, Go/Python PIDs, process CPU millicores over the sample window, current RSS, RSS high-water mark, and container cgroup CPU throttling (`container_cpu_mcores`, `container_cpu_throttled_periods`, `container_cpu_throttled_ms`, `container_cpu_throttled_fraction`). Query `textPayload:"process_usage"` for a conversation/pod to see whether `/app/talk-go`, `daily_bridge.py`, or container CPU throttling is the main jitter suspect. For LiveKit, `python_*` fields are zero/false by design.
+- Pyroscope profiling also requires `PYROSCOPE_SERVER_ADDRESS`, `PYROSCOPE_BASIC_AUTH_USER`, and `PYROSCOPE_BASIC_AUTH_PASSWORD`. Go reports as `talk-go.worker.go`; the Python Daily bridge reports as `talk-go.daily_bridge.python`. Keep labels low-cardinality (`environment`, `deployment`, `pod`, `process`, `language`) and do not add conversation IDs as Pyroscope tags.
+- In diagnostics mode, use `audio_timing` log lines alongside Pyroscope when chasing jitter. They summarize 10s windows for 20ms-audio-path work such as Go/Python base64+JSON bridge I/O, LiveKit data publish/unmarshal, LiveKit PCM sample copy/conversion, LiveKit outbound Opus encode (`go_livekit_out_opus_encode`), playback tick lag/work, PCM frame copy/conversion, TTS JSON/base64 decode, and user PCM scanning. Profiles show CPU stacks; `audio_timing` shows deadline misses and where the real-time path is spending wall time.
+
+#### Live Call Investigation Runbook
+
+When Jaideep gives a staging `conversation_id`, check Cloud Logging first and Pyroscope when diagnostics were enabled for that run. Base the answer on the retrieved logs/profiles only; if `process_usage`, `audio_timing`, or Pyroscope has no data, say that explicitly and treat it as likely diagnostics-disabled unless logs show a profiler startup error.
+
+1. Load local env without printing secrets:
+
+```bash
+set -a
+source .staging.env
+set +a
+```
+
+2. Query Cloud Logging for the call and save the raw result:
+
+```bash
+CONV="<conversation_id>"
+PROJECT="${GCP_PROJECT_ID:-curelinkai}"
+NAMESPACE="${GKE_NAMESPACE:-staging}"
+CONTAINER="talk-go-worker"
+LOG_JSON="/tmp/talk-go-${CONV}.logs.json"
+
+CONV_FILTER='resource.type="k8s_container"
+resource.labels.project_id="'$PROJECT'"
+resource.labels.namespace_name="'$NAMESPACE'"
+resource.labels.container_name="'$CONTAINER'"
+textPayload:"[conv='$CONV']"'
+
+gcloud logging read "$CONV_FILTER" \
+  --project "$PROJECT" \
+  --freshness=24h \
+  --order=asc \
+  --limit=10000 \
+  --format=json > "$LOG_JSON"
+
+jq -r '.[] | [.timestamp, .resource.labels.pod_name, .textPayload] | @tsv' "$LOG_JSON" | less -S
+```
+
+3. Extract the pod and call window from those logs. Use a slightly padded window for follow-up log/profile queries:
+
+```bash
+eval "$(python3 - "$LOG_JSON" <<'PY'
+import json, sys
+from datetime import datetime, timedelta, timezone
+
+with open(sys.argv[1]) as f:
+    rows = json.load(f)
+if not rows:
+    raise SystemExit("no logs found for conversation")
+
+def parse(ts):
+    return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+
+start = parse(rows[0]["timestamp"]) - timedelta(minutes=2)
+end = parse(rows[-1]["timestamp"]) + timedelta(minutes=2)
+pod = rows[0]["resource"]["labels"]["pod_name"]
+
+def emit(name, value):
+    print(f'export {name}="{value}"')
+
+emit("POD", pod)
+emit("START", start.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"))
+emit("END", end.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"))
+PY
+)"
+
+echo "pod=$POD start=$START end=$END"
+```
+
+4. Query the same pod/time window for process attribution, throttling, and audio-path timing:
+
+```bash
+POD_FILTER='resource.type="k8s_container"
+resource.labels.project_id="'$PROJECT'"
+resource.labels.namespace_name="'$NAMESPACE'"
+resource.labels.container_name="'$CONTAINER'"
+resource.labels.pod_name="'$POD'"
+timestamp>="'$START'"
+timestamp<="'$END'"'
+
+gcloud logging read "$POD_FILTER AND (textPayload:\"process_usage\" OR textPayload:\"audio_timing\" OR textPayload:\"pyroscope\")" \
+  --project "$PROJECT" \
+  --order=asc \
+  --limit=10000 \
+  --format='table(timestamp,textPayload)'
+```
+
+Useful quick summaries:
+
+```bash
+jq -r '.[] | select(.textPayload | contains("process_usage {")) | .textPayload | split("process_usage ")[1] | fromjson |
+  [.sample_period_ms, .go_cpu_mcores, .python_cpu_mcores, .container_cpu_mcores, .container_cpu_throttled_ms, .container_cpu_throttled_fraction, .go_rss_bytes, .python_rss_bytes] | @tsv' "$LOG_JSON"
+
+jq -r '.[] | select(.textPayload | contains("audio_timing {")) | [.timestamp, .textPayload] | @tsv' "$LOG_JSON"
+```
+
+If `process_usage` / `audio_timing` entries are missing from `LOG_JSON`, rerun the pod-window query above with `--format=json > "/tmp/talk-go-${CONV}.pod.logs.json"` and summarize from that file instead.
+
+5. Query Pyroscope for the same pod/time window. Prefer `profilecli` because it can export pprof files for local inspection:
+
+```bash
+export PROFILECLI_URL="$PYROSCOPE_SERVER_ADDRESS"
+export PROFILECLI_USERNAME="$PYROSCOPE_BASIC_AUTH_USER"
+export PROFILECLI_PASSWORD="$PYROSCOPE_BASIC_AUTH_PASSWORD"
+
+GO_QUERY='{service_name="talk-go.worker.go",pod="'$POD'"}'
+PY_QUERY='{service_name="talk-go.daily_bridge.python",pod="'$POD'"}'
+
+profilecli query series --query="$GO_QUERY" --from="$START" --to="$END" --output=json
+profilecli query series --query="$PY_QUERY" --from="$START" --to="$END" --output=json
+```
+
+Use the CPU `__profile_type__` shown by `query series` for each process, normally `process_cpu:cpu:nanoseconds:cpu:nanoseconds`. Then export and inspect both profiles:
+
+```bash
+CPU_TYPE="process_cpu:cpu:nanoseconds:cpu:nanoseconds"
+
+profilecli query profile \
+  --profile-type="$CPU_TYPE" \
+  --query="$GO_QUERY" \
+  --from="$START" --to="$END" \
+  --output="pprof=/tmp/talk-go-${CONV}-go.pprof"
+
+profilecli query profile \
+  --profile-type="$CPU_TYPE" \
+  --query="$PY_QUERY" \
+  --from="$START" --to="$END" \
+  --output="pprof=/tmp/talk-go-${CONV}-python.pprof"
+
+go tool pprof -top -nodecount=30 /tmp/talk-go-${CONV}-go.pprof
+go tool pprof -top -cum -nodecount=30 /tmp/talk-go-${CONV}-go.pprof
+go tool pprof -top -nodecount=30 /tmp/talk-go-${CONV}-python.pprof
+go tool pprof -top -cum -nodecount=30 /tmp/talk-go-${CONV}-python.pprof
+```
+
+If `profilecli` is missing, install it with `go install github.com/grafana/pyroscope/cmd/profilecli@latest` or use the HTTP API fallback:
+
+```bash
+curl -sG "$PYROSCOPE_SERVER_ADDRESS/pyroscope/render" \
+  -u "$PYROSCOPE_BASIC_AUTH_USER:$PYROSCOPE_BASIC_AUTH_PASSWORD" \
+  --data-urlencode "query=${CPU_TYPE}${GO_QUERY}" \
+  --data-urlencode "from=$START" \
+  --data-urlencode "until=$END" \
+  --data-urlencode "format=json" \
+  | jq '.flamebearer.names[0:30], .timeline'
+```
+
+6. Report in this order: call window and pod; `process_usage` averages/peaks and throttling; top `audio_timing` max/avg offenders; Go Pyroscope top stacks; Python Pyroscope top stacks; gaps or missing data. Remember that the Python profile can under-attribute native Daily SDK CPU, so if `process_usage` says Python is hot but Pyroscope does not show matching Python stacks, call that out as native/unattributed Python-process CPU rather than guessing.
 
 ### Known Issues / Gotchas
 
-- Audio can sound choppy if Opus frames aren't paced at 20ms intervals — use `time.Ticker`, not `time.Sleep`
+- Audio can sound choppy if PCM frames aren't paced at 20ms intervals — use `time.Ticker`, not `time.Sleep`
 - `/connect` requires an existing Daily `room_url` and accepts `token`/`bot_token`; it does not create rooms. When `conversation_id` is supplied by JSON body or query param, it routes through the common `disha.Bot` boundary; `bot_type` is optional and defaults to `sales_call`.
 - `/connect` must create `PipelineTask`s from a detached/background context, not `r.Context()`: Disha Create Room calls `/connect` internally, and Go cancels `r.Context()` when the HTTP handler returns, which would stop STT/AudioSource immediately after room creation.
 - Upstream frames (WordTimestampFrame, TTSDoneFrame, BotStarted/StoppedSpeakingFrame) pass through TTS and LLM as forwarding hops to reach ContextAggregator and UserIdleProcessor; the `default: PushFrame(frame, dir)` in each processor handles this

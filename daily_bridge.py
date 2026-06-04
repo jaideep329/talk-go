@@ -119,7 +119,7 @@ def configure_pyroscope():
         or os.getenv("ENVIRONMENT")
         or os.getenv("SENTRY_ENVIRONMENT")
         or "",
-        "deployment": os.getenv("GKE_DEPLOYMENT_NAME") or os.getenv("FLY_APP_NAME") or "",
+        "deployment": os.getenv("GKE_DEPLOYMENT_NAME") or "",
         "pod": os.getenv("HOSTNAME") or "",
         "node": os.getenv("NODE_NAME") or "",
         "process": "daily-bridge",

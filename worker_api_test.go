@@ -19,7 +19,7 @@ func resetWorkerForTest(t *testing.T) {
 func TestWorkerPodRegistrationFromEnv(t *testing.T) {
 	t.Setenv("HOSTNAME", "pod-1")
 	t.Setenv("POD_UID", "uid-1")
-	t.Setenv("FLY_APP_NAME", "sales-worker")
+	t.Setenv("GKE_DEPLOYMENT_NAME", "sales-worker")
 	t.Setenv("POD_IP", "10.1.2.3")
 
 	reg, ok, err := workerPodRegistrationFromEnv()
@@ -37,7 +37,7 @@ func TestWorkerPodRegistrationFromEnv(t *testing.T) {
 func TestWorkerPodRegistrationFromEnvSkipsLocalWhenIncomplete(t *testing.T) {
 	t.Setenv("HOSTNAME", "pod-1")
 	t.Setenv("POD_UID", "")
-	t.Setenv("FLY_APP_NAME", "sales-worker")
+	t.Setenv("GKE_DEPLOYMENT_NAME", "sales-worker")
 	t.Setenv("POD_IP", "10.1.2.3")
 
 	_, ok, err := workerPodRegistrationFromEnv()

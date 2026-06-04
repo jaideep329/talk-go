@@ -352,7 +352,7 @@ func registerWorkerPodIfConfigured() {
 func workerPodRegistrationFromEnv() (disha.WorkerPodRegistration, bool, error) {
 	podName := strings.TrimSpace(os.Getenv("HOSTNAME"))
 	podUID := strings.TrimSpace(os.Getenv("POD_UID"))
-	appName := firstNonEmpty(os.Getenv("FLY_APP_NAME"), os.Getenv("GKE_DEPLOYMENT_NAME"))
+	appName := strings.TrimSpace(os.Getenv("GKE_DEPLOYMENT_NAME"))
 	if podName == "" || podUID == "" || appName == "" {
 		return disha.WorkerPodRegistration{}, false, nil
 	}

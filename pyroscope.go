@@ -28,7 +28,7 @@ func startPyroscopeIfEnabled() func() {
 	}
 	tags := map[string]string{
 		"environment": pyroscopeEnv(),
-		"deployment":  firstNonEmpty(os.Getenv("GKE_DEPLOYMENT_NAME"), os.Getenv("FLY_APP_NAME")),
+		"deployment":  strings.TrimSpace(os.Getenv("GKE_DEPLOYMENT_NAME")),
 		"pod":         strings.TrimSpace(os.Getenv("HOSTNAME")),
 		"node":        strings.TrimSpace(os.Getenv("NODE_NAME")),
 		"process":     "go-worker",

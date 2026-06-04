@@ -8,13 +8,11 @@ import (
 	"time"
 
 	gomp3 "github.com/hajimehoshi/go-mp3"
-	"github.com/hraban/opus"
 )
 
 const (
 	bgVolume        = 0.5 // background audio volume
 	botVolume       = 0.3 // bot speech volume when mixed
-	framePCM        = 480 // 20ms at 24kHz
 	playbackEndTail = 1 * time.Second
 )
 
@@ -31,10 +29,12 @@ const (
 // so the base's auto-shutdown does not cancel ctx mid-drain.
 type PlaybackSinkProcessor struct {
 	*BaseProcessor
-	taskCtx     *TaskContext
-	metrics     *ProcessorMetrics
-	opusDecoder *opus.Decoder
-	bgPCM       []int16 // background audio loop buffer (24kHz mono)
+	taskCtx          *TaskContext
+	metrics          *ProcessorMetrics
+	outputSampleRate int
+	frameSamples     int
+	frameBytes       int
+	bgPCM            []int16 // background audio loop buffer at outputSampleRate mono
 
 	queueCh chan Frame    // ProcessFrame → runPlayback
 	endDone chan struct{} // closed by runPlayback after EndFrame is forwarded
@@ -46,7 +46,7 @@ type PlaybackSinkProcessor struct {
 	playbackQueue   []Frame
 }
 
-func loadBackgroundPCM(path string, logger interface{ Printf(string, ...interface{}) }) []int16 {
+func loadBackgroundPCM(path string, targetSampleRate int, logger interface{ Printf(string, ...interface{}) }) []int16 {
 	f, err := os.Open(path)
 	if err != nil {
 		logger.Printf("Background audio not found (%s), mixing disabled\n", path)
@@ -73,28 +73,58 @@ func loadBackgroundPCM(path string, logger interface{ Printf(string, ...interfac
 		right := int16(binary.LittleEndian.Uint16(raw[i*4+2:]))
 		mono[i] = int16((int32(left) + int32(right)) / 2)
 	}
-	logger.Printf("Background audio loaded: %d samples (%.1fs at 24kHz)\n", len(mono), float64(len(mono))/24000)
+	sourceSampleRate := dec.SampleRate()
+	if targetSampleRate > 0 && sourceSampleRate > 0 && targetSampleRate != sourceSampleRate {
+		mono = resampleMonoPCM(mono, sourceSampleRate, targetSampleRate)
+	}
+	logSampleRate := sourceSampleRate
+	if targetSampleRate > 0 {
+		logSampleRate = targetSampleRate
+	}
+	logger.Printf("Background audio loaded: %d samples (%.1fs at %dHz)\n", len(mono), float64(len(mono))/float64(logSampleRate), logSampleRate)
 	return mono
 }
 
 func NewPlaybackSinkProcessor(taskCtx *TaskContext) *PlaybackSinkProcessor {
-	opusDec, err := opus.NewDecoder(24000, 1)
-	if err != nil {
-		taskCtx.Logger.Fatal("failed to create opus decoder:", err)
-	}
-
-	bgPCM := loadBackgroundPCM("background-office-sound.mp3", taskCtx.Logger)
+	outputSampleRate := outputSampleRateFromRoom(taskCtx)
+	bgPCM := loadBackgroundPCM("background-office-sound.mp3", outputSampleRate, taskCtx.Logger)
 
 	p := &PlaybackSinkProcessor{
-		taskCtx:     taskCtx,
-		metrics:     NewProcessorMetrics("playback"),
-		opusDecoder: opusDec,
-		bgPCM:       bgPCM,
-		queueCh:     make(chan Frame, 256),
-		endDone:     make(chan struct{}),
+		taskCtx:          taskCtx,
+		metrics:          NewProcessorMetrics("playback"),
+		outputSampleRate: outputSampleRate,
+		frameSamples:     pcmSamplesPerFrameForRate(outputSampleRate),
+		frameBytes:       pcmFrameBytesForRate(outputSampleRate),
+		bgPCM:            bgPCM,
+		queueCh:          make(chan Frame, 256),
+		endDone:          make(chan struct{}),
 	}
 	p.BaseProcessor = NewBaseProcessor("PlaybackSink", p, taskCtx)
 	return p
+}
+
+func resampleMonoPCM(samples []int16, sourceRate, targetRate int) []int16 {
+	if len(samples) == 0 || sourceRate <= 0 || targetRate <= 0 || sourceRate == targetRate {
+		return samples
+	}
+	outLen := (len(samples)*targetRate + sourceRate/2) / sourceRate
+	if outLen <= 0 {
+		return nil
+	}
+	out := make([]int16, outLen)
+	for i := range out {
+		posNum := i * sourceRate
+		idx := posNum / targetRate
+		if idx >= len(samples)-1 {
+			out[i] = samples[len(samples)-1]
+			continue
+		}
+		rem := posNum % targetRate
+		a := int(samples[idx])
+		b := int(samples[idx+1])
+		out[i] = int16((a*(targetRate-rem) + b*rem) / targetRate)
+	}
+	return out
 }
 
 func (p *PlaybackSinkProcessor) Start(ctx context.Context) {
@@ -130,19 +160,37 @@ func (p *PlaybackSinkProcessor) ProcessFrame(ctx context.Context, frame Frame, d
 }
 
 func (p *PlaybackSinkProcessor) runPlayback() {
-	ticker := time.NewTicker(20 * time.Millisecond)
+	ticker := time.NewTicker(playbackFrameDuration)
 	defer ticker.Stop()
 
+	var lastTick time.Time
 	for {
 		select {
 		case <-p.ctx.Done():
 			return
 		case f := <-p.queueCh:
 			p.handleQueueFrame(f)
-		case <-ticker.C:
+		case tickAt := <-ticker.C:
+			timingEnabled := p.audioTimingEnabled()
+			if timingEnabled && !lastTick.IsZero() {
+				if lag := tickAt.Sub(lastTick) - playbackFrameDuration; lag > 0 {
+					p.recordAudioTiming("go_playback_tick_lag", lag)
+				}
+			}
+			lastTick = tickAt
+			var start time.Time
+			if timingEnabled {
+				start = time.Now()
+			}
 			if p.tick() {
+				if timingEnabled {
+					p.recordAudioTiming("go_playback_tick_work", time.Since(start))
+				}
 				close(p.endDone)
 				return
+			}
+			if timingEnabled {
+				p.recordAudioTiming("go_playback_tick_work", time.Since(start))
 			}
 		}
 	}
@@ -182,6 +230,9 @@ func (p *PlaybackSinkProcessor) handleQueueFrame(f Frame) {
 			}
 		}
 		p.playbackQueue = kept
+		if p.taskCtx != nil && p.taskCtx.Room != nil {
+			p.taskCtx.Room.ClearAudioBuffer()
+		}
 		p.taskCtx.Logger.Printf("Playback interrupted (kept %d uninterruptible frames)\n", len(kept))
 	}
 }
@@ -209,7 +260,7 @@ func (p *PlaybackSinkProcessor) tick() bool {
 					p.PushFrame(*mf, Downstream)
 				}
 			}
-			botPCM = p.decodeBotFrame(f.Data)
+			botPCM = p.botPCMFrame(f.Data)
 			p.playbackQueue = p.playbackQueue[1:]
 			goto mix
 		case WordTimestampFrame:
@@ -237,7 +288,15 @@ func (p *PlaybackSinkProcessor) tick() bool {
 		}
 	}
 mix:
+	timingEnabled := p.audioTimingEnabled()
+	var start time.Time
+	if timingEnabled {
+		start = time.Now()
+	}
 	pcm := p.mixPCM(botPCM)
+	if timingEnabled {
+		p.recordAudioTiming("go_playback_mix_pcm", time.Since(start))
+	}
 	_ = p.taskCtx.Room.WriteAudioPCM(pcm)
 	return false
 }
@@ -255,8 +314,9 @@ func (p *PlaybackSinkProcessor) getBgFrame() []int16 {
 	if len(p.bgPCM) == 0 {
 		return nil
 	}
-	frame := make([]int16, framePCM)
-	for i := 0; i < framePCM; i++ {
+	frameSamples := p.samplesPerFrame()
+	frame := make([]int16, frameSamples)
+	for i := 0; i < frameSamples; i++ {
 		frame[i] = p.bgPCM[p.bgPos]
 		p.bgPos++
 		if p.bgPos >= len(p.bgPCM) {
@@ -268,9 +328,10 @@ func (p *PlaybackSinkProcessor) getBgFrame() []int16 {
 
 func (p *PlaybackSinkProcessor) mixPCM(botPCM []int16) []byte {
 	bgFrame := p.getBgFrame()
-	mixed := make([]int16, framePCM)
+	frameSamples := p.samplesPerFrame()
+	mixed := make([]int16, frameSamples)
 
-	for i := 0; i < framePCM; i++ {
+	for i := 0; i < frameSamples; i++ {
 		var sample float64
 		if bgFrame != nil {
 			sample += float64(bgFrame[i]) * bgVolume
@@ -286,21 +347,52 @@ func (p *PlaybackSinkProcessor) mixPCM(botPCM []int16) []byte {
 		mixed[i] = int16(sample)
 	}
 
-	pcmBytes := make([]byte, len(mixed)*2)
+	pcmBytes := make([]byte, p.bytesPerFrame())
 	for i, sample := range mixed {
 		binary.LittleEndian.PutUint16(pcmBytes[i*2:], uint16(sample))
 	}
 	return pcmBytes
 }
 
-func (p *PlaybackSinkProcessor) decodeBotFrame(opusData []byte) []int16 {
-	pcm := make([]int16, framePCM)
-	_, err := p.opusDecoder.Decode(opusData, pcm)
-	if err != nil {
-		p.taskCtx.Logger.Println("playback opus decode error:", err)
+func (p *PlaybackSinkProcessor) botPCMFrame(pcmBytes []byte) []int16 {
+	if len(pcmBytes) == 0 {
 		return nil
 	}
+	frameBytes := p.bytesPerFrame()
+	frameSamples := p.samplesPerFrame()
+	if len(pcmBytes) != frameBytes {
+		if p.taskCtx != nil && p.taskCtx.Logger != nil {
+			p.taskCtx.Logger.Printf("playback bot PCM frame has %d bytes, expected %d; padding/truncating\n", len(pcmBytes), frameBytes)
+		}
+	}
+	pcm := make([]int16, frameSamples)
+	samples := len(pcmBytes) / 2
+	if samples > frameSamples {
+		samples = frameSamples
+	}
+	timingEnabled := p.audioTimingEnabled()
+	var start time.Time
+	if timingEnabled {
+		start = time.Now()
+	}
+	for i := 0; i < samples; i++ {
+		pcm[i] = int16(binary.LittleEndian.Uint16(pcmBytes[i*2:]))
+	}
+	if timingEnabled {
+		p.recordAudioTiming("go_playback_pcm_bytes_to_samples", time.Since(start))
+	}
 	return pcm
+}
+
+func (p *PlaybackSinkProcessor) recordAudioTiming(name string, elapsed time.Duration) {
+	if p == nil || p.taskCtx == nil || p.taskCtx.Room == nil {
+		return
+	}
+	p.taskCtx.Room.recordAudioTiming(name, elapsed)
+}
+
+func (p *PlaybackSinkProcessor) audioTimingEnabled() bool {
+	return p != nil && p.taskCtx != nil && p.taskCtx.Room != nil && p.taskCtx.Room.perfDiagnosticsEnabled()
 }
 
 func (p *PlaybackSinkProcessor) writeSilenceTail() {
@@ -309,10 +401,24 @@ func (p *PlaybackSinkProcessor) writeSilenceTail() {
 	}
 	p.taskCtx.Logger.Printf("Writing %s playback silence before EndFrame\n", playbackEndTail)
 
-	silence := make([]byte, framePCM*2)
-	frames := int(playbackEndTail / (20 * time.Millisecond))
+	silence := make([]byte, p.bytesPerFrame())
+	frames := int(playbackEndTail / playbackFrameDuration)
 	for i := 0; i < frames; i++ {
 		_ = p.taskCtx.Room.WriteAudioPCM(silence)
-		time.Sleep(20 * time.Millisecond)
+		time.Sleep(playbackFrameDuration)
 	}
+}
+
+func (p *PlaybackSinkProcessor) samplesPerFrame() int {
+	if p == nil || p.frameSamples <= 0 {
+		return framePCM
+	}
+	return p.frameSamples
+}
+
+func (p *PlaybackSinkProcessor) bytesPerFrame() int {
+	if p == nil || p.frameBytes <= 0 {
+		return framePCMBytes
+	}
+	return p.frameBytes
 }

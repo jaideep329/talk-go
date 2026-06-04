@@ -41,6 +41,58 @@ func TestContextAggregator_FinalTranscriptEmitsLLMMessages(t *testing.T) {
 	}
 }
 
+func TestContextAggregator_SuppressesInterimUserTranscriptionEvents(t *testing.T) {
+	fix := newTestFixture(t)
+	a := NewContextAggregator(fix.TaskCtx, nil, "")
+
+	runProcessorTest(t, fix, runConfig{
+		processor: a,
+		framesToSend: []Frame{
+			TranscriptFrame{Text: "hel", IsFinal: false, ResponseID: 1},
+			TranscriptFrame{Text: "lo", IsFinal: false, ResponseID: 1},
+		},
+		sendEndFrame: true,
+	})
+
+	for _, entry := range fix.TaskCtx.UIEvents.Snapshot() {
+		if entry.Type == "user-transcription" {
+			t.Fatalf("interim transcript emitted RTVI user-transcription event: %+v", entry)
+		}
+	}
+}
+
+func TestContextAggregator_FinalUserTranscriptionStillEmitsRTVI(t *testing.T) {
+	fix := newTestFixture(t)
+	a := NewContextAggregator(fix.TaskCtx, nil, "")
+
+	runProcessorTest(t, fix, runConfig{
+		processor: a,
+		framesToSend: []Frame{
+			TranscriptFrame{Text: "hello", IsFinal: true, ResponseID: 1},
+			TranscriptFrame{Text: "<end>", IsFinal: true, ResponseID: 1},
+		},
+		sendEndFrame: true,
+	})
+
+	var found bool
+	for _, entry := range fix.TaskCtx.UIEvents.Snapshot() {
+		if entry.Type != "user-transcription" {
+			continue
+		}
+		data, ok := entry.Data.(map[string]any)
+		if !ok {
+			t.Fatalf("user-transcription data = %#v", entry.Data)
+		}
+		if data["text"] != "hello" || data["final"] != true {
+			t.Fatalf("user-transcription data = %+v, want final hello", data)
+		}
+		found = true
+	}
+	if !found {
+		t.Fatal("final transcript did not emit RTVI user-transcription event")
+	}
+}
+
 func TestContextAggregator_InitialMessagesSeedLLMContext(t *testing.T) {
 	fix := newTestFixture(t)
 	a := NewContextAggregator(fix.TaskCtx, []Message{

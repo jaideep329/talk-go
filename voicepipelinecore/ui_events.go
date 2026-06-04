@@ -3,7 +3,6 @@ package voicepipelinecore
 import (
 	"log"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -17,9 +16,10 @@ import (
 // before SetRoom are still stored for S3, but cannot be streamed.
 type UIEventSender struct {
 	logger        *log.Logger
-	room          atomic.Pointer[DailyRoom]
 	mu            sync.Mutex
+	room          RoomTransport
 	entries       []RTVIDebugLogEntry
+	transportType string
 	meetingID     string
 	botSessionID  string
 	userSessionID string
@@ -31,16 +31,28 @@ func NewUIEventSender(logger *log.Logger) *UIEventSender {
 
 // SetRoom wires the Daily room into the sender. Called by
 // NewTask once the bot has joined.
-func (s *UIEventSender) SetRoom(room *DailyRoom) {
-	s.room.Store(room)
-}
-
-func (s *UIEventSender) SetDailyMeeting(meetingID, botSessionID string) {
+func (s *UIEventSender) SetRoom(room RoomTransport) {
 	if s == nil {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.room = room
+}
+
+func (s *UIEventSender) SetDailyMeeting(meetingID, botSessionID string) {
+	s.SetTransportSession("daily", meetingID, botSessionID)
+}
+
+func (s *UIEventSender) SetTransportSession(transportType, meetingID, botSessionID string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if transportType != "" {
+		s.transportType = transportType
+	}
 	if meetingID != "" {
 		s.meetingID = meetingID
 	}
@@ -61,12 +73,17 @@ func (s *UIEventSender) SetUserSessionID(userSessionID string) {
 }
 
 func (s *UIEventSender) DailySession() (meetingID, botSessionID, userSessionID string) {
+	_, meetingID, botSessionID, userSessionID = s.TransportSession()
+	return meetingID, botSessionID, userSessionID
+}
+
+func (s *UIEventSender) TransportSession() (transportType, meetingID, botSessionID, userSessionID string) {
 	if s == nil {
-		return "", "", ""
+		return "", "", "", ""
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.meetingID, s.botSessionID, s.userSessionID
+	return s.transportType, s.meetingID, s.botSessionID, s.userSessionID
 }
 
 func (s *UIEventSender) Snapshot() []RTVIDebugLogEntry {
@@ -133,7 +150,9 @@ func (s *UIEventSender) ServerMessage(data any, at time.Time) {
 }
 
 func (s *UIEventSender) publish(event RTVIDebugLogEntry) {
-	room := s.room.Load()
+	s.mu.Lock()
+	room := s.room
+	s.mu.Unlock()
 	if room == nil {
 		return
 	}

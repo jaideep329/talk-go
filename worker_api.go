@@ -59,6 +59,7 @@ func (w *workerRuntime) snapshot() (active, reserved bool) {
 
 type workerRoomRequest struct {
 	RoomURL        string `json:"room_url"`
+	RoomName       string `json:"room_name"`
 	BotToken       string `json:"bot_token"`
 	Token          string `json:"token"`
 	ConversationID string `json:"conversation_id"`
@@ -84,6 +85,7 @@ func handleCreateWorkerRoom(w http.ResponseWriter, r *http.Request) {
 
 func (r *workerRoomRequest) normalize() {
 	r.RoomURL = strings.TrimSpace(r.RoomURL)
+	r.RoomName = strings.TrimSpace(r.RoomName)
 	r.BotToken = strings.TrimSpace(r.BotToken)
 	r.Token = strings.TrimSpace(r.Token)
 	r.ConversationID = strings.TrimSpace(r.ConversationID)
@@ -94,12 +96,14 @@ func (r *workerRoomRequest) normalize() {
 }
 
 func (r workerRoomRequest) validate() error {
-	return requireFields(
+	fields := []requiredField{
 		requiredField{Name: "room_url", Value: r.RoomURL},
 		requiredField{Name: "token", Value: r.Token},
 		requiredField{Name: "conversation_id", Value: r.ConversationID},
 		requiredField{Name: "bot_worker_type", Value: r.BotWorkerType},
-	)
+		requiredField{Name: "room_name", Value: r.RoomName},
+	}
+	return requireFields(fields...)
 }
 
 func (r workerRoomRequest) connectRequest() connectRequest {
@@ -107,6 +111,7 @@ func (r workerRoomRequest) connectRequest() connectRequest {
 		ConversationID: r.ConversationID,
 		BotType:        r.BotWorkerType,
 		RoomURL:        r.RoomURL,
+		RoomName:       r.RoomName,
 		Token:          r.Token,
 		BotToken:       r.BotToken,
 	}

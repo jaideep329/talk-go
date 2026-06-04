@@ -32,7 +32,9 @@ type UserProfileData struct {
 }
 
 // ConversationChunk mirrors the dict Disha's chunk manager stores in
-// Redis before the Redis-to-Postgres sync job persists it.
+// Redis before the Redis-to-Postgres sync job persists it. The latency
+// JSON keys keep Disha's legacy `_ms` names, but assistant-turn values are
+// persisted in seconds.
 type ConversationChunk struct {
 	ID                               string   `json:"id"`
 	Text                             string   `json:"text"`

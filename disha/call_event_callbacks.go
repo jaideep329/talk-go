@@ -113,10 +113,10 @@ func (c *CallEventCallbacks) appendConversationChunk(text, role string, at time.
 		BotType:                          c.botType,
 		ConversationID:                   c.conversationID,
 		UserID:                           c.userID,
-		LLMTTFBMs:                        assistantMetric(role, metrics.LLMTTFBMs),
-		TTSTTFBMs:                        assistantMetric(role, metrics.TTSTTFBMs),
-		V2VLatencyMs:                     assistantMetric(role, metrics.E2ELatencyMs),
-		TextAggregationMs:                assistantMetric(role, metrics.TTSTextAggregationMs),
+		LLMTTFBMs:                        assistantMetricSeconds(role, metrics.LLMTTFBMs),
+		TTSTTFBMs:                        assistantMetricSeconds(role, metrics.TTSTTFBMs),
+		V2VLatencyMs:                     assistantMetricSeconds(role, metrics.E2ELatencyMs),
+		TextAggregationMs:                assistantMetricSeconds(role, metrics.TTSTextAggregationMs),
 		Created:                          at.Format(time.RFC3339Nano),
 		IsDebugLog:                       false,
 		MainAgentSystemPromptLangfuseKey: promptKeyPtr,
@@ -153,6 +153,9 @@ func (c *CallEventCallbacks) runPostCallOperations(reason voicepipelinecore.EndR
 
 func (c *CallEventCallbacks) enqueueDailyMetrics(stats voicepipelinecore.CallStats) {
 	if c == nil || c.api == nil || stats.MeetingID == "" || stats.UserSessionID == "" {
+		return
+	}
+	if stats.TransportType != "" && stats.TransportType != "daily" {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), postCallRequestTimeout)
@@ -214,9 +217,10 @@ func mapEndReason(reason voicepipelinecore.EndReason) *string {
 	}
 }
 
-func assistantMetric(role string, value float64) *float64 {
-	if role != "assistant" || value == 0 {
+func assistantMetricSeconds(role string, valueMs float64) *float64 {
+	if role != "assistant" || valueMs == 0 {
 		return nil
 	}
-	return &value
+	valueSeconds := valueMs / 1000
+	return &valueSeconds
 }

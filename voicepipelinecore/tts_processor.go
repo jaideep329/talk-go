@@ -3,7 +3,6 @@ package voicepipelinecore
 import (
 	"context"
 	"encoding/base64"
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"math/rand/v2"
@@ -16,7 +15,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/gorilla/websocket"
-	"github.com/hraban/opus"
 )
 
 func endsWithPunctuation(s string) bool {
@@ -84,6 +82,8 @@ type TTSProcessor struct {
 	metrics  *ProcessorMetrics
 	phonetic *phoneticFilter
 
+	outputSampleRate int
+
 	// Aggregation state (orchestrator only)
 	currentAggregation string
 	currentContextId   string
@@ -106,7 +106,6 @@ type TTSProcessor struct {
 	connected chan struct{} // closed when websocketConn is established
 
 	websocketConn *websocket.Conn
-	opusEncoder   *opus.Encoder
 	closeOnce     sync.Once // idempotent websocket close
 }
 
@@ -149,18 +148,14 @@ type CartesiaTTSDoneMessage struct {
 // filter itself is built and owned here, so the dictionary never has to
 // live on the shared TaskContext. A nil/empty dict means no filtering.
 func NewTTSProcessor(taskCtx *TaskContext, phoneticDict map[string]string) *TTSProcessor {
-	opusEncoder, err := opus.NewEncoder(24000, 1, opus.AppVoIP)
-	if err != nil {
-		taskCtx.Logger.Println("opus encoder init failed:", err)
-	}
 	t := &TTSProcessor{
-		taskCtx:     taskCtx,
-		metrics:     NewProcessorMetrics("tts"),
-		phonetic:    newPhoneticFilter(phoneticDict),
-		opusEncoder: opusEncoder,
-		commands:    make(chan ttsCommand, 100),
-		ttsEvents:   make(chan ttsEvent, 100),
-		connected:   make(chan struct{}),
+		taskCtx:          taskCtx,
+		metrics:          NewProcessorMetrics("tts"),
+		phonetic:         newPhoneticFilter(phoneticDict),
+		outputSampleRate: outputSampleRateFromRoom(taskCtx),
+		commands:         make(chan ttsCommand, 100),
+		ttsEvents:        make(chan ttsEvent, 100),
+		connected:        make(chan struct{}),
 	}
 	t.BaseProcessor = NewBaseProcessor("TTS", t, taskCtx)
 	return t
@@ -485,7 +480,7 @@ func (t *TTSProcessor) sendTextToTTS(text string) bool {
 		"model_id":       "sonic-3",
 		"transcript":     speakable,
 		"voice":          map[string]interface{}{"mode": "id", "id": "95d51f79-c397-46f9-b49a-23763d3eaa2d"},
-		"output_format":  map[string]interface{}{"container": "raw", "encoding": "pcm_s16le", "sample_rate": 24000},
+		"output_format":  map[string]interface{}{"container": "raw", "encoding": "pcm_s16le", "sample_rate": t.outputRate()},
 		"language":       "hi",
 		"context_id":     t.currentContextId,
 		"continue":       true,
@@ -509,7 +504,7 @@ func (t *TTSProcessor) ResetTTSContext() bool {
 		"model_id":      "sonic-3",
 		"transcript":    "",
 		"voice":         map[string]interface{}{"mode": "id", "id": "95d51f79-c397-46f9-b49a-23763d3eaa2d"},
-		"output_format": map[string]interface{}{"container": "raw", "encoding": "pcm_s16le", "sample_rate": 24000},
+		"output_format": map[string]interface{}{"container": "raw", "encoding": "pcm_s16le", "sample_rate": t.outputRate()},
 		"context_id":    t.currentContextId,
 		"continue":      false,
 	}
@@ -583,13 +578,14 @@ func (t *TTSProcessor) handleAudioChunkData(audioData []byte) {
 	}
 	t.pcmBuffer = append(t.pcmBuffer, audioData...)
 
-	for len(t.pcmBuffer) >= 960 {
-		opusFrame := t.makeOpusData()
-		if opusFrame == nil {
+	frameBytes := t.frameBytes()
+	for len(t.pcmBuffer) >= frameBytes {
+		pcmFrame := t.nextPCMFrame()
+		if pcmFrame == nil {
 			break
 		}
-		t.PushFrame(NewAudioFrame(opusFrame), Downstream)
-		t.audioTimePushed += 0.02 // 20ms per opus frame
+		t.PushFrame(NewAudioFrame(pcmFrame), Downstream)
+		t.audioTimePushed += 0.02 // 20ms per PCM frame
 		t.emitPendingWords()
 	}
 }
@@ -609,12 +605,13 @@ func (t *TTSProcessor) pushRemainingAudioFrames() {
 		return
 	}
 	if len(t.pcmBuffer) > 0 {
-		for len(t.pcmBuffer) < 960 {
-			t.pcmBuffer = append(t.pcmBuffer, 0, 0)
+		frameBytes := t.frameBytes()
+		for len(t.pcmBuffer) < frameBytes {
+			t.pcmBuffer = append(t.pcmBuffer, 0)
 		}
-		opusFrame := t.makeOpusData()
-		if opusFrame != nil {
-			t.PushFrame(NewAudioFrame(opusFrame), Downstream)
+		pcmFrame := t.nextPCMFrame()
+		if pcmFrame != nil {
+			t.PushFrame(NewAudioFrame(pcmFrame), Downstream)
 			t.audioTimePushed += 0.02
 		}
 	}
@@ -624,21 +621,34 @@ func (t *TTSProcessor) pushRemainingAudioFrames() {
 	t.pendingWords = nil
 }
 
-func (t *TTSProcessor) makeOpusData() []byte {
-	if len(t.pcmBuffer) < 960 {
+func (t *TTSProcessor) nextPCMFrame() []byte {
+	frameBytes := t.frameBytes()
+	if len(t.pcmBuffer) < frameBytes {
 		return nil
 	}
-	frame := make([]int16, 480)
-	for i := 0; i < 480; i++ {
-		frame[i] = int16(binary.LittleEndian.Uint16(t.pcmBuffer[i*2:]))
+	timingEnabled := t.audioTimingEnabled()
+	var start time.Time
+	if timingEnabled {
+		start = time.Now()
 	}
-	t.pcmBuffer = t.pcmBuffer[960:]
-	opusData := make([]byte, 1000)
-	n, err := t.opusEncoder.Encode(frame, opusData)
-	if err != nil {
-		t.taskCtx.Logger.Println("opus encode error:", err)
+	frame := make([]byte, frameBytes)
+	copy(frame, t.pcmBuffer[:frameBytes])
+	t.pcmBuffer = t.pcmBuffer[frameBytes:]
+	if timingEnabled {
+		t.recordAudioTiming("go_tts_pcm_frame_copy", time.Since(start))
 	}
-	return opusData[:n]
+	return frame
+}
+
+func (t *TTSProcessor) outputRate() int {
+	if t == nil || t.outputSampleRate <= 0 {
+		return defaultOutputSampleRate
+	}
+	return t.outputSampleRate
+}
+
+func (t *TTSProcessor) frameBytes() int {
+	return pcmFrameBytesForRate(t.outputRate())
 }
 
 // --- Cartesia websocket reader ---
@@ -691,9 +701,20 @@ func (t *TTSProcessor) readTTSConnectionData() {
 			continue
 		}
 		var resp CartesiaTTSMessage
+		timingEnabled := t.audioTimingEnabled()
+		var start time.Time
+		if timingEnabled {
+			start = time.Now()
+		}
 		if err := json.Unmarshal(msg, &resp); err != nil {
+			if timingEnabled {
+				t.recordAudioTiming("go_tts_json_unmarshal", time.Since(start))
+			}
 			t.taskCtx.Logger.Println("TTS json unmarshal error:", err)
 			continue
+		}
+		if timingEnabled {
+			t.recordAudioTiming("go_tts_json_unmarshal", time.Since(start))
 		}
 
 		if resp.Error != "" {
@@ -705,14 +726,29 @@ func (t *TTSProcessor) readTTSConnectionData() {
 		switch resp.Type {
 		case "chunk":
 			var audioMsg CartesiaTTSAudioChunkMessage
+			if timingEnabled {
+				start = time.Now()
+			}
 			if err := json.Unmarshal(msg, &audioMsg); err != nil {
+				if timingEnabled {
+					t.recordAudioTiming("go_tts_audio_json_unmarshal", time.Since(start))
+				}
 				t.taskCtx.Logger.Println("TTS audio chunk unmarshal error:", err)
 				continue
+			}
+			if timingEnabled {
+				t.recordAudioTiming("go_tts_audio_json_unmarshal", time.Since(start))
 			}
 			if !t.isActiveContext(audioMsg.ContextId) {
 				continue
 			}
+			if timingEnabled {
+				start = time.Now()
+			}
 			audioData, err := base64.StdEncoding.DecodeString(audioMsg.Data)
+			if timingEnabled {
+				t.recordAudioTiming("go_tts_audio_base64_decode", time.Since(start))
+			}
 			if err != nil {
 				t.taskCtx.Logger.Println("base64 decode error:", err)
 				continue
@@ -766,6 +802,17 @@ func (t *TTSProcessor) readTTSConnectionData() {
 			}
 		}
 	}
+}
+
+func (t *TTSProcessor) recordAudioTiming(name string, elapsed time.Duration) {
+	if t == nil || t.taskCtx == nil || t.taskCtx.Room == nil {
+		return
+	}
+	t.taskCtx.Room.recordAudioTiming(name, elapsed)
+}
+
+func (t *TTSProcessor) audioTimingEnabled() bool {
+	return t != nil && t.taskCtx != nil && t.taskCtx.Room != nil && t.taskCtx.Room.perfDiagnosticsEnabled()
 }
 
 func drainTTSEvents(ch chan ttsEvent) {

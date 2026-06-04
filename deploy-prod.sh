@@ -4,9 +4,10 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
 
-ENV_FILE=".staging.env"
+ENV_FILE=".prod.env"
+MANIFEST="k8s/worker.yaml"
 if [[ ! -f "$ENV_FILE" ]]; then
-  echo "$ENV_FILE is required for staging deploys because deploy and runtime env are loaded from it." >&2
+  echo "$ENV_FILE is required for prod deploys because deploy and runtime env are loaded from it." >&2
   exit 1
 fi
 
@@ -40,16 +41,40 @@ load_env_file() {
 load_env_file "$ENV_FILE"
 
 GCP_PROJECT_ID="${GCP_PROJECT_ID:-curelinkai}"
-ARTIFACT_REPOSITORY_NAME="${ARTIFACT_REPOSITORY_NAME:-disha-voice-worker-staging}"
-GKE_NAMESPACE="${GKE_NAMESPACE:-staging}"
-GKE_DEPLOYMENT_NAME="${GKE_DEPLOYMENT_NAME:-disha-go-voice-worker-staging}"
+ARTIFACT_REPOSITORY_NAME="${ARTIFACT_REPOSITORY_NAME:-disha-voice-worker-prod}"
+GKE_NAMESPACE="${GKE_NAMESPACE:-prod}"
+GKE_DEPLOYMENT_NAME="${GKE_DEPLOYMENT_NAME:-disha-go-voice-worker-prod}"
 
 # Target cluster is pinned here so the deploy NEVER follows whatever the local
 # kubectl current-context happens to be. All kubectl calls below run against
 # "$KUBE_CONTEXT" explicitly.
-GKE_CLUSTER_NAME="${GKE_CLUSTER_NAME:-disha-voice-worker-staging}"
-GKE_CLUSTER_LOCATION="${GKE_CLUSTER_LOCATION:-us-east1}"
+GKE_CLUSTER_NAME="${GKE_CLUSTER_NAME:-disha-voice-worker-prod}"
+GKE_CLUSTER_LOCATION="${GKE_CLUSTER_LOCATION:-us-east4}"
 KUBE_CONTEXT="gke_${GCP_PROJECT_ID}_${GKE_CLUSTER_LOCATION}_${GKE_CLUSTER_NAME}"
+
+if [[ "$GKE_DEPLOYMENT_NAME" != "disha-go-voice-worker-prod" ]]; then
+  echo "Refusing prod deploy: GKE_DEPLOYMENT_NAME must be disha-go-voice-worker-prod." >&2
+  exit 1
+fi
+if [[ "${ENVIRONMENT:-}" != "production" && "${ENVIRONMENT:-}" != "prod" ]]; then
+  echo "Refusing prod deploy: ENVIRONMENT must be production or prod in ${ENV_FILE}." >&2
+  exit 1
+fi
+if [[ -z "${DISHA_API_URL:-}${API_BASE_URL:-}" ]]; then
+  echo "Refusing prod deploy: DISHA_API_URL or API_BASE_URL must be set in ${ENV_FILE}." >&2
+  exit 1
+fi
+if [[ "$GKE_NAMESPACE" == "staging" || "$GKE_CLUSTER_NAME" == *staging* || "$ARTIFACT_REPOSITORY_NAME" == *staging* ]]; then
+  echo "Refusing prod deploy: staging-looking values remain in ${ENV_FILE}." >&2
+  exit 1
+fi
+for var in DISHA_API_URL API_BASE_URL DISHA_REDIS_URL AWS_BUCKET_NAME; do
+  value="${!var-}"
+  if [[ "$value" == *staging* ]]; then
+    echo "Refusing prod deploy: ${var} still looks like a staging value in ${ENV_FILE}." >&2
+    exit 1
+  fi
+done
 
 timestamp="$(date -u +%Y%m%d%H%M%S)"
 POD_TEMPLATE_VERSION="${POD_TEMPLATE_VERSION:-v${timestamp}}"
@@ -64,22 +89,18 @@ for cmd in "${required_commands[@]}"; do
   fi
 done
 
-# Ensure a kubeconfig entry for the target cluster exists / is fresh. This
-# creates the context named "$KUBE_CONTEXT" without changing the user's active
-# context — every kubectl call below passes --context explicitly anyway.
 echo "Fetching credentials for cluster ${GKE_CLUSTER_NAME} (${GKE_CLUSTER_LOCATION})..."
 gcloud container clusters get-credentials "$GKE_CLUSTER_NAME" \
   --region "$GKE_CLUSTER_LOCATION" \
   --project "$GCP_PROJECT_ID"
 
-# Hard guard: refuse to proceed unless the pinned context actually exists.
 if ! kubectl config get-contexts -o name | grep -qx "$KUBE_CONTEXT"; then
   echo "Expected kube context '${KUBE_CONTEXT}' not found after get-credentials." >&2
   echo "Check GKE_CLUSTER_NAME / GKE_CLUSTER_LOCATION / GCP_PROJECT_ID." >&2
   exit 1
 fi
 
-echo "Deploying TalkGo staging"
+echo "Deploying TalkGo prod"
 echo "  context: ${KUBE_CONTEXT} (pinned)"
 echo "  namespace: ${GKE_NAMESPACE}"
 echo "  deployment: ${GKE_DEPLOYMENT_NAME}"
@@ -105,7 +126,7 @@ for var in DB_USER DB_PASSWORD DB_HOST DB_PORT DB_NAME; do
   fi
 done
 if (( ${#missing_db_env[@]} > 0 )); then
-  echo "Missing DB env required for k8s/worker-staging.yaml: ${missing_db_env[*]}" >&2
+  echo "Missing DB env required for ${MANIFEST}: ${missing_db_env[*]}" >&2
   exit 1
 fi
 
@@ -117,7 +138,7 @@ export GKE_DEPLOYMENT_NAME
 export POD_TEMPLATE_VERSION
 
 envsubst '$GKE_DEPLOYMENT_NAME $ARTIFACT_REPOSITORY_NAME $GKE_NAMESPACE $GCP_PROJECT_ID $POD_TEMPLATE_VERSION $DB_USER $DB_PASSWORD $DB_HOST $DB_PORT $DB_NAME' \
-  < k8s/worker-staging.yaml \
+  < "$MANIFEST" \
   | kubectl --context "$KUBE_CONTEXT" apply -f -
 
 echo "Waiting for rollout..."

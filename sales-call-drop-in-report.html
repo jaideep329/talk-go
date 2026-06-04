@@ -612,8 +612,7 @@
         on the worker side</strong>.</p>
 
       <h3>6.2 Pod registration</h3>
-      <p>Python and talk-go both check <code>HOSTNAME</code>+<code>POD_UID</code>+<code>FLY_APP_NAME</code> (talk-go
-        also accepts <code>GKE_DEPLOYMENT_NAME</code>), check Redis <code>registered_pod:{pod}:{uid}</code>,
+      <p>talk-go checks <code>HOSTNAME</code>+<code>POD_UID</code>+<code>GKE_DEPLOYMENT_NAME</code>, checks Redis <code>registered_pod:{pod}:{uid}</code>,
         enqueue <code>bots.gke_pod_manager.register_worker_pod_db_ops</code> on <code>fifo-p0-fast-l1</code>, then
         write the idempotency key for 24 h. <strong>Order: enqueue first, write key after</strong> &mdash; matches
         Python.</p>
@@ -706,7 +705,7 @@ DAILY_BRIDGE_PYTHON       # path to Python venv for the daily_bridge.py sidecar
 PORT / FAST_API_PORT      # default 3000; GKE uses 7860
 HOSTNAME                  # set by k8s
 POD_UID, POD_IP           # set by k8s
-FLY_APP_NAME / GKE_DEPLOYMENT_NAME
+GKE_DEPLOYMENT_NAME
 ACCESS_KEY_ID, SECRET_KEY_ID, AWS_MAIN_REGION, AWS_BUCKET_NAME  # S3 (debug log + Vertex creds)
 SENTRY_DSN, SENTRY_ENVIRONMENT, SENTRY_RELEASE                  # error reporting
 
@@ -734,7 +733,7 @@ ENVIRONMENT               # staging/dev -> document:{name}:latest, else :product
         <li><code>ENVIRONMENT</code> &mdash; <code>staging</code>/<code>dev</code> selects the <code>document:{name}:latest</code> Redis key; anything else uses <code>document:{name}:production</code>. Matches Python's <code>_resolve_environment</code>.</li>
         <li>GKE in-cluster files (token, ca.crt, namespace) under <code>/var/run/secrets/kubernetes.io/serviceaccount</code> are read automatically when present. Outside Kubernetes the patcher no-ops.</li>
       </ul>
-      <p>Add <code>SENTRY_DSN</code>, <code>TALK_GO_DEPLOYMENT_NAME</code> and
+      <p>Add <code>SENTRY_DSN</code>, <code>GKE_DEPLOYMENT_NAME</code> and
         <code>ARTIFACT_REPOSITORY_NAME</code> when you promote to staging.</p>
     </section>
 

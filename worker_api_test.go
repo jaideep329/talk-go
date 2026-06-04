@@ -19,7 +19,7 @@ func resetWorkerForTest(t *testing.T) {
 func TestWorkerPodRegistrationFromEnv(t *testing.T) {
 	t.Setenv("HOSTNAME", "pod-1")
 	t.Setenv("POD_UID", "uid-1")
-	t.Setenv("FLY_APP_NAME", "sales-worker")
+	t.Setenv("GKE_DEPLOYMENT_NAME", "sales-worker")
 	t.Setenv("POD_IP", "10.1.2.3")
 
 	reg, ok, err := workerPodRegistrationFromEnv()
@@ -37,7 +37,7 @@ func TestWorkerPodRegistrationFromEnv(t *testing.T) {
 func TestWorkerPodRegistrationFromEnvSkipsLocalWhenIncomplete(t *testing.T) {
 	t.Setenv("HOSTNAME", "pod-1")
 	t.Setenv("POD_UID", "")
-	t.Setenv("FLY_APP_NAME", "sales-worker")
+	t.Setenv("GKE_DEPLOYMENT_NAME", "sales-worker")
 	t.Setenv("POD_IP", "10.1.2.3")
 
 	_, ok, err := workerPodRegistrationFromEnv()
@@ -114,7 +114,7 @@ func TestHandleCreateWorkerRoomReturnsConflictWhenActive(t *testing.T) {
 		t.Fatal("tryStart returned false")
 	}
 
-	body := `{"room_url":"https://room.daily.co/test","token":"user-token","conversation_id":"conv-1","bot_worker_type":"sales_call"}`
+	body := `{"room_url":"https://room.daily.co/test","room_name":"test","token":"user-token","conversation_id":"conv-1","bot_worker_type":"sales_call"}`
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/bot/create_worker_room", strings.NewReader(body))
 	handleCreateWorkerRoom(rec, req)

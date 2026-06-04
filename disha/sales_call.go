@@ -3,6 +3,7 @@ package disha
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -16,7 +17,7 @@ const (
 
 	// salesModelGroup is the LLM model group the sales call selects from.
 	// Matches Python's model_group="grok-4.1-fast-sales".
-	salesModelGroup = "gpt-4.1"
+	salesModelGroup = "grok-4.1-fast-sales"
 
 	// salesUsecaseType matches Python's
 	// UsecaseType.SALES_CALL_CONVERSATION; it tags this call's LLM logs.
@@ -120,12 +121,17 @@ func (b SalesCallBot) BuildTask(ctx context.Context, req BotTaskRequest, deps De
 	}
 	taskCtx := task.TaskCtx
 
-	// Source + audio input must exist before the room join: JoinDailyRoom
-	// pumps inbound audio frames into the audio source.
+	// Source + audio input must exist before the room join: the room
+	// transport pumps inbound audio frames into the audio source.
 	source := voicepipelinecore.NewPipelineSourceProcessor(taskCtx)
 	audioSource := voicepipelinecore.NewAudioSourceProcessor(taskCtx)
 
-	room, err := voicepipelinecore.JoinDailyRoom(req.RoomURL, req.RoomToken, taskCtx, audioSource)
+	var room voicepipelinecore.RoomTransport
+	if isDailyRoomURL(req.RoomURL) {
+		room, err = voicepipelinecore.JoinDailyRoom(req.RoomURL, req.RoomToken, taskCtx, audioSource)
+	} else {
+		room, err = voicepipelinecore.JoinLiveKitRoom(req.RoomURL, req.RoomName, req.RoomToken, taskCtx, audioSource)
+	}
 	if err != nil {
 		task.Abort()
 		return nil, err
@@ -156,6 +162,14 @@ func (b SalesCallBot) BuildTask(ctx context.Context, req BotTaskRequest, deps De
 	})
 	task.SetPipeline(source, pipeline)
 	return task, nil
+}
+
+func isDailyRoomURL(roomURL string) bool {
+	parsed, err := url.Parse(roomURL)
+	if err != nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(parsed.Host), "daily.co")
 }
 
 // loadSalesPrompt picks the prompt name based on

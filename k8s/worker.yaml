@@ -34,7 +34,7 @@ spec:
         effect: "NoSchedule"
       # Require scheduling on worker pool nodes only
       nodeSelector:
-        cloud.google.com/gke-nodepool: worker-pool-v3
+        cloud.google.com/gke-nodepool: vago-worker-pool
       # Affinity-based binpacking for maximum node utilization (3 pods per node)
       affinity:
         # Pod affinity: STRONG binpacking of same version pods (3 per node for max utilization)

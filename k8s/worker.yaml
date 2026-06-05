@@ -156,12 +156,14 @@ spec:
     horizontalPodAutoscalerConfig:
       behavior:
         scaleDown:
+          tolerance: "0.01"
           stabilizationWindowSeconds: 120
           policies:
           - type: Percent
             value: 50
             periodSeconds: 45
         scaleUp:
+          tolerance: "0.01"
           stabilizationWindowSeconds: 10
           policies:
           - type: Pods

@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Voice Worker Provisioning Delay Comparison</title>
+<style>
+:root { --bg:#f8fafc; --panel:#ffffff; --text:#0f172a; --muted:#64748b; --line:#d8dee9; --accent:#c2410c; --old:#64748b; --good:#166534; --warn:#b45309; }
+* { box-sizing:border-box; }
+body { margin:0; font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color:var(--text); background:var(--bg); }
+header { padding:28px 32px 18px; background:#0f172a; color:#fff; }
+header h1 { margin:0 0 8px; font-size:28px; letter-spacing:0; }
+header p { margin:0; color:#cbd5e1; max-width:1100px; }
+main { max-width:1280px; margin:0 auto; padding:24px; }
+section { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:18px; margin:0 0 18px; }
+h2 { margin:0 0 12px; font-size:19px; }
+h3 { margin:18px 0 8px; font-size:15px; }
+.grid { display:grid; gap:14px; grid-template-columns:repeat(4,minmax(0,1fr)); }
+.card { border:1px solid var(--line); border-radius:8px; padding:14px; background:#fff; }
+.card .k { font-size:12px; color:var(--muted); }
+.card .v { font-size:26px; font-weight:700; margin-top:4px; }
+.card .s { color:var(--muted); margin-top:2px; }
+table { width:100%; border-collapse:collapse; margin:10px 0; }
+th,td { border-bottom:1px solid #e5e7eb; padding:8px 9px; text-align:left; vertical-align:top; }
+th { font-weight:650; background:#f8fafc; }
+.muted { color:var(--muted); font-size:12px; display:block; margin-top:2px; }
+.callout { border-left:4px solid var(--accent); padding:12px 14px; background:#fff7ed; border-radius:6px; }
+.good { color:var(--good); font-weight:650; }
+.warn { color:var(--warn); font-weight:650; }
+.bar { display:inline-block; width:140px; height:8px; background:#e5e7eb; border-radius:999px; margin-right:8px; vertical-align:middle; overflow:hidden; }
+.bar span { display:block; height:100%; border-radius:999px; }
+code { background:#eef2f7; padding:1px 4px; border-radius:4px; }
+ul { margin:8px 0 0 20px; padding:0; }
+.two { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+@media (max-width:900px) { main { padding:14px; } .grid,.two { grid-template-columns:1fr; } .bar { width:90px; } header { padding:22px 18px; } }
+</style>
+</head>
+<body>
+<header>
+<h1>Voice Worker Provisioning Delay Comparison</h1>
+<p>Old Python worker <code>disha-voice-worker-prod</code> vs new Go worker <code>disha-go-voice-worker-prod</code>. Generated 2026-06-06 15:47:18 IST from the complete DB export and GKE/HPA logs.</p>
+</header>
+<main>
+<section>
+<h2>Conclusion</h2>
+<div class="callout">
+<strong>The effect is present in both deployments, but it is much more prevalent and much more severe in the new Go voice worker.</strong>
+The old Python worker has a non-trivial 60-90 second tail, but almost no rows exceed 120 seconds and none exceed 300 seconds. The Go worker has a materially larger tail: 17.6% over 120 seconds, 10.3% over 180 seconds, and 11 rows over 300 seconds.
+</div>
+<div class="grid" style="margin-top:14px">
+<div class="card"><div class="k">Go >=60s rate</div><div class="v">39.0%</div><div class="s">2.24x old Python</div></div>
+<div class="card"><div class="k">Go >=120s rate</div><div class="v">17.6%</div><div class="s">19.2x old Python</div></div>
+<div class="card"><div class="k">Go p95 delay</div><div class="v">242.7s</div><div class="s">old p95 91.5s</div></div>
+<div class="card"><div class="k">Max delay</div><div class="v">2,943.2s</div><div class="s">old max 290.9s</div></div>
+</div>
+</section>
+<section>
+<h2>Complete Data Distribution</h2>
+<table><thead><tr><th>Metric</th><th>Old Python</th><th>New Go</th></tr></thead><tbody><tr><th>Rows</th><td>14,176</td><td>546</td></tr><tr><th>p50 delay</th><td>18.0</td><td>45.4</td></tr><tr><th>p90 delay</th><td>76.0</td><td>184.9</td></tr><tr><th>p95 delay</th><td>91.5</td><td>242.7</td></tr><tr><th>p99 delay</th><td>119.3</td><td>374.4</td></tr><tr><th>Max delay</th><td>290.9</td><td>2,943.2</td></tr><tr><th>>=60s rate</th><td>2,474 (17.5%)</td><td>213 (39.0%)</td></tr><tr><th>>=120s rate</th><td>130 (0.9%)</td><td>96 (17.6%)</td></tr><tr><th>>=180s rate</th><td>8 (0.1%)</td><td>56 (10.3%)</td></tr><tr><th>>=300s rate</th><td>0 (0.0%)</td><td>11 (2.0%)</td></tr></tbody></table>
+<h3>Threshold Rates</h3>
+<table><thead><tr><th>Delay threshold</th><th>Old Python rate</th><th>New Go rate</th><th>Go / old</th></tr></thead><tbody><tr><th>>= 30s</th><td><div class="bar"><span style="width:61.2%;background:#64748b"></span></div><strong>39.8%</strong></td><td><div class="bar"><span style="width:98.3%;background:#c2410c"></span></div><strong>63.9%</strong></td><td>1.6x</td></tr><tr><th>>= 60s</th><td><div class="bar"><span style="width:26.8%;background:#64748b"></span></div><strong>17.5%</strong></td><td><div class="bar"><span style="width:60.0%;background:#c2410c"></span></div><strong>39.0%</strong></td><td>2.2x</td></tr><tr><th>>= 120s</th><td><div class="bar"><span style="width:1.4%;background:#64748b"></span></div><strong>0.9%</strong></td><td><div class="bar"><span style="width:27.0%;background:#c2410c"></span></div><strong>17.6%</strong></td><td>19.2x</td></tr><tr><th>>= 180s</th><td><div class="bar"><span style="width:0.1%;background:#64748b"></span></div><strong>0.1%</strong></td><td><div class="bar"><span style="width:15.8%;background:#c2410c"></span></div><strong>10.3%</strong></td><td>181.7x</td></tr><tr><th>>= 300s</th><td><div class="bar"><span style="width:0.0%;background:#64748b"></span></div><strong>0.0%</strong></td><td><div class="bar"><span style="width:3.1%;background:#c2410c"></span></div><strong>2.0%</strong></td><td>inf</td></tr></tbody></table>
+</section>
+<section>
+<h2>Hourly Shape</h2>
+<p>The old worker has many short rows because it handles much higher volume. The important distinction is tail severity: Go repeatedly crosses 120s and 180s; old Python rarely does.</p>
+<table><thead><tr><th>IST hour</th><th>Old Python >=60s</th><th>New Go >=60s</th></tr></thead><tbody><tr><th>00:00</th><td><div class="bar"><span style="width:8.3%;background:#64748b"></span></div><strong>5.4%</strong><span class="muted">n=811, p95=60.7s</span></td><td><div class="bar"><span style="width:50.1%;background:#c2410c"></span></div><strong>32.6%</strong><span class="muted">n=43, p95=235.3s</span></td></tr><tr><th>01:00</th><td><div class="bar"><span style="width:20.4%;background:#64748b"></span></div><strong>13.3%</strong><span class="muted">n=294, p95=77.4s</span></td><td><div class="bar"><span style="width:100.0%;background:#c2410c"></span></div><strong>70.0%</strong><span class="muted">n=10, p95=325.7s</span></td></tr><tr><th>02:00</th><td><div class="bar"><span style="width:18.2%;background:#64748b"></span></div><strong>11.9%</strong><span class="muted">n=135, p95=70.1s</span></td><td><div class="bar"><span style="width:51.3%;background:#c2410c"></span></div><strong>33.3%</strong><span class="muted">n=3, p95=138.6s</span></td></tr><tr><th>03:00</th><td><div class="bar"><span style="width:87.1%;background:#64748b"></span></div><strong>56.6%</strong><span class="muted">n=53, p95=130.5s</span></td><td><div class="bar"><span style="width:100.0%;background:#c2410c"></span></div><strong>66.7%</strong><span class="muted">n=3, p95=412.7s</span></td></tr><tr><th>04:00</th><td><div class="bar"><span style="width:97.7%;background:#64748b"></span></div><strong>63.5%</strong><span class="muted">n=74, p95=185.6s</span></td><td><div class="bar"><span style="width:51.3%;background:#c2410c"></span></div><strong>33.3%</strong><span class="muted">n=3, p95=2,649.5s</span></td></tr><tr><th>05:00</th><td><div class="bar"><span style="width:80.6%;background:#64748b"></span></div><strong>52.4%</strong><span class="muted">n=124, p95=130.0s</span></td><td class="muted">no rows</td></tr><tr><th>06:00</th><td><div class="bar"><span style="width:45.0%;background:#64748b"></span></div><strong>29.2%</strong><span class="muted">n=342, p95=107.9s</span></td><td><div class="bar"><span style="width:38.5%;background:#c2410c"></span></div><strong>25.0%</strong><span class="muted">n=8, p95=376.6s</span></td></tr><tr><th>07:00</th><td><div class="bar"><span style="width:30.9%;background:#64748b"></span></div><strong>20.1%</strong><span class="muted">n=577, p95=97.3s</span></td><td><div class="bar"><span style="width:61.5%;background:#c2410c"></span></div><strong>40.0%</strong><span class="muted">n=25, p95=116.9s</span></td></tr><tr><th>08:00</th><td><div class="bar"><span style="width:31.9%;background:#64748b"></span></div><strong>20.7%</strong><span class="muted">n=1,236, p95=93.7s</span></td><td><div class="bar"><span style="width:60.7%;background:#c2410c"></span></div><strong>39.5%</strong><span class="muted">n=38, p95=167.9s</span></td></tr><tr><th>09:00</th><td><div class="bar"><span style="width:43.9%;background:#64748b"></span></div><strong>28.6%</strong><span class="muted">n=1,572, p95=120.8s</span></td><td><div class="bar"><span style="width:70.5%;background:#c2410c"></span></div><strong>45.8%</strong><span class="muted">n=48, p95=272.3s</span></td></tr><tr><th>10:00</th><td><div class="bar"><span style="width:23.2%;background:#64748b"></span></div><strong>15.1%</strong><span class="muted">n=1,764, p95=86.8s</span></td><td><div class="bar"><span style="width:96.9%;background:#c2410c"></span></div><strong>63.0%</strong><span class="muted">n=73, p95=241.3s</span></td></tr><tr><th>11:00</th><td><div class="bar"><span style="width:25.5%;background:#64748b"></span></div><strong>16.6%</strong><span class="muted">n=1,690, p95=94.5s</span></td><td><div class="bar"><span style="width:78.1%;background:#c2410c"></span></div><strong>50.7%</strong><span class="muted">n=67, p95=340.1s</span></td></tr><tr><th>12:00</th><td><div class="bar"><span style="width:31.8%;background:#64748b"></span></div><strong>20.7%</strong><span class="muted">n=1,844, p95=79.2s</span></td><td><div class="bar"><span style="width:36.7%;background:#c2410c"></span></div><strong>23.9%</strong><span class="muted">n=88, p95=142.1s</span></td></tr><tr><th>13:00</th><td><div class="bar"><span style="width:23.4%;background:#64748b"></span></div><strong>15.2%</strong><span class="muted">n=1,920, p95=78.8s</span></td><td><div class="bar"><span style="width:36.2%;background:#c2410c"></span></div><strong>23.5%</strong><span class="muted">n=68, p95=94.1s</span></td></tr><tr><th>14:00</th><td><div class="bar"><span style="width:5.5%;background:#64748b"></span></div><strong>3.6%</strong><span class="muted">n=1,519, p95=49.3s</span></td><td><div class="bar"><span style="width:50.4%;background:#c2410c"></span></div><strong>32.8%</strong><span class="muted">n=61, p95=102.4s</span></td></tr><tr><th>15:00</th><td><div class="bar"><span style="width:27.1%;background:#64748b"></span></div><strong>17.6%</strong><span class="muted">n=221, p95=81.4s</span></td><td><div class="bar"><span style="width:38.5%;background:#c2410c"></span></div><strong>25.0%</strong><span class="muted">n=8, p95=85.2s</span></td></tr></tbody></table>
+</section>
+<section>
+<h2>Log Evidence</h2>
+<h3>HPA Rescale Events</h3>
+<p>Both HPAs show above/below target movement. Relative to DB row volume, the Go HPA is much noisier: 32.8 rescale events per 100 rows vs 1.3 for old Python. Treat this as directional because Kubernetes events coalesce, but it matches the Go tail.</p>
+<table><thead><tr><th>Deployment</th><th>HPA rescale events</th><th>Above target</th><th>Below target</th><th>Events / 100 DB rows</th></tr></thead><tbody><tr><th>Old Python voice worker</th><td>187</td><td>69</td><td>118</td><td>1.3</td></tr><tr><th>New Go voice worker</th><td>179</td><td>90</td><td>89</td><td>32.8</td></tr></tbody></table>
+<h3>Pod Lifecycle</h3>
+<p>Container startup is not the bottleneck. Once pods are scheduled, both deployments usually start quickly. The Go p95 scheduled-to-started time is 2s; old Python is 5.8s.</p>
+<table><thead><tr><th>Deployment</th><th>Scheduled log join</th><th>Started log join</th><th>Scheduled -> started p95</th><th>Pods with FailedScheduling</th><th>FailedScheduling events</th></tr></thead><tbody><tr><th>Old Python voice worker</th><td>11,383 / 14,174</td><td>11,407 / 14,174</td><td>5.8s</td><td>450</td><td>4,599</td></tr><tr><th>New Go voice worker</th><td>546 / 546</td><td>546 / 546</td><td>2s</td><td>13</td><td>226</td></tr></tbody></table>
+<h3>Log-Derived Classification</h3>
+<p>Classification uses pod scheduling events plus HPA events. DB timestamps are display-rounded to the minute, so exact HPA-window joins are approximate; the DB delay values themselves are exact from the export. Old Python has some missing pod-event joins because the full deployment has more event volume than a single broad log query could safely return; the old >=120s tail was pulled by pod name and is included.</p>
+<table><thead><tr><th>Log classification</th><th>Old Python</th><th>New Go</th></tr></thead><tbody><tr><th>HPA below/churn context</th><td>5,234 (36.9%)</td><td>224 (41.0%)</td></tr><tr><th>Late next scale-up</th><td>4,340 (30.6%)</td><td>160 (29.3%)</td></tr><tr><th>Other HPA timing</th><td>909 (6.4%)</td><td>144 (26.4%)</td></tr><tr><th>No HPA event while waiting</th><td>468 (3.3%)</td><td>5 (0.9%)</td></tr><tr><th>Scheduler capacity failure</th><td>450 (3.2%)</td><td>13 (2.4%)</td></tr><tr><th>No pod-event join</th><td>2,775 (19.6%)</td><td>0 (0.0%)</td></tr></tbody></table>
+</section>
+<section>
+<h2>Worst Rows Confirmed By Logs</h2>
+<div class="two">
+<div>
+<h3>Old Python Worker</h3>
+<table><thead><tr><th>Pod suffix</th><th>DB delay</th><th>Log class</th><th>Scheduled IST</th><th>Started IST</th><th>FailedScheduling events</th></tr></thead><tbody><tr><td>z4kb9</td><td>290.9s</td><td>Late next scale-up</td><td>04:52:45</td><td>04:52:46</td><td>0</td></tr><tr><td>ffns7</td><td>264.0s</td><td>Late next scale-up</td><td>03:42:42</td><td>03:42:44</td><td>0</td></tr><tr><td>9vwg4</td><td>242.1s</td><td>Late next scale-up</td><td>04:51:21</td><td>04:51:23</td><td>0</td></tr><tr><td>zslp6</td><td>226.1s</td><td>Late next scale-up</td><td>04:51:24</td><td>04:51:26</td><td>0</td></tr><tr><td>b99n4</td><td>188.9s</td><td>HPA below/churn context</td><td>04:35:56</td><td>04:35:57</td><td>0</td></tr><tr><td>tnwhx</td><td>183.9s</td><td>HPA below/churn context</td><td>04:08:55</td><td>04:08:57</td><td>0</td></tr><tr><td>xlc2n</td><td>181.1s</td><td>HPA below/churn context</td><td>04:08:55</td><td>04:08:58</td><td>0</td></tr><tr><td>t2mvc</td><td>180.2s</td><td>Scheduler capacity failure</td><td>05:38:12</td><td>05:38:38</td><td>3</td></tr><tr><td>pktg4</td><td>178.2s</td><td>HPA below/churn context</td><td>04:08:55</td><td>04:08:57</td><td>0</td></tr><tr><td>xplkt</td><td>173.5s</td><td>HPA below/churn context</td><td>05:14:54</td><td>05:14:56</td><td>0</td></tr><tr><td>vzth4</td><td>168.0s</td><td>Scheduler capacity failure</td><td>05:47:12</td><td>05:47:38</td><td>3</td></tr><tr><td>nvh95</td><td>161.7s</td><td>HPA below/churn context</td><td>04:49:07</td><td>04:49:08</td><td>0</td></tr></tbody></table>
+</div>
+<div>
+<h3>New Go Worker</h3>
+<table><thead><tr><th>Pod suffix</th><th>DB delay</th><th>Log class</th><th>Scheduled IST</th><th>Started IST</th><th>FailedScheduling events</th></tr></thead><tbody><tr><td>9dv5g</td><td>2,943.2s</td><td>Late next scale-up</td><td>05:40:06</td><td>05:40:07</td><td>0</td></tr><tr><td>mglxz</td><td>494.3s</td><td>Late next scale-up</td><td>06:23:49</td><td>06:23:51</td><td>0</td></tr><tr><td>bm497</td><td>451.9s</td><td>Late next scale-up</td><td>11:22:32</td><td>11:22:34</td><td>0</td></tr><tr><td>bf67j</td><td>442.5s</td><td>Late next scale-up</td><td>03:16:04</td><td>03:16:05</td><td>0</td></tr><tr><td>whmj6</td><td>388.6s</td><td>HPA below/churn context</td><td>11:20:17</td><td>11:20:18</td><td>0</td></tr><tr><td>mbsmv</td><td>388.1s</td><td>Late next scale-up</td><td>11:22:40</td><td>11:22:41</td><td>0</td></tr><tr><td>lpbtw</td><td>357.7s</td><td>HPA below/churn context</td><td>11:20:17</td><td>11:20:18</td><td>0</td></tr><tr><td>sz8zs</td><td>345.5s</td><td>Late next scale-up</td><td>02:04:35</td><td>02:04:36</td><td>0</td></tr><tr><td>pc9dr</td><td>322.7s</td><td>HPA below/churn context</td><td>10:08:12</td><td>10:08:13</td><td>0</td></tr><tr><td>bv8kd</td><td>311.7s</td><td>HPA below/churn context</td><td>14:45:32</td><td>14:45:33</td><td>0</td></tr><tr><td>7lwdm</td><td>301.4s</td><td>HPA below/churn context</td><td>01:07:42</td><td>01:07:43</td><td>0</td></tr><tr><td>bwcxh</td><td>299.1s</td><td>HPA below/churn context</td><td>11:32:58</td><td>11:32:59</td><td>0</td></tr></tbody></table>
+</div>
+</div>
+</section>
+<section>
+<h2>Interpretation</h2>
+<ul>
+<li><strong>Not Go container startup:</strong> Go scheduled-to-started p95 is 2s and max is 7s. The slow rows waited before scheduling.</li>
+<li><strong>Not only scheduler capacity:</strong> FailedScheduling appears in both deployments at similar pod-level rates: old at least 3.2%, Go 2.4%. It is real but does not explain the Go-only long tail.</li>
+<li><strong>Autoscaler timing exists in both:</strong> Old Python also has HPA below/churn and late-scale-up cases in its tail, so this mechanism is not unique to Go.</li>
+<li><strong>Go is the outlier:</strong> Go has 19.2x the >=120s rate, 181.7x the >=180s rate, and rows over 300 seconds while old has none in this export.</li>
+</ul>
+</section>
+<section>
+<h2>Current ScaledObject Status</h2>
+<table><thead><tr><th>ScaledObject</th><th>Live status at report generation</th></tr></thead><tbody><tr><th>worker-scaledobject</th><td>Ready: True (ScaledObjectReady)<br>Active: True (ScalerActive)<br>Fallback: False (NoFallbackFound)</td></tr><tr><th>disha-go-voice-worker-prod-scaledobject</th><td>Ready: True (ScaledObjectReady)<br>Active: True (ScalerActive)<br>Fallback: False (NoFallbackFound)</td></tr></tbody></table>
+</section>
+<section>
+<h2>Sources And Caveats</h2>
+<ul>
+<li>Complete DB export: <code>/Users/jaideepsingh/Downloads/query_result_2026-06-06T15_10_46.742139704+05_30.json</code> (14,722 rows).</li>
+<li>HPA logs: <code>/tmp/voice_worker_compare_hpa_events.json</code> (366 parsed rescale events).</li>
+<li>Pod logs: <code>/tmp/voice_worker_compare_pod_events_go.json</code>, <code>/tmp/voice_worker_compare_old_scheduled.json</code>, <code>/tmp/voice_worker_compare_old_started.json</code>, <code>/tmp/voice_worker_compare_old_failed_scheduling.json</code>, and targeted old-tail file <code>/tmp/voice_worker_compare_old_tail_events.json</code>.</li>
+<li>The old FailedScheduling file hit its requested log limit, so old scheduler-failure counts are an at-least figure. That does not change the main conclusion because Go's delay excess is visible directly in the complete DB distribution.</li>
+<li>The export includes a sensitive API-key column; it was intentionally ignored and is not rendered in this report.</li>
+</ul>
+</section>
+</main>
+</body>
+</html>

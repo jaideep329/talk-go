@@ -189,7 +189,7 @@ func loadSalesPrompt(ctx context.Context, store *DocumentStore, startup CallStar
 		return "", "", 0, fmt.Errorf("disha: document store is required to load %q", name)
 	}
 
-	vars := map[string]string{
+	vars := DocumentVariables{
 		"patient_info":     startup.Data.Conversation.PatientInfo,
 		"current_datetime": time.Now().In(istLocation()).Format("2 Jan 2006 15:04:05"),
 		// short_term_memory mirrors Python's fetch_conversation: the

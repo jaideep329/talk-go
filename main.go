@@ -265,6 +265,11 @@ func newDishaDeps() disha.Deps {
 }
 
 func closeDishaDeps(deps disha.Deps) {
+	if deps.Documents != nil {
+		if err := deps.Documents.Close(); err != nil {
+			log.Printf("failed to close Disha document store: %v", err)
+		}
+	}
 	if deps.Redis != nil {
 		if err := deps.Redis.Close(); err != nil {
 			log.Printf("failed to close Disha Redis client: %v", err)

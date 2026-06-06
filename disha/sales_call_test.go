@@ -100,7 +100,7 @@ func testDeps(redis RedisClient, api *APIClient) Deps {
 		Logger:    logger,
 		Redis:     redis,
 		API:       api,
-		Documents: NewDocumentStore(redis, logger),
+		Documents: newDocumentStore(redis, logger, simpleTemplateRenderer{}),
 	}
 }
 

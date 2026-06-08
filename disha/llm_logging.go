@@ -6,6 +6,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/jaideep329/talk-go/voicepipelinecore"
 	"github.com/jaideep329/talk-go/voicepipelinecore/llmrouter"
 )
 
@@ -39,15 +40,27 @@ func newLLMLogSink(api *APIClient, logger *log.Logger, usecaseType, userID, conv
 	return func(c llmrouter.CallLog) {
 		requestPayload := map[string]any{
 			"model":          c.Model,
-			"messages":       c.Messages,
+			"messages":       c.Request.Messages,
 			"stream":         true,
 			"stream_options": map[string]any{"include_usage": true},
+		}
+		if len(c.Request.Tools) > 0 {
+			requestPayload["tools"] = c.Request.Tools
+		}
+		if c.Request.ToolChoice != nil {
+			requestPayload["tool_choice"] = c.Request.ToolChoice
 		}
 		responsePayload := map[string]any{
 			"content":       c.ResponseContent,
 			"completed":     c.Completed,
 			"status_code":   c.StatusCode,
 			"finish_reason": c.FinishReason,
+		}
+		if len(c.ToolCalls) > 0 {
+			responsePayload["tool_calls"] = c.ToolCalls
+			responsePayload["functions_list"] = toolCallNames(c.ToolCalls)
+			responsePayload["arguments_list"] = toolCallArguments(c.ToolCalls)
+			responsePayload["tool_id_list"] = toolCallIDs(c.ToolCalls)
 		}
 		if c.ErrorMessage != "" {
 			responsePayload["error"] = map[string]any{
@@ -92,6 +105,30 @@ func newLLMLogSink(api *APIClient, logger *log.Logger, usecaseType, userID, conv
 			logger.Printf("disha: LLM call log enqueue failed: %v\n", err)
 		}
 	}
+}
+
+func toolCallNames(calls []voicepipelinecore.ToolCall) []string {
+	out := make([]string, 0, len(calls))
+	for _, call := range calls {
+		out = append(out, call.Function.Name)
+	}
+	return out
+}
+
+func toolCallArguments(calls []voicepipelinecore.ToolCall) []string {
+	out := make([]string, 0, len(calls))
+	for _, call := range calls {
+		out = append(out, call.Function.Arguments)
+	}
+	return out
+}
+
+func toolCallIDs(calls []voicepipelinecore.ToolCall) []string {
+	out := make([]string, 0, len(calls))
+	for _, call := range calls {
+		out = append(out, call.ID)
+	}
+	return out
 }
 
 func statusCodeOrNil(code int) any {

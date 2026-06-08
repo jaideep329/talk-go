@@ -29,15 +29,15 @@ func TestContextAggregator_FinalTranscriptEmitsLLMMessages(t *testing.T) {
 		t.Fatal("LLMMessagesFrame should contain messages")
 	}
 	// First message is the system prompt; second is the user message.
-	if llmMsg.Messages[0]["role"] != "system" {
-		t.Errorf("first message should be system, got %q", llmMsg.Messages[0]["role"])
+	if llmMsg.Messages[0].Role != "system" {
+		t.Errorf("first message should be system, got %q", llmMsg.Messages[0].Role)
 	}
 	last := llmMsg.Messages[len(llmMsg.Messages)-1]
-	if last["role"] != "user" {
-		t.Errorf("last message should be user, got %q", last["role"])
+	if last.Role != "user" {
+		t.Errorf("last message should be user, got %q", last.Role)
 	}
-	if last["content"] != "hello" {
-		t.Errorf("user content: got %q, want 'hello'", last["content"])
+	if last.Content != "hello" {
+		t.Errorf("user content: got %q, want 'hello'", last.Content)
 	}
 }
 
@@ -116,11 +116,11 @@ func TestContextAggregator_InitialMessagesSeedLLMContext(t *testing.T) {
 	if len(llmMsg.Messages) != 3 {
 		t.Fatalf("message count = %d, want 3", len(llmMsg.Messages))
 	}
-	if llmMsg.Messages[0]["content"] != "seed context" {
-		t.Fatalf("first message content = %q, want seed context", llmMsg.Messages[0]["content"])
+	if llmMsg.Messages[0].Content != "seed context" {
+		t.Fatalf("first message content = %q, want seed context", llmMsg.Messages[0].Content)
 	}
 	last := llmMsg.Messages[len(llmMsg.Messages)-1]
-	if last["role"] != "user" || last["content"] != "new user" {
+	if last.Role != "user" || last.Content != "new user" {
 		t.Fatalf("last message = %+v, want user new user", last)
 	}
 }
@@ -148,8 +148,8 @@ func TestContextAggregator_AppendRunLLMEmitsFirstTurnFromInitialContext(t *testi
 	if len(llmMsg.Messages) != 2 {
 		t.Fatalf("message count = %d, want 2 (the initial context)", len(llmMsg.Messages))
 	}
-	if llmMsg.Messages[0]["content"] != "sales prompt" {
-		t.Fatalf("first message = %q, want sales prompt", llmMsg.Messages[0]["content"])
+	if llmMsg.Messages[0].Content != "sales prompt" {
+		t.Fatalf("first message = %q, want sales prompt", llmMsg.Messages[0].Content)
 	}
 	// The append frame itself must be consumed, not forwarded.
 	if _, forwarded := findFrame[LLMMessagesAppendFrame](down); forwarded {
@@ -179,8 +179,116 @@ func TestContextAggregator_AppendAddsMessages(t *testing.T) {
 	if len(llmMsg.Messages) != 2 {
 		t.Fatalf("message count = %d, want 2 (prompt + appended)", len(llmMsg.Messages))
 	}
-	if llmMsg.Messages[1]["content"] != "injected nudge" {
-		t.Fatalf("appended message = %q, want injected nudge", llmMsg.Messages[1]["content"])
+	if llmMsg.Messages[1].Content != "injected nudge" {
+		t.Fatalf("appended message = %q, want injected nudge", llmMsg.Messages[1].Content)
+	}
+}
+
+func TestContextAggregator_FunctionCallFramesUpdateContextAndRunLLM(t *testing.T) {
+	fix := newTestFixture(t)
+	a := NewContextAggregator(fix.TaskCtx, []Message{
+		{Role: "system", Content: "sales prompt"},
+	}, "")
+
+	source := newQueueProcessor(fix.TaskCtx, "test-source", Upstream)
+	sink := newQueueProcessor(fix.TaskCtx, "test-sink", Downstream)
+	source.Link(a)
+	a.Link(sink)
+	source.Start(fix.RootCtx)
+	a.Start(fix.RootCtx)
+	sink.Start(fix.RootCtx)
+
+	sink.QueueFrame(NewFunctionCallInProgressFrame("get_guidance", "call_1", map[string]any{"situation": "pain"}, `{"situation":"pain"}`, false), Upstream)
+	time.Sleep(20 * time.Millisecond)
+	sink.QueueFrame(NewFunctionCallResultFrame("get_guidance", "call_1", map[string]any{"situation": "pain"}, `{"situation":"pain"}`, "guidance text", true), Upstream)
+	time.Sleep(30 * time.Millisecond)
+
+	source.QueueFrame(EndFrame{}, Downstream)
+	if err := waitForWG(fix.WG, 3*time.Second); err != nil {
+		t.Fatalf("waitForWG: %v", err)
+	}
+
+	if len(a.messages) != 3 {
+		t.Fatalf("context messages = %+v, want prompt + assistant tool call + tool result", a.messages)
+	}
+	assistant := a.messages[1]
+	if assistant.Role != "assistant" || len(assistant.ToolCalls) != 1 {
+		t.Fatalf("assistant tool message = %+v, want one tool call", assistant)
+	}
+	if assistant.ToolCalls[0].ID != "call_1" || assistant.ToolCalls[0].Function.Name != "get_guidance" {
+		t.Fatalf("tool call = %+v, want call_1 get_guidance", assistant.ToolCalls[0])
+	}
+	if assistant.ToolCalls[0].Function.Arguments != `{"situation":"pain"}` {
+		t.Fatalf("tool arguments = %q, want raw JSON", assistant.ToolCalls[0].Function.Arguments)
+	}
+	tool := a.messages[2]
+	if tool.Role != "tool" || tool.ToolCallID != "call_1" || tool.Content != "guidance text" {
+		t.Fatalf("tool result message = %+v, want call_1 guidance text", tool)
+	}
+
+	if c := countFrames[FunctionCallInProgressFrame](source.Captured()); c != 1 {
+		t.Fatalf("expected FunctionCallInProgressFrame upstream once, got %d", c)
+	}
+	if c := countFrames[FunctionCallResultFrame](source.Captured()); c != 1 {
+		t.Fatalf("expected FunctionCallResultFrame upstream once, got %d", c)
+	}
+	llmMsg, ok := findFrame[LLMMessagesFrame](sink.Captured())
+	if !ok {
+		t.Fatalf("expected LLMMessagesFrame after tool result, got %s", describeFrameTypes(sink.Captured()))
+	}
+	if len(llmMsg.Messages) != 3 || llmMsg.Messages[2].Role != "tool" || llmMsg.Messages[2].Content != "guidance text" {
+		t.Fatalf("LLM context after tool result = %+v", llmMsg.Messages)
+	}
+}
+
+func TestContextAggregator_BatchedFunctionCallsShareAssistantMessage(t *testing.T) {
+	fix := newTestFixture(t)
+	a := NewContextAggregator(fix.TaskCtx, []Message{
+		{Role: "system", Content: "sales prompt"},
+	}, "")
+
+	source := newQueueProcessor(fix.TaskCtx, "test-source", Upstream)
+	sink := newQueueProcessor(fix.TaskCtx, "test-sink", Downstream)
+	source.Link(a)
+	a.Link(sink)
+	source.Start(fix.RootCtx)
+	a.Start(fix.RootCtx)
+	sink.Start(fix.RootCtx)
+
+	sink.QueueFrame(NewFunctionCallInProgressFrame("get_guidance", "call_1", nil, `{"situation":"pain"}`, false), Upstream)
+	sink.QueueFrame(NewFunctionCallInProgressFrame("lookup_plan", "call_2", nil, `{"plan":"starter"}`, false), Upstream)
+	time.Sleep(20 * time.Millisecond)
+	sink.QueueFrame(NewFunctionCallResultFrame("get_guidance", "call_1", nil, `{"situation":"pain"}`, "guidance text", false), Upstream)
+	sink.QueueFrame(NewFunctionCallResultFrame("lookup_plan", "call_2", nil, `{"plan":"starter"}`, "plan text", true), Upstream)
+	time.Sleep(30 * time.Millisecond)
+
+	source.QueueFrame(EndFrame{}, Downstream)
+	if err := waitForWG(fix.WG, 3*time.Second); err != nil {
+		t.Fatalf("waitForWG: %v", err)
+	}
+
+	if len(a.messages) != 4 {
+		t.Fatalf("context messages = %+v, want prompt + assistant tool_calls + two tool results", a.messages)
+	}
+	assistant := a.messages[1]
+	if assistant.Role != "assistant" || len(assistant.ToolCalls) != 2 {
+		t.Fatalf("assistant tool message = %+v, want two tool calls", assistant)
+	}
+	if assistant.ToolCalls[0].Function.Name != "get_guidance" || assistant.ToolCalls[1].Function.Name != "lookup_plan" {
+		t.Fatalf("tool calls = %+v, want get_guidance and lookup_plan", assistant.ToolCalls)
+	}
+	if a.messages[2].Role != "tool" || a.messages[2].ToolCallID != "call_1" || a.messages[2].Content != "guidance text" {
+		t.Fatalf("first tool result = %+v", a.messages[2])
+	}
+	if a.messages[3].Role != "tool" || a.messages[3].ToolCallID != "call_2" || a.messages[3].Content != "plan text" {
+		t.Fatalf("second tool result = %+v", a.messages[3])
+	}
+	llmMsg, ok := findFrame[LLMMessagesFrame](sink.Captured())
+	if !ok {
+		t.Fatalf("expected LLMMessagesFrame after batched tool result, got %s", describeFrameTypes(sink.Captured()))
+	}
+	if len(llmMsg.Messages) != 4 || len(llmMsg.Messages[1].ToolCalls) != 2 {
+		t.Fatalf("LLM context after batched tool results = %+v", llmMsg.Messages)
 	}
 }
 
@@ -204,8 +312,8 @@ func TestContextAggregator_ExplicitEmptyInitialMessagesSkipsDefaultPrompt(t *tes
 	if len(llmMsg.Messages) != 1 {
 		t.Fatalf("message count = %d, want only the user message", len(llmMsg.Messages))
 	}
-	if llmMsg.Messages[0]["role"] != "user" {
-		t.Fatalf("first message role = %q, want user", llmMsg.Messages[0]["role"])
+	if llmMsg.Messages[0].Role != "user" {
+		t.Fatalf("first message role = %q, want user", llmMsg.Messages[0].Role)
 	}
 }
 
@@ -301,8 +409,8 @@ func TestContextAggregator_BackchannelDiscardedWhenBotFinishesFirst(t *testing.T
 	}
 	// And no user-role message should have been appended.
 	for _, m := range a.messages {
-		if m["role"] == "user" {
-			t.Errorf("aggregator should not have a user message; got %q", m["content"])
+		if m.Role == "user" {
+			t.Errorf("aggregator should not have a user message; got %q", m.Content)
 		}
 	}
 }
@@ -340,8 +448,8 @@ func TestContextAggregator_BackchannelDiscardedWhileBotStillSpeaking(t *testing.
 		t.Errorf("expected NO LLMMessagesFrame; in-progress discard should fire, got %d", c)
 	}
 	for _, m := range a.messages {
-		if m["role"] == "user" {
-			t.Errorf("aggregator should not have a user message; got %q", m["content"])
+		if m.Role == "user" {
+			t.Errorf("aggregator should not have a user message; got %q", m.Content)
 		}
 	}
 }
@@ -387,8 +495,8 @@ func TestContextAggregator_BargeInPreservesUserTranscript(t *testing.T) {
 		t.Fatalf("expected LLMMessagesFrame after barge-in, got %s", describeFrameTypes(sink.Captured()))
 	}
 	last := llmMsg.Messages[len(llmMsg.Messages)-1]
-	if last["role"] != "user" || last["content"] != "I have a question" {
-		t.Errorf("user message: got %q=%q, want user='I have a question'", last["role"], last["content"])
+	if last.Role != "user" || last.Content != "I have a question" {
+		t.Errorf("user message: got %q=%q, want user='I have a question'", last.Role, last.Content)
 	}
 }
 
@@ -435,10 +543,10 @@ func TestContextAggregator_TTSDoneCommitsAssistantMessage(t *testing.T) {
 	// message with the spoken words.
 	var sawAssistant bool
 	for _, m := range a.messages {
-		if m["role"] == "assistant" {
+		if m.Role == "assistant" {
 			sawAssistant = true
-			if m["content"] != "hi there" {
-				t.Errorf("assistant content: got %q, want 'hi there'", m["content"])
+			if m.Content != "hi there" {
+				t.Errorf("assistant content: got %q, want 'hi there'", m.Content)
 			}
 		}
 	}

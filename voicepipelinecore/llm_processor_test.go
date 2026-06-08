@@ -74,8 +74,8 @@ func TestLLM_StreamsTextFramesDownstream(t *testing.T) {
 	down, _ := runProcessorTest(t, fix, runConfig{
 		processor: p,
 		framesToSend: []Frame{
-			LLMMessagesFrame{Messages: []map[string]string{
-				{"role": "user", "content": "hi"},
+			LLMMessagesFrame{Messages: []Message{
+				{Role: "user", Content: "hi"},
 			}},
 		},
 		settleDelay:  200 * time.Millisecond,
@@ -130,7 +130,7 @@ func TestLLM_InterruptCancelsHTTP(t *testing.T) {
 	p.Start(fix.RootCtx)
 	sink.Start(fix.RootCtx)
 
-	source.QueueFrame(LLMMessagesFrame{Messages: []map[string]string{{"role": "user", "content": "hi"}}}, Downstream)
+	source.QueueFrame(LLMMessagesFrame{Messages: []Message{{Role: "user", Content: "hi"}}}, Downstream)
 
 	// Wait for the first chunk to arrive.
 	deadline := time.Now().Add(2 * time.Second)
@@ -193,7 +193,7 @@ func TestLLM_EndFrameCancelsInFlight(t *testing.T) {
 	p.Start(fix.RootCtx)
 	sink.Start(fix.RootCtx)
 
-	source.QueueFrame(LLMMessagesFrame{Messages: []map[string]string{{"role": "user", "content": "hi"}}}, Downstream)
+	source.QueueFrame(LLMMessagesFrame{Messages: []Message{{Role: "user", Content: "hi"}}}, Downstream)
 
 	// Wait for the first chunk.
 	deadline := time.Now().Add(2 * time.Second)
@@ -279,7 +279,7 @@ func TestLLM_HandlesServerError(t *testing.T) {
 	down, _ := runProcessorTest(t, fix, runConfig{
 		processor: p,
 		framesToSend: []Frame{
-			LLMMessagesFrame{Messages: []map[string]string{{"role": "user", "content": "hi"}}},
+			LLMMessagesFrame{Messages: []Message{{Role: "user", Content: "hi"}}},
 		},
 		settleDelay:  200 * time.Millisecond,
 		sendEndFrame: true,

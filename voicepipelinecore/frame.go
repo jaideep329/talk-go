@@ -98,6 +98,8 @@ const (
 	LLMMessages
 	Error
 	LLMMessagesAppend
+	FunctionCallInProgress
+	FunctionCallResult
 )
 
 type AudioFrame struct {
@@ -270,10 +272,10 @@ func (f BotStoppedSpeakingFrame) Clone() Frame          { return NewBotStoppedSp
 
 type LLMMessagesFrame struct {
 	FrameBase
-	Messages []map[string]string
+	Messages []Message
 }
 
-func NewLLMMessagesFrame(messages []map[string]string) LLMMessagesFrame {
+func NewLLMMessagesFrame(messages []Message) LLMMessagesFrame {
 	return LLMMessagesFrame{FrameBase: FrameBase{Meta: newFrameMeta("LLMMessagesFrame")}, Messages: messages}
 }
 
@@ -332,3 +334,53 @@ func NewLLMMessagesAppendFrame(messages []Message, runLLM bool) LLMMessagesAppen
 func (f LLMMessagesAppendFrame) FrameType() FrameType  { return LLMMessagesAppend }
 func (f LLMMessagesAppendFrame) IsSystem() bool        { return false }
 func (f LLMMessagesAppendFrame) IsInterruptible() bool { return true }
+
+type FunctionCallInProgressFrame struct {
+	FrameBase
+	FunctionName         string
+	ToolCallID           string
+	Arguments            map[string]any
+	RawArguments         string
+	CancelOnInterruption bool
+}
+
+func NewFunctionCallInProgressFrame(functionName, toolCallID string, arguments map[string]any, rawArguments string, cancelOnInterruption bool) FunctionCallInProgressFrame {
+	return FunctionCallInProgressFrame{
+		FrameBase:            FrameBase{Meta: newFrameMeta("FunctionCallInProgressFrame")},
+		FunctionName:         functionName,
+		ToolCallID:           toolCallID,
+		Arguments:            arguments,
+		RawArguments:         rawArguments,
+		CancelOnInterruption: cancelOnInterruption,
+	}
+}
+
+func (f FunctionCallInProgressFrame) FrameType() FrameType  { return FunctionCallInProgress }
+func (f FunctionCallInProgressFrame) IsSystem() bool        { return false }
+func (f FunctionCallInProgressFrame) IsInterruptible() bool { return false }
+
+type FunctionCallResultFrame struct {
+	FrameBase
+	FunctionName string
+	ToolCallID   string
+	Arguments    map[string]any
+	RawArguments string
+	Result       string
+	RunLLM       bool
+}
+
+func NewFunctionCallResultFrame(functionName, toolCallID string, arguments map[string]any, rawArguments, result string, runLLM bool) FunctionCallResultFrame {
+	return FunctionCallResultFrame{
+		FrameBase:    FrameBase{Meta: newFrameMeta("FunctionCallResultFrame")},
+		FunctionName: functionName,
+		ToolCallID:   toolCallID,
+		Arguments:    arguments,
+		RawArguments: rawArguments,
+		Result:       result,
+		RunLLM:       runLLM,
+	}
+}
+
+func (f FunctionCallResultFrame) FrameType() FrameType  { return FunctionCallResult }
+func (f FunctionCallResultFrame) IsSystem() bool        { return false }
+func (f FunctionCallResultFrame) IsInterruptible() bool { return false }

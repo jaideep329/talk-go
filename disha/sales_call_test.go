@@ -240,9 +240,12 @@ func TestSalesCallBotPlanAssemblesDishaCall(t *testing.T) {
 	if len(pl.InitialMessages) != 4 ||
 		pl.InitialMessages[0].Role != "system" ||
 		!containsAll(pl.InitialMessages[0].Content, "TEST_SYSTEM_PROMPT", "patient=Riya, age 32") ||
-		pl.InitialMessages[1] != (voicepipelinecore.Message{Role: "user", Content: "hello"}) ||
-		pl.InitialMessages[2] != (voicepipelinecore.Message{Role: "assistant", Content: "hi"}) ||
-		pl.InitialMessages[3] != (voicepipelinecore.Message{Role: "tool", Content: "tool turn"}) {
+		pl.InitialMessages[1].Role != "user" ||
+		pl.InitialMessages[1].Content != "hello" ||
+		pl.InitialMessages[2].Role != "assistant" ||
+		pl.InitialMessages[2].Content != "hi" ||
+		pl.InitialMessages[3].Role != "tool" ||
+		pl.InitialMessages[3].Content != "tool turn" {
 		t.Fatalf("InitialMessages mismatch: %+v", pl.InitialMessages)
 	}
 	events := pl.Callbacks.Events()
@@ -358,7 +361,8 @@ func TestSalesCallBotPlanSeedsHelloWhenNoPriorChunks(t *testing.T) {
 	}
 	if len(pl.InitialMessages) != 2 ||
 		pl.InitialMessages[0].Role != "system" ||
-		pl.InitialMessages[1] != (voicepipelinecore.Message{Role: "user", Content: "hello?"}) {
+		pl.InitialMessages[1].Role != "user" ||
+		pl.InitialMessages[1].Content != "hello?" {
 		t.Fatalf("InitialMessages = %+v, want system + hello seed", pl.InitialMessages)
 	}
 	if pl.MaxTalkTime != lifetimeTalkTimeSeconds*time.Second {

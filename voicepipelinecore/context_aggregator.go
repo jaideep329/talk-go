@@ -2,6 +2,7 @@ package voicepipelinecore
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"time"
 )
@@ -11,7 +12,7 @@ const minBargeInWords = 3
 type ContextAggregator struct {
 	*BaseProcessor
 	taskCtx                          *TaskContext
-	messages                         []map[string]string
+	messages                         []Message
 	currentTranscript                string
 	spokenWords                      []string
 	interimTranscript                string
@@ -24,7 +25,7 @@ type ContextAggregator struct {
 
 func NewContextAggregator(taskCtx *TaskContext, initialMessages []Message, mainAgentSystemPromptLangfuseKey string) *ContextAggregator {
 	useDefaultPrompt := initialMessages == nil
-	messages := []map[string]string{}
+	messages := []Message{}
 	if !useDefaultPrompt {
 		messages = messagesFromInitial(initialMessages)
 	}
@@ -38,25 +39,27 @@ func NewContextAggregator(taskCtx *TaskContext, initialMessages []Message, mainA
 	return a
 }
 
-func messagesFromInitial(initial []Message) []map[string]string {
-	messages := make([]map[string]string, 0, len(initial))
+func messagesFromInitial(initial []Message) []Message {
+	out := make([]Message, 0, len(initial))
 	for _, msg := range initial {
-		if msg.Role == "" || msg.Content == "" {
+		if msg.Role == "" {
 			continue
 		}
-		messages = append(messages, map[string]string{"role": msg.Role, "content": msg.Content})
+		if msg.Content == "" && len(msg.ToolCalls) == 0 && msg.ToolCallID == "" {
+			continue
+		}
+		out = append(out, msg)
 	}
-	return messages
+	return out
 }
 
-func cloneMessages(messages []map[string]string) []map[string]string {
-	out := make([]map[string]string, len(messages))
+func cloneMessages(messages []Message) []Message {
+	out := make([]Message, len(messages))
 	for i, msg := range messages {
-		copied := make(map[string]string, len(msg))
-		for k, v := range msg {
-			copied[k] = v
+		out[i] = msg
+		if len(msg.ToolCalls) > 0 {
+			out[i].ToolCalls = append([]ToolCall(nil), msg.ToolCalls...)
 		}
-		out[i] = copied
 	}
 	return out
 }
@@ -135,7 +138,7 @@ func (a *ContextAggregator) commitSpokenText(interrupted bool) {
 	spoken := a.spokenSoFar()
 	if spoken != "" {
 		a.taskCtx.Logger.Printf("Committing to history (interrupted=%v): %s\n", interrupted, spoken)
-		a.messages = append(a.messages, map[string]string{"role": "assistant", "content": spoken})
+		a.messages = append(a.messages, Message{Role: "assistant", Content: spoken})
 		metrics := TurnMetrics{}
 		if a.taskCtx.metrics != nil {
 			metrics = a.taskCtx.metrics.snapshotAndReset()
@@ -156,17 +159,17 @@ func (a *ContextAggregator) lastMessageRole() string {
 	if len(a.messages) == 0 {
 		return ""
 	}
-	return a.messages[len(a.messages)-1]["role"]
+	return a.messages[len(a.messages)-1].Role
 }
 
 func (a *ContextAggregator) addUserMessage(text string) {
 	at := time.Now()
 	if a.lastMessageRole() == "user" {
-		last := a.messages[len(a.messages)-1]
-		last["content"] += " " + text
-		a.taskCtx.Logger.Printf("Concatenated user message: %s\n", last["content"])
+		last := &a.messages[len(a.messages)-1]
+		last.Content += " " + text
+		a.taskCtx.Logger.Printf("Concatenated user message: %s\n", last.Content)
 	} else {
-		a.messages = append(a.messages, map[string]string{"role": "user", "content": text})
+		a.messages = append(a.messages, Message{Role: "user", Content: text})
 	}
 	a.taskCtx.UIEvents.UserTranscription(text, true, at)
 	if a.taskCtx.callEvents != nil {
@@ -174,10 +177,70 @@ func (a *ContextAggregator) addUserMessage(text string) {
 	}
 }
 
+func (a *ContextAggregator) addFunctionCallInProgress(f FunctionCallInProgressFrame) {
+	rawArgs := f.RawArguments
+	if rawArgs == "" {
+		rawArgs = "{}"
+		if len(f.Arguments) > 0 {
+			if encoded, err := json.Marshal(f.Arguments); err == nil {
+				rawArgs = string(encoded)
+			}
+		}
+	}
+	toolCall := ToolCall{
+		ID:   f.ToolCallID,
+		Type: "function",
+		Function: ToolCallFunction{
+			Name:      f.FunctionName,
+			Arguments: rawArgs,
+		},
+	}
+	toolMessage := Message{
+		Role:       "tool",
+		Content:    "IN_PROGRESS",
+		ToolCallID: f.ToolCallID,
+	}
+	if len(a.messages) >= 2 {
+		last := a.messages[len(a.messages)-1]
+		assistant := &a.messages[len(a.messages)-2]
+		if last.Role == "tool" && last.Content == "IN_PROGRESS" && assistant.Role == "assistant" && len(assistant.ToolCalls) > 0 {
+			assistant.ToolCalls = append(assistant.ToolCalls, toolCall)
+			a.messages = append(a.messages, toolMessage)
+			return
+		}
+	}
+	a.messages = append(a.messages,
+		Message{
+			Role:      "assistant",
+			ToolCalls: []ToolCall{toolCall},
+		},
+		toolMessage,
+	)
+}
+
+func (a *ContextAggregator) applyFunctionCallResult(f FunctionCallResultFrame) {
+	result := f.Result
+	if result == "" {
+		result = "COMPLETED"
+	}
+	for i := len(a.messages) - 1; i >= 0; i-- {
+		msg := &a.messages[i]
+		if msg.Role == "tool" && msg.ToolCallID == f.ToolCallID {
+			msg.Content = result
+			return
+		}
+	}
+	a.messages = append(a.messages, Message{
+		Role:       "tool",
+		Content:    result,
+		ToolCallID: f.ToolCallID,
+	})
+}
+
 func (a *ContextAggregator) submitUserMessage(text string) {
 	a.taskCtx.Logger.Printf("Final transcript received: %s\n", text)
 	if len(a.messages) == 0 && a.useDefaultPrompt {
-		a.messages = append(a.messages, map[string]string{"role": "system", "content": `You are an expert health coach named Disha. You have deep experience in chronic care management and behavioral change. You are a master influencer and help the users achieve their health goals with the power of conversation.
+		a.messages = append(a.messages, Message{Role: "system", Content: `You are an expert health coach named Disha. You have deep experience in chronic care management and behavioral change. You are a master influencer and help the users achieve their health goals with the power of conversation.
 You have been trained by master clinicians at a company called Curelink.
 
 You are conducting your first telephonic consultation with a new client. You are talking with the user via an audio call on the Disha Health App. Always respond in exactly 2 sentences. Never respond with just 1 sentence.`})
@@ -213,6 +276,17 @@ func (a *ContextAggregator) ProcessFrame(ctx context.Context, frame Frame, dir D
 				return
 			}
 			a.taskCtx.Logger.Println("Running LLM turn from appended context (greet-first / injected)")
+			a.PushFrame(NewLLMMessagesFrame(cloneMessages(a.messages)), Downstream)
+		}
+	case FunctionCallInProgressFrame:
+		a.taskCtx.Logger.Printf("Function call in progress: %s tool_call_id=%s\n", f.FunctionName, f.ToolCallID)
+		a.addFunctionCallInProgress(f)
+		a.PushFrame(f, Upstream)
+	case FunctionCallResultFrame:
+		a.taskCtx.Logger.Printf("Function call result: %s tool_call_id=%s run_llm=%v\n", f.FunctionName, f.ToolCallID, f.RunLLM)
+		a.applyFunctionCallResult(f)
+		a.PushFrame(f, Upstream)
+		if f.RunLLM {
 			a.PushFrame(NewLLMMessagesFrame(cloneMessages(a.messages)), Downstream)
 		}
 	case TranscriptFrame:

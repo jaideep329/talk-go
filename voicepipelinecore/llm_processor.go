@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"strings"
@@ -28,6 +29,7 @@ type LLMResult struct {
 	TTFB        time.Duration
 	Total       time.Duration
 	Interrupted bool
+	ToolCalls   []ToolCall
 }
 
 // LLMClient performs one streaming chat completion. It must invoke
@@ -42,7 +44,32 @@ type LLMResult struct {
 // dependency runs one way — the core never imports the implementer — so
 // the pipeline package stays free of any business/transport dependency.
 type LLMClient interface {
-	Stream(ctx context.Context, messages []map[string]string, onToken func(string)) (LLMResult, error)
+	Stream(ctx context.Context, req LLMRequest, onToken func(string)) (LLMResult, error)
+}
+
+type ToolCallRequest struct {
+	FunctionName string
+	ToolCallID   string
+	Arguments    map[string]any
+	RawArguments string
+}
+
+type ToolCallResponse struct {
+	Result any
+	RunLLM bool
+}
+
+type ToolHandler func(ctx context.Context, req ToolCallRequest) (ToolCallResponse, error)
+
+type ToolOptions struct {
+	CancelOnInterruption bool
+	Timeout              time.Duration
+}
+
+type registeredTool struct {
+	definition ToolDefinition
+	handler    ToolHandler
+	options    ToolOptions
 }
 
 type LLMProcessor struct {
@@ -52,6 +79,10 @@ type LLMProcessor struct {
 	metrics   *ProcessorMetrics
 	cancelMu  sync.Mutex
 	cancelLLM context.CancelFunc
+
+	tools      []ToolDefinition
+	toolChoice any
+	toolMap    map[string]registeredTool
 }
 
 // NewLLMProcessor builds an LLM processor backed by the default OpenAI
@@ -70,9 +101,36 @@ func NewLLMProcessorWithClient(taskCtx *TaskContext, client LLMClient) *LLMProce
 		taskCtx: taskCtx,
 		client:  client,
 		metrics: NewProcessorMetrics("llm"),
+		toolMap: make(map[string]registeredTool),
 	}
 	p.BaseProcessor = NewBaseProcessor("LLM", p, taskCtx)
 	return p
+}
+
+func (p *LLMProcessor) RegisterTool(def ToolDefinition, handler ToolHandler, opts ToolOptions) {
+	if def.Type == "" {
+		def.Type = "function"
+	}
+	name := strings.TrimSpace(def.Function.Name)
+	if name == "" {
+		return
+	}
+	p.tools = appendOrReplaceToolDefinition(p.tools, def)
+	p.toolMap[name] = registeredTool{definition: def, handler: handler, options: opts}
+}
+
+func (p *LLMProcessor) SetToolChoice(toolChoice any) {
+	p.toolChoice = toolChoice
+}
+
+func appendOrReplaceToolDefinition(tools []ToolDefinition, def ToolDefinition) []ToolDefinition {
+	for i, existing := range tools {
+		if existing.Function.Name == def.Function.Name {
+			tools[i] = def
+			return tools
+		}
+	}
+	return append(tools, def)
 }
 
 func (p *LLMProcessor) ProcessFrame(ctx context.Context, frame Frame, dir Direction) {
@@ -112,7 +170,7 @@ func (p *LLMProcessor) cancelInFlight() {
 	}
 }
 
-func (p *LLMProcessor) runLLM(ctx context.Context, messages []map[string]string) {
+func (p *LLMProcessor) runLLM(ctx context.Context, messages []Message) {
 	p.metrics.Start(MetricTTFB)
 	p.metrics.Start(MetricProcessing)
 	p.PushFrame(NewLLMResponseStartFrame(time.Now()), Downstream)
@@ -133,7 +191,16 @@ func (p *LLMProcessor) runLLM(ctx context.Context, messages []map[string]string)
 		p.PushFrame(NewTextFrame(content), Downstream)
 	}
 
-	result, err := p.client.Stream(ctx, messages, onToken)
+	req := LLMRequest{
+		Messages:   cloneMessages(messages),
+		Tools:      append([]ToolDefinition(nil), p.tools...),
+		ToolChoice: p.toolChoice,
+	}
+	result, err := p.client.Stream(ctx, req, onToken)
+	if firstToken && result.TTFB > 0 {
+		ttfbMs = float64(result.TTFB.Microseconds()) / 1000.0
+		_ = p.metrics.Stop(MetricTTFB)
+	}
 
 	// Cancellation (barge-in / EndFrame) takes precedence: the interrupt/
 	// end path already reset TTS + playback, so we must NOT emit terminal
@@ -164,6 +231,98 @@ func (p *LLMProcessor) runLLM(ctx context.Context, messages []map[string]string)
 	}
 	p.PushFrame(NewLLMResponseEndFrame(), Downstream)
 	p.emitLLMCallResult(result.Model, ttfbMs, totalMs, "completed")
+	if len(result.ToolCalls) > 0 {
+		p.executeToolCalls(ctx, result.ToolCalls)
+	}
+}
+
+func (p *LLMProcessor) executeToolCalls(turnCtx context.Context, toolCalls []ToolCall) {
+	toolResults := make([]FunctionCallResultFrame, 0, len(toolCalls))
+	runNextLLM := false
+	for _, call := range toolCalls {
+		name := call.Function.Name
+		tool, ok := p.toolMap[name]
+		if !ok || tool.handler == nil {
+			args, parseErr := parseToolArguments(call.Function.Arguments)
+			if parseErr != nil {
+				p.PushError(fmt.Sprintf("parse tool arguments for %q: %v", name, parseErr), false)
+			}
+			p.PushError(fmt.Sprintf("unregistered tool call %q", name), false)
+			p.PushFrame(NewFunctionCallInProgressFrame(name, call.ID, args, call.Function.Arguments, true), Upstream)
+			toolResults = append(toolResults, NewFunctionCallResultFrame(name, call.ID, args, call.Function.Arguments, toolResultString(map[string]any{"error": fmt.Sprintf("unregistered tool call %q", name)}), true))
+			runNextLLM = true
+			continue
+		}
+		args, parseErr := parseToolArguments(call.Function.Arguments)
+		if parseErr != nil {
+			p.PushError(fmt.Sprintf("parse tool arguments for %q: %v", name, parseErr), false)
+		}
+		p.PushFrame(NewFunctionCallInProgressFrame(name, call.ID, args, call.Function.Arguments, tool.options.CancelOnInterruption), Upstream)
+
+		parent := turnCtx
+		if !tool.options.CancelOnInterruption && p.taskCtx != nil && p.taskCtx.Ctx != nil {
+			parent = p.taskCtx.Ctx
+		}
+		toolCtx := parent
+		cancel := func() {}
+		if tool.options.Timeout > 0 {
+			toolCtx, cancel = context.WithTimeout(parent, tool.options.Timeout)
+		}
+		resp, err := tool.handler(toolCtx, ToolCallRequest{
+			FunctionName: name,
+			ToolCallID:   call.ID,
+			Arguments:    args,
+			RawArguments: call.Function.Arguments,
+		})
+		cancel()
+		if err != nil {
+			p.PushError(fmt.Sprintf("execute tool %q: %v", name, err), false)
+			resp = ToolCallResponse{Result: map[string]any{"error": err.Error()}, RunLLM: false}
+		}
+		if resp.RunLLM {
+			runNextLLM = true
+		}
+		toolResults = append(toolResults, NewFunctionCallResultFrame(name, call.ID, args, call.Function.Arguments, toolResultString(resp.Result), false))
+	}
+	for i, result := range toolResults {
+		if i == len(toolResults)-1 && runNextLLM {
+			result.RunLLM = true
+		}
+		p.PushFrame(result, Upstream)
+	}
+}
+
+func parseToolArguments(raw string) (map[string]any, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return map[string]any{}, nil
+	}
+	var args map[string]any
+	if err := json.Unmarshal([]byte(raw), &args); err != nil {
+		return map[string]any{}, err
+	}
+	if args == nil {
+		args = map[string]any{}
+	}
+	return args, nil
+}
+
+func toolResultString(result any) string {
+	switch v := result.(type) {
+	case nil:
+		return "COMPLETED"
+	case string:
+		if strings.TrimSpace(v) == "" {
+			return "COMPLETED"
+		}
+		return v
+	default:
+		raw, err := json.Marshal(v)
+		if err != nil {
+			return fmt.Sprintf("%v", v)
+		}
+		return string(raw)
+	}
 }
 
 // emitLLMCallResult publishes the Python-compatible RTVI server-message
@@ -192,12 +351,18 @@ func (p *LLMProcessor) emitLLMCallResult(model string, ttfbMs, totalMs float64, 
 // pre-router behavior for the local /connect demo.
 type openAILLMClient struct{}
 
-func (c *openAILLMClient) Stream(ctx context.Context, messages []map[string]string, onToken func(string)) (LLMResult, error) {
+func (c *openAILLMClient) Stream(ctx context.Context, llmReq LLMRequest, onToken func(string)) (LLMResult, error) {
 	res := LLMResult{Model: llmModel}
 	body := map[string]interface{}{
 		"model":    llmModel,
 		"stream":   true,
-		"messages": messages,
+		"messages": llmReq.Messages,
+	}
+	if len(llmReq.Tools) > 0 {
+		body["tools"] = llmReq.Tools
+	}
+	if llmReq.ToolChoice != nil {
+		body["tool_choice"] = llmReq.ToolChoice
 	}
 	jsonBody, err := json.Marshal(body)
 	if err != nil {
@@ -221,6 +386,7 @@ func (c *openAILLMClient) Stream(ctx context.Context, messages []map[string]stri
 	defer resp.Body.Close()
 
 	firstToken := true
+	toolCalls := newToolCallAccumulator()
 	scanner := bufio.NewScanner(resp.Body)
 	for scanner.Scan() {
 		if ctx.Err() != nil {
@@ -240,7 +406,16 @@ func (c *openAILLMClient) Stream(ctx context.Context, messages []map[string]stri
 		var chunk struct {
 			Choices []struct {
 				Delta struct {
-					Content string `json:"content"`
+					Content   string `json:"content"`
+					ToolCalls []struct {
+						Index    *int   `json:"index"`
+						ID       string `json:"id"`
+						Type     string `json:"type"`
+						Function struct {
+							Name      string `json:"name"`
+							Arguments string `json:"arguments"`
+						} `json:"function"`
+					} `json:"tool_calls"`
 				} `json:"delta"`
 			} `json:"choices"`
 		}
@@ -250,7 +425,28 @@ func (c *openAILLMClient) Stream(ctx context.Context, messages []map[string]stri
 		if len(chunk.Choices) == 0 {
 			continue
 		}
-		content := chunk.Choices[0].Delta.Content
+		delta := chunk.Choices[0].Delta
+		if len(delta.ToolCalls) > 0 {
+			if firstToken {
+				firstToken = false
+				res.TTFB = time.Since(start)
+			}
+			for _, tc := range delta.ToolCalls {
+				idx := 0
+				if tc.Index != nil {
+					idx = *tc.Index
+				}
+				toolCalls.add(idx, ToolCall{
+					ID:   tc.ID,
+					Type: tc.Type,
+					Function: ToolCallFunction{
+						Name:      tc.Function.Name,
+						Arguments: tc.Function.Arguments,
+					},
+				})
+			}
+		}
+		content := delta.Content
 		if content == "" {
 			continue
 		}
@@ -262,5 +458,53 @@ func (c *openAILLMClient) Stream(ctx context.Context, messages []map[string]stri
 	}
 	res.Total = time.Since(start)
 	res.Interrupted = ctx.Err() != nil
+	res.ToolCalls = toolCalls.list()
 	return res, nil
+}
+
+type toolCallAccumulator struct {
+	calls map[int]ToolCall
+	order []int
+}
+
+func newToolCallAccumulator() *toolCallAccumulator {
+	return &toolCallAccumulator{calls: make(map[int]ToolCall)}
+}
+
+func (a *toolCallAccumulator) add(index int, delta ToolCall) {
+	if a == nil {
+		return
+	}
+	call, ok := a.calls[index]
+	if !ok {
+		a.order = append(a.order, index)
+		call.Type = "function"
+	}
+	if delta.ID != "" {
+		call.ID = delta.ID
+	}
+	if delta.Type != "" {
+		call.Type = delta.Type
+	}
+	call.Function.Name += delta.Function.Name
+	call.Function.Arguments += delta.Function.Arguments
+	a.calls[index] = call
+}
+
+func (a *toolCallAccumulator) list() []ToolCall {
+	if a == nil || len(a.order) == 0 {
+		return nil
+	}
+	out := make([]ToolCall, 0, len(a.order))
+	for _, idx := range a.order {
+		call := a.calls[idx]
+		if call.Type == "" {
+			call.Type = "function"
+		}
+		if call.Function.Name == "" && call.Function.Arguments == "" {
+			continue
+		}
+		out = append(out, call)
+	}
+	return out
 }

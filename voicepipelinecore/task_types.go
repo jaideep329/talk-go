@@ -3,10 +3,48 @@ package voicepipelinecore
 import "time"
 
 // Message is the public representation of an LLM context message.
-// It maps directly to the role/content objects the LLM processor sends.
+// It maps directly to the OpenAI-format chat message objects the LLM
+// processor sends, including assistant tool calls and tool results.
 type Message struct {
-	Role    string
-	Content string
+	Role       string     `json:"role"`
+	Content    string     `json:"content,omitempty"`
+	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string     `json:"tool_call_id,omitempty"`
+	Name       string     `json:"name,omitempty"`
+}
+
+// ToolDefinition is an OpenAI-format function tool definition.
+type ToolDefinition struct {
+	Type     string       `json:"type"`
+	Function ToolFunction `json:"function"`
+}
+
+type ToolFunction struct {
+	Name        string         `json:"name"`
+	Description string         `json:"description,omitempty"`
+	Parameters  map[string]any `json:"parameters,omitempty"`
+	Strict      *bool          `json:"strict,omitempty"`
+}
+
+// ToolCall is one function call requested by the LLM. Function.Arguments is
+// the raw JSON argument string streamed by the provider.
+type ToolCall struct {
+	ID       string           `json:"id"`
+	Type     string           `json:"type"`
+	Function ToolCallFunction `json:"function"`
+}
+
+type ToolCallFunction struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
+}
+
+// LLMRequest is the full native request shape sent by LLMProcessor to an
+// LLMClient. Tools are optional; text-only bots leave them empty.
+type LLMRequest struct {
+	Messages   []Message        `json:"messages"`
+	Tools      []ToolDefinition `json:"tools,omitempty"`
+	ToolChoice any              `json:"tool_choice,omitempty"`
 }
 
 // EndReason is the typed public reason a task ended. EndFrame still

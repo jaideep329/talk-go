@@ -104,7 +104,7 @@ func (r *Router) logf(format string, args ...any) {
 // reselect-next-turn + re-poll on error, re-poll on slow completion, and
 // re-poll for fallback recovery. It returns the model that served the
 // turn so the LLMProcessor can report it.
-func (r *Router) Stream(ctx context.Context, messages []map[string]string, onToken func(string)) (res vpc.LLMResult, err error) {
+func (r *Router) Stream(ctx context.Context, llmReq vpc.LLMRequest, onToken func(string)) (res vpc.LLMResult, err error) {
 	sel, ok := getFastestForGroup(ctx, r.cfg.Redis, r.cfg.Group, r.region())
 	if !ok {
 		return vpc.LLMResult{}, errNoEndpoint
@@ -132,8 +132,9 @@ func (r *Router) Stream(ctx context.Context, messages []map[string]string, onTok
 			Model:            cfg.Model,
 			ConfigKey:        cfg.Key,
 			Deployment:       deploymentName(cfg),
-			Messages:         messages,
+			Request:          llmReq,
 			ResponseContent:  responseContent.String(),
+			ToolCalls:        res.ToolCalls,
 			PromptTokens:     usage.PromptTokens,
 			CompletionTokens: usage.CompletionTokens,
 			TTFBMs:           msFromDuration(res.TTFB),
@@ -160,7 +161,7 @@ func (r *Router) Stream(ctx context.Context, messages []map[string]string, onTok
 		}()
 	}()
 
-	req, buildErr := r.buildRequest(ctx, cfg, messages)
+	req, buildErr := r.buildRequest(ctx, cfg, llmReq)
 	if buildErr != nil {
 		// A build error (missing key/creds) is treated like a live error:
 		// blacklist the endpoint so the next turn skips it.
@@ -194,6 +195,7 @@ func (r *Router) Stream(ctx context.Context, messages []map[string]string, onTok
 
 	firstToken := true
 	sawDone := false
+	toolCalls := newToolCallAccumulator()
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for scanner.Scan() {
@@ -202,7 +204,7 @@ func (r *Router) Stream(ctx context.Context, messages []map[string]string, onTok
 			res.Interrupted = true
 			return res, ctx.Err()
 		}
-		content, fr, chunkUsage, hasUsage, done, ok := parseSSEChunk(scanner.Text())
+		content, toolDeltas, fr, chunkUsage, hasUsage, done, ok := parseSSEChunk(scanner.Text())
 		if done {
 			sawDone = true
 			break
@@ -215,6 +217,15 @@ func (r *Router) Stream(ctx context.Context, messages []map[string]string, onTok
 		}
 		if fr != "" {
 			finishReason = fr
+		}
+		if len(toolDeltas) > 0 {
+			if firstToken {
+				firstToken = false
+				res.TTFB = time.Since(start)
+			}
+			for _, delta := range toolDeltas {
+				toolCalls.add(delta.index, delta.call)
+			}
 		}
 		if content == "" {
 			continue
@@ -229,6 +240,7 @@ func (r *Router) Stream(ctx context.Context, messages []map[string]string, onTok
 
 	res.Total = time.Since(start)
 	res.Interrupted = ctx.Err() != nil
+	res.ToolCalls = toolCalls.list()
 
 	// Truncation diagnostics: a clean finish is finish_reason="stop"
 	// followed by [DONE]. Anything else on a non-interrupted turn means
@@ -283,38 +295,117 @@ type tokenUsage struct {
 	TotalTokens      int `json:"total_tokens"`
 }
 
-func parseSSEChunk(line string) (content, finishReason string, usage tokenUsage, hasUsage, done, ok bool) {
+type toolCallDelta struct {
+	index int
+	call  vpc.ToolCall
+}
+
+func parseSSEChunk(line string) (content string, toolDeltas []toolCallDelta, finishReason string, usage tokenUsage, hasUsage, done, ok bool) {
 	if !strings.HasPrefix(line, "data:") {
-		return "", "", tokenUsage{}, false, false, false
+		return "", nil, "", tokenUsage{}, false, false, false
 	}
 	data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 	if data == "" {
-		return "", "", tokenUsage{}, false, false, false
+		return "", nil, "", tokenUsage{}, false, false, false
 	}
 	if data == "[DONE]" {
-		return "", "", tokenUsage{}, false, true, true
+		return "", nil, "", tokenUsage{}, false, true, true
 	}
 	var chunk struct {
 		Choices []struct {
 			Delta struct {
-				Content string `json:"content"`
+				Content   string `json:"content"`
+				ToolCalls []struct {
+					Index    *int   `json:"index"`
+					ID       string `json:"id"`
+					Type     string `json:"type"`
+					Function struct {
+						Name      string `json:"name"`
+						Arguments string `json:"arguments"`
+					} `json:"function"`
+				} `json:"tool_calls"`
 			} `json:"delta"`
 			FinishReason *string `json:"finish_reason"`
 		} `json:"choices"`
 		Usage *tokenUsage `json:"usage"`
 	}
 	if err := json.Unmarshal([]byte(data), &chunk); err != nil {
-		return "", "", tokenUsage{}, false, false, false
+		return "", nil, "", tokenUsage{}, false, false, false
 	}
 	if chunk.Usage != nil {
 		usage = *chunk.Usage
 		hasUsage = true
 	}
 	if len(chunk.Choices) == 0 {
-		return "", "", usage, hasUsage, false, true
+		return "", nil, "", usage, hasUsage, false, true
 	}
 	if fr := chunk.Choices[0].FinishReason; fr != nil {
 		finishReason = *fr
 	}
-	return chunk.Choices[0].Delta.Content, finishReason, usage, hasUsage, false, true
+	delta := chunk.Choices[0].Delta
+	for _, tc := range delta.ToolCalls {
+		idx := 0
+		if tc.Index != nil {
+			idx = *tc.Index
+		}
+		toolDeltas = append(toolDeltas, toolCallDelta{
+			index: idx,
+			call: vpc.ToolCall{
+				ID:   tc.ID,
+				Type: tc.Type,
+				Function: vpc.ToolCallFunction{
+					Name:      tc.Function.Name,
+					Arguments: tc.Function.Arguments,
+				},
+			},
+		})
+	}
+	return delta.Content, toolDeltas, finishReason, usage, hasUsage, false, true
+}
+
+type toolCallAccumulator struct {
+	calls map[int]vpc.ToolCall
+	order []int
+}
+
+func newToolCallAccumulator() *toolCallAccumulator {
+	return &toolCallAccumulator{calls: make(map[int]vpc.ToolCall)}
+}
+
+func (a *toolCallAccumulator) add(index int, delta vpc.ToolCall) {
+	if a == nil {
+		return
+	}
+	call, ok := a.calls[index]
+	if !ok {
+		a.order = append(a.order, index)
+		call.Type = "function"
+	}
+	if delta.ID != "" {
+		call.ID = delta.ID
+	}
+	if delta.Type != "" {
+		call.Type = delta.Type
+	}
+	call.Function.Name += delta.Function.Name
+	call.Function.Arguments += delta.Function.Arguments
+	a.calls[index] = call
+}
+
+func (a *toolCallAccumulator) list() []vpc.ToolCall {
+	if a == nil || len(a.order) == 0 {
+		return nil
+	}
+	out := make([]vpc.ToolCall, 0, len(a.order))
+	for _, idx := range a.order {
+		call := a.calls[idx]
+		if call.Type == "" {
+			call.Type = "function"
+		}
+		if call.Function.Name == "" && call.Function.Arguments == "" {
+			continue
+		}
+		out = append(out, call)
+	}
+	return out
 }

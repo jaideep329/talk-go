@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jaideep329/talk-go/voicepipelinecore"
 	"github.com/jaideep329/talk-go/voicepipelinecore/llmrouter"
 )
 
@@ -19,7 +20,7 @@ func TestNewLLMLogSinkQueuesModuleLevelWrapper(t *testing.T) {
 	sink(llmrouter.CallLog{
 		Model:            "grok-4-1-fast-non-reasoning",
 		Deployment:       "GROK_4_1_FNR_EASTUS",
-		Messages:         []map[string]string{{"role": "user", "content": "hello"}},
+		Request:          voicepipelinecore.LLMRequest{Messages: []voicepipelinecore.Message{{Role: "user", Content: "hello"}}},
 		ResponseContent:  "hi",
 		TTFBMs:           12.5,
 		TotalMs:          48.25,

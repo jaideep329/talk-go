@@ -171,7 +171,7 @@ spec:
   triggers:
   - type: postgresql
     metadata:
-      # Returns total desired pods: half baseline buffer (from scaling_buffer_schedule table) + active + reserved + provisioning
+      # Returns total desired pods: baseline buffer (from scaling_buffer_schedule table) + active + reserved + provisioning
       query: "
       WITH base_time AS (
         SELECT EXTRACT(HOUR FROM (NOW() AT TIME ZONE 'Asia/Kolkata')) AS h,
@@ -184,7 +184,7 @@ spec:
       ), (
         SELECT buffer_value FROM scalingbufferschedule
         ORDER BY hour DESC, minute_start DESC LIMIT 1
-      ), 0) / 2.0) + (
+      ), 0) + (
         SELECT COUNT(*) FROM gkeworkermachines
         WHERE deployment_name = '$GKE_DEPLOYMENT_NAME'
         AND status IN ('active', 'reserved', 'provisioning')

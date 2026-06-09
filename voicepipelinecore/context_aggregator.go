@@ -3,8 +3,11 @@ package voicepipelinecore
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"time"
+
+	"github.com/jaideep329/talk-go/internal/sentryutil"
 )
 
 const minBargeInWords = 3
@@ -200,15 +203,6 @@ func (a *ContextAggregator) addFunctionCallInProgress(f FunctionCallInProgressFr
 		Content:    "IN_PROGRESS",
 		ToolCallID: f.ToolCallID,
 	}
-	if len(a.messages) >= 2 {
-		last := a.messages[len(a.messages)-1]
-		assistant := &a.messages[len(a.messages)-2]
-		if last.Role == "tool" && last.Content == "IN_PROGRESS" && assistant.Role == "assistant" && len(assistant.ToolCalls) > 0 {
-			assistant.ToolCalls = append(assistant.ToolCalls, toolCall)
-			a.messages = append(a.messages, toolMessage)
-			return
-		}
-	}
 	a.messages = append(a.messages,
 		Message{
 			Role:      "assistant",
@@ -219,9 +213,22 @@ func (a *ContextAggregator) addFunctionCallInProgress(f FunctionCallInProgressFr
 }
 
 func (a *ContextAggregator) applyFunctionCallResult(f FunctionCallResultFrame) {
-	result := f.Result
+	result := strings.TrimSpace(f.Result)
 	if result == "" {
-		result = "COMPLETED"
+		err := errors.New("empty tool result")
+		a.PushError("empty tool result", false)
+		sentryutil.Capture(sentryutil.Event{
+			Err: err,
+			Tags: map[string]string{
+				"component": "context_aggregator",
+				"operation": "tool_result",
+			},
+			Details: map[string]any{
+				"function_name": f.FunctionName,
+				"tool_call_id":  f.ToolCallID,
+			},
+		})
+		result = toolErrorResultString(err.Error())
 	}
 	for i := len(a.messages) - 1; i >= 0; i-- {
 		msg := &a.messages[i]

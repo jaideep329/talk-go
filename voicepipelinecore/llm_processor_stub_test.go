@@ -23,10 +23,12 @@ type stubLLMClient struct {
 }
 
 type stubLLMResponse struct {
-	tokens    []string
-	model     string
-	err       error
-	toolCalls []ToolCall
+	tokens                []string
+	model                 string
+	err                   error
+	toolCalls             []ToolCall
+	blockBeforeTokenIndex int
+	blockUntil            <-chan struct{}
 }
 
 func (s *stubLLMClient) Stream(ctx context.Context, req LLMRequest, onToken func(string)) (LLMResult, error) {
@@ -48,9 +50,16 @@ func (s *stubLLMClient) Stream(ctx context.Context, req LLMRequest, onToken func
 	}
 	s.mu.Unlock()
 
-	for _, tok := range resp.tokens {
+	for i, tok := range resp.tokens {
 		if ctx.Err() != nil {
 			return LLMResult{Model: resp.model, Interrupted: true}, ctx.Err()
+		}
+		if resp.blockUntil != nil && i == resp.blockBeforeTokenIndex {
+			select {
+			case <-resp.blockUntil:
+			case <-ctx.Done():
+				return LLMResult{Model: resp.model, Interrupted: true}, ctx.Err()
+			}
 		}
 		onToken(tok)
 	}
@@ -257,5 +266,110 @@ func TestLLM_NativeToolCallLoopUsesRegisteredToolAndContext(t *testing.T) {
 	}
 	if combined != "guidance received" {
 		t.Fatalf("text output = %q, want guidance received", combined)
+	}
+}
+
+func TestLLM_ToolCallsStartInParallel(t *testing.T) {
+	fix := newTestFixture(t)
+	client := &stubLLMClient{
+		model: "grok-4-1-fast-non-reasoning",
+		responses: []stubLLMResponse{
+			{
+				toolCalls: []ToolCall{
+					{
+						ID:   "call_1",
+						Type: "function",
+						Function: ToolCallFunction{
+							Name:      "first_tool",
+							Arguments: `{"value":"a"}`,
+						},
+					},
+					{
+						ID:   "call_2",
+						Type: "function",
+						Function: ToolCallFunction{
+							Name:      "second_tool",
+							Arguments: `{"value":"b"}`,
+						},
+					},
+				},
+			},
+			{tokens: []string{"done"}},
+		},
+	}
+	aggregator := NewContextAggregator(fix.TaskCtx, []Message{
+		{Role: "system", Content: "sales prompt"},
+		{Role: "user", Content: "hello?"},
+	}, "")
+	llm := NewLLMProcessorWithClient(fix.TaskCtx, client)
+
+	started := make(chan string, 2)
+	release := make(chan struct{})
+	handler := func(ctx context.Context, req ToolCallRequest) (ToolCallResponse, error) {
+		started <- req.FunctionName
+		select {
+		case <-release:
+		case <-ctx.Done():
+			return ToolCallResponse{}, ctx.Err()
+		}
+		return ToolCallResponse{Result: req.FunctionName + " result", RunLLM: true}, nil
+	}
+	for _, name := range []string{"first_tool", "second_tool"} {
+		llm.RegisterTool(ToolDefinition{
+			Type: "function",
+			Function: ToolFunction{
+				Name:       name,
+				Parameters: map[string]any{"type": "object"},
+			},
+		}, handler, ToolOptions{})
+	}
+
+	source := newQueueProcessor(fix.TaskCtx, "source", Upstream)
+	sink := newQueueProcessor(fix.TaskCtx, "sink", Downstream)
+	source.Link(aggregator)
+	aggregator.Link(llm)
+	llm.Link(sink)
+	source.Start(fix.RootCtx)
+	aggregator.Start(fix.RootCtx)
+	llm.Start(fix.RootCtx)
+	sink.Start(fix.RootCtx)
+
+	source.QueueFrame(LLMMessagesAppendFrame{RunLLM: true}, Downstream)
+
+	seen := map[string]bool{}
+	for len(seen) < 2 {
+		select {
+		case name := <-started:
+			seen[name] = true
+		case <-time.After(time.Second):
+			close(release)
+			t.Fatalf("tool calls did not both start concurrently; seen=%v", seen)
+		}
+	}
+	close(release)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if countFrames[TextFrame](sink.Captured()) >= 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	source.QueueFrame(EndFrame{}, Downstream)
+	if err := waitForWG(fix.WG, 3*time.Second); err != nil {
+		t.Fatalf("waitForWG: %v", err)
+	}
+
+	requests := client.Requests()
+	if len(requests) != 2 {
+		t.Fatalf("client requests = %+v, want two LLM calls", requests)
+	}
+	secondMessages := requests[1].Messages
+	if len(secondMessages) != 6 {
+		t.Fatalf("second request messages = %+v, want prompt + user + two assistant/tool pairs", secondMessages)
+	}
+	if len(secondMessages[2].ToolCalls) != 1 || len(secondMessages[4].ToolCalls) != 1 {
+		t.Fatalf("assistant tool calls = %+v / %+v, want one call per assistant message", secondMessages[2].ToolCalls, secondMessages[4].ToolCalls)
 	}
 }

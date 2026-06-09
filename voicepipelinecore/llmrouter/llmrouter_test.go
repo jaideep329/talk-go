@@ -401,7 +401,7 @@ func sseServer(t *testing.T, contents []string) *httptest.Server {
 }
 
 func TestParseSSEChunkToolCallFragments(t *testing.T) {
-	acc := newToolCallAccumulator()
+	acc := vpc.NewToolCallAccumulator()
 	lines := []string{
 		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"get_","arguments":"{\"situation\""}}]}}]}`,
 		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"guidance","arguments":":\"pain\"}"}}]},"finish_reason":"tool_calls"}]}`,
@@ -420,10 +420,10 @@ func TestParseSSEChunkToolCallFragments(t *testing.T) {
 			finishReason = fr
 		}
 		for _, delta := range deltas {
-			acc.add(delta.index, delta.call)
+			acc.Add(delta.index, delta.call)
 		}
 	}
-	calls := acc.list()
+	calls := acc.List()
 	if len(calls) != 1 {
 		t.Fatalf("tool calls = %+v, want one call", calls)
 	}

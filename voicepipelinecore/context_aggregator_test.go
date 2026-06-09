@@ -1,6 +1,7 @@
 package voicepipelinecore
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -241,7 +242,7 @@ func TestContextAggregator_FunctionCallFramesUpdateContextAndRunLLM(t *testing.T
 	}
 }
 
-func TestContextAggregator_BatchedFunctionCallsShareAssistantMessage(t *testing.T) {
+func TestContextAggregator_FunctionCallsUsePipecatAssistantToolPairs(t *testing.T) {
 	fix := newTestFixture(t)
 	a := NewContextAggregator(fix.TaskCtx, []Message{
 		{Role: "system", Content: "sales prompt"},
@@ -267,28 +268,71 @@ func TestContextAggregator_BatchedFunctionCallsShareAssistantMessage(t *testing.
 		t.Fatalf("waitForWG: %v", err)
 	}
 
-	if len(a.messages) != 4 {
-		t.Fatalf("context messages = %+v, want prompt + assistant tool_calls + two tool results", a.messages)
+	if len(a.messages) != 5 {
+		t.Fatalf("context messages = %+v, want prompt + two assistant/tool pairs", a.messages)
 	}
 	assistant := a.messages[1]
-	if assistant.Role != "assistant" || len(assistant.ToolCalls) != 2 {
-		t.Fatalf("assistant tool message = %+v, want two tool calls", assistant)
+	if assistant.Role != "assistant" || len(assistant.ToolCalls) != 1 {
+		t.Fatalf("first assistant tool message = %+v, want one tool call", assistant)
 	}
-	if assistant.ToolCalls[0].Function.Name != "get_guidance" || assistant.ToolCalls[1].Function.Name != "lookup_plan" {
-		t.Fatalf("tool calls = %+v, want get_guidance and lookup_plan", assistant.ToolCalls)
+	if assistant.ToolCalls[0].Function.Name != "get_guidance" {
+		t.Fatalf("first tool call = %+v, want get_guidance", assistant.ToolCalls)
 	}
 	if a.messages[2].Role != "tool" || a.messages[2].ToolCallID != "call_1" || a.messages[2].Content != "guidance text" {
 		t.Fatalf("first tool result = %+v", a.messages[2])
 	}
-	if a.messages[3].Role != "tool" || a.messages[3].ToolCallID != "call_2" || a.messages[3].Content != "plan text" {
-		t.Fatalf("second tool result = %+v", a.messages[3])
+	assistant = a.messages[3]
+	if assistant.Role != "assistant" || len(assistant.ToolCalls) != 1 {
+		t.Fatalf("second assistant tool message = %+v, want one tool call", assistant)
+	}
+	if assistant.ToolCalls[0].Function.Name != "lookup_plan" {
+		t.Fatalf("second tool call = %+v, want lookup_plan", assistant.ToolCalls)
+	}
+	if a.messages[4].Role != "tool" || a.messages[4].ToolCallID != "call_2" || a.messages[4].Content != "plan text" {
+		t.Fatalf("second tool result = %+v", a.messages[4])
 	}
 	llmMsg, ok := findFrame[LLMMessagesFrame](sink.Captured())
 	if !ok {
-		t.Fatalf("expected LLMMessagesFrame after batched tool result, got %s", describeFrameTypes(sink.Captured()))
+		t.Fatalf("expected LLMMessagesFrame after final tool result, got %s", describeFrameTypes(sink.Captured()))
 	}
-	if len(llmMsg.Messages) != 4 || len(llmMsg.Messages[1].ToolCalls) != 2 {
-		t.Fatalf("LLM context after batched tool results = %+v", llmMsg.Messages)
+	if len(llmMsg.Messages) != 5 || len(llmMsg.Messages[1].ToolCalls) != 1 || len(llmMsg.Messages[3].ToolCalls) != 1 {
+		t.Fatalf("LLM context after tool results = %+v", llmMsg.Messages)
+	}
+}
+
+func TestContextAggregator_EmptyFunctionResultPushesError(t *testing.T) {
+	fix := newTestFixture(t)
+	a := NewContextAggregator(fix.TaskCtx, []Message{
+		{Role: "system", Content: "sales prompt"},
+	}, "")
+
+	source := newQueueProcessor(fix.TaskCtx, "test-source", Upstream)
+	sink := newQueueProcessor(fix.TaskCtx, "test-sink", Downstream)
+	source.Link(a)
+	a.Link(sink)
+	source.Start(fix.RootCtx)
+	a.Start(fix.RootCtx)
+	sink.Start(fix.RootCtx)
+
+	sink.QueueFrame(NewFunctionCallInProgressFrame("get_guidance", "call_1", nil, `{"situation":"pain"}`, false), Upstream)
+	time.Sleep(20 * time.Millisecond)
+	sink.QueueFrame(NewFunctionCallResultFrame("get_guidance", "call_1", nil, `{"situation":"pain"}`, "", true), Upstream)
+	time.Sleep(30 * time.Millisecond)
+
+	source.QueueFrame(EndFrame{}, Downstream)
+	if err := waitForWG(fix.WG, 3*time.Second); err != nil {
+		t.Fatalf("waitForWG: %v", err)
+	}
+
+	if c := countFrames[ErrorFrame](source.Captured()); c != 1 {
+		t.Fatalf("expected one ErrorFrame for empty tool result, got %d in %s", c, describeFrameTypes(source.Captured()))
+	}
+	if len(a.messages) != 3 {
+		t.Fatalf("context messages = %+v", a.messages)
+	}
+	tool := a.messages[2]
+	if tool.Role != "tool" || tool.ToolCallID != "call_1" || !strings.Contains(tool.Content, "empty tool result") {
+		t.Fatalf("tool result message = %+v, want explicit empty-result error", tool)
 	}
 }
 

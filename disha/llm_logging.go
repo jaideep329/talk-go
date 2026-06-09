@@ -51,16 +51,17 @@ func newLLMLogSink(api *APIClient, logger *log.Logger, usecaseType, userID, conv
 			requestPayload["tool_choice"] = c.Request.ToolChoice
 		}
 		responsePayload := map[string]any{
-			"content":       c.ResponseContent,
-			"completed":     c.Completed,
-			"status_code":   c.StatusCode,
-			"finish_reason": c.FinishReason,
-		}
-		if len(c.ToolCalls) > 0 {
-			responsePayload["tool_calls"] = c.ToolCalls
-			responsePayload["functions_list"] = toolCallNames(c.ToolCalls)
-			responsePayload["arguments_list"] = toolCallArguments(c.ToolCalls)
-			responsePayload["tool_id_list"] = toolCallIDs(c.ToolCalls)
+			"content":        c.ResponseContent,
+			"functions_list": toolCallNames(c.ToolCalls),
+			"arguments_list": toolCallArguments(c.ToolCalls),
+			"tool_id_list":   toolCallIDs(c.ToolCalls),
+			"usage": map[string]any{
+				"prompt_tokens":     c.PromptTokens,
+				"completion_tokens": c.CompletionTokens,
+				"total_tokens":      c.PromptTokens + c.CompletionTokens,
+			},
+			"completed":   c.Completed,
+			"status_code": c.StatusCode,
 		}
 		if c.ErrorMessage != "" {
 			responsePayload["error"] = map[string]any{

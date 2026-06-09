@@ -195,7 +195,7 @@ func (r *Router) Stream(ctx context.Context, llmReq vpc.LLMRequest, onToken func
 
 	firstToken := true
 	sawDone := false
-	toolCalls := newToolCallAccumulator()
+	toolCalls := vpc.NewToolCallAccumulator()
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for scanner.Scan() {
@@ -224,7 +224,7 @@ func (r *Router) Stream(ctx context.Context, llmReq vpc.LLMRequest, onToken func
 				res.TTFB = time.Since(start)
 			}
 			for _, delta := range toolDeltas {
-				toolCalls.add(delta.index, delta.call)
+				toolCalls.Add(delta.index, delta.call)
 			}
 		}
 		if content == "" {
@@ -240,7 +240,7 @@ func (r *Router) Stream(ctx context.Context, llmReq vpc.LLMRequest, onToken func
 
 	res.Total = time.Since(start)
 	res.Interrupted = ctx.Err() != nil
-	res.ToolCalls = toolCalls.list()
+	res.ToolCalls = toolCalls.List()
 
 	// Truncation diagnostics: a clean finish is finish_reason="stop"
 	// followed by [DONE]. Anything else on a non-interrupted turn means
@@ -361,51 +361,4 @@ func parseSSEChunk(line string) (content string, toolDeltas []toolCallDelta, fin
 		})
 	}
 	return delta.Content, toolDeltas, finishReason, usage, hasUsage, false, true
-}
-
-type toolCallAccumulator struct {
-	calls map[int]vpc.ToolCall
-	order []int
-}
-
-func newToolCallAccumulator() *toolCallAccumulator {
-	return &toolCallAccumulator{calls: make(map[int]vpc.ToolCall)}
-}
-
-func (a *toolCallAccumulator) add(index int, delta vpc.ToolCall) {
-	if a == nil {
-		return
-	}
-	call, ok := a.calls[index]
-	if !ok {
-		a.order = append(a.order, index)
-		call.Type = "function"
-	}
-	if delta.ID != "" {
-		call.ID = delta.ID
-	}
-	if delta.Type != "" {
-		call.Type = delta.Type
-	}
-	call.Function.Name += delta.Function.Name
-	call.Function.Arguments += delta.Function.Arguments
-	a.calls[index] = call
-}
-
-func (a *toolCallAccumulator) list() []vpc.ToolCall {
-	if a == nil || len(a.order) == 0 {
-		return nil
-	}
-	out := make([]vpc.ToolCall, 0, len(a.order))
-	for _, idx := range a.order {
-		call := a.calls[idx]
-		if call.Type == "" {
-			call.Type = "function"
-		}
-		if call.Function.Name == "" && call.Function.Arguments == "" {
-			continue
-		}
-		out = append(out, call)
-	}
-	return out
 }

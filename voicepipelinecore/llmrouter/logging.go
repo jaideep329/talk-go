@@ -3,6 +3,8 @@ package llmrouter
 import (
 	"strings"
 	"time"
+
+	vpc "github.com/jaideep329/talk-go/voicepipelinecore"
 )
 
 // CallLog is the per-call record handed to Config.LogSink after every
@@ -13,8 +15,9 @@ type CallLog struct {
 	Model            string
 	ConfigKey        string
 	Deployment       string
-	Messages         []map[string]string
+	Request          vpc.LLMRequest
 	ResponseContent  string
+	ToolCalls        []vpc.ToolCall
 	PromptTokens     int
 	CompletionTokens int
 	TTFBMs           float64

@@ -136,6 +136,14 @@ func (p *UserIdleProcessor) ProcessFrame(ctx context.Context, frame Frame, dir D
 		p.markActivity()
 		p.startIdleTimer()
 		// consumed upstream here
+	case FunctionCallInProgressFrame:
+		p.markActivity()
+		p.cancelIdleTimer()
+		p.PushFrame(frame, dir)
+	case FunctionCallResultFrame:
+		p.markActivity()
+		p.startIdleTimer()
+		p.PushFrame(frame, dir)
 	default:
 		p.PushFrame(frame, dir)
 	}

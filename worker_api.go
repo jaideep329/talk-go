@@ -106,8 +106,8 @@ func (r workerRoomRequest) validate() error {
 	return requireFields(fields...)
 }
 
-func (r workerRoomRequest) connectRequest() connectRequest {
-	return connectRequest{
+func (r workerRoomRequest) botTaskRequest() botTaskLaunchRequest {
+	return botTaskLaunchRequest{
 		ConversationID: r.ConversationID,
 		BotType:        r.BotWorkerType,
 		RoomURL:        r.RoomURL,
@@ -130,11 +130,10 @@ func runWorkerRoom(req workerRoomRequest) {
 	// call. This mirrors Python `BotWorkerManager.create_bot_task`
 	// which calls `set_safe_to_evict(pod_name, safe_to_evict=False)`
 	// right before launching the bot. It's idempotent with the pin done
-	// at reservation time and covers the direct `/connect` path, which
-	// never goes through mark_machine_reserved.
+	// at reservation time.
 	pinPodAgainstEviction()
 
-	task, err := prepareTask(context.Background(), req.connectRequest(), func(*voicepipelinecore.PipelineTask) {
+	task, err := prepareTask(context.Background(), req.botTaskRequest(), func(*voicepipelinecore.PipelineTask) {
 		unpinPodAfterCall()
 		finishWorkerAndQueueCleanup()
 	})

@@ -9,6 +9,8 @@ import (
 	"net/url"
 	"os"
 	"strings"
+
+	vpc "github.com/jaideep329/talk-go/voicepipelinecore"
 )
 
 // buildRequest assembles an OpenAI Chat-Completions streaming request
@@ -16,7 +18,7 @@ import (
 // only the base URL and auth header differ (Azure uses an api-key
 // header, everyone else uses Bearer). Grok models get the
 // reasoning-disabled extra field, matching custom_llm_service.py.
-func (r *Router) buildRequest(ctx context.Context, cfg endpointConfig, messages []map[string]string) (*http.Request, error) {
+func (r *Router) buildRequest(ctx context.Context, cfg endpointConfig, llmReq vpc.LLMRequest) (*http.Request, error) {
 	endpoint, err := r.completionsURL(cfg)
 	if err != nil {
 		return nil, err
@@ -26,8 +28,14 @@ func (r *Router) buildRequest(ctx context.Context, cfg endpointConfig, messages 
 		"model":          cfg.Model,
 		"stream":         true,
 		"stream_options": map[string]any{"include_usage": true},
-		"messages":       messages,
+		"messages":       llmReq.Messages,
 		"temperature":    r.temperatureFor(cfg),
+	}
+	if len(llmReq.Tools) > 0 {
+		body["tools"] = llmReq.Tools
+	}
+	if llmReq.ToolChoice != nil {
+		body["tool_choice"] = llmReq.ToolChoice
 	}
 	if cfg.MaxTokens != nil {
 		body["max_tokens"] = *cfg.MaxTokens

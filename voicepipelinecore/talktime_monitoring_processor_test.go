@@ -17,7 +17,7 @@ func TestTalkTime_TimerEmitsShutdownSequence(t *testing.T) {
 	down, _ := runProcessorTest(t, fix, runConfig{
 		processor: p,
 		framesToSend: []Frame{
-			LLMMessagesFrame{Messages: []map[string]string{{"role": "user", "content": "hi"}}},
+			LLMMessagesFrame{Messages: []Message{{Role: "user", Content: "hi"}}},
 		},
 		settleDelay:  250 * time.Millisecond,
 		sendEndFrame: false, // timer itself will emit EndFrame
@@ -81,7 +81,7 @@ func TestTalkTime_DropsDownstreamFramesDuringShutdown(t *testing.T) {
 	sink.Start(fix.RootCtx)
 
 	// Arm the timer by simulating a committed user turn.
-	source.QueueFrame(LLMMessagesFrame{Messages: []map[string]string{{"role": "user", "content": "hi"}}}, Downstream)
+	source.QueueFrame(LLMMessagesFrame{Messages: []Message{{Role: "user", Content: "hi"}}}, Downstream)
 
 	// Wait for timer to fire and shutdown sequence to emit.
 	time.Sleep(200 * time.Millisecond)

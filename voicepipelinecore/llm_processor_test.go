@@ -1,81 +1,27 @@
 package voicepipelinecore
 
 import (
-	"fmt"
-	"io"
-	"net/http"
-	"net/http/httptest"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 )
 
-// stubOpenAIServer returns an httptest.Server that responds to a
-// chat-completions POST with an SSE stream of the given content
-// chunks. blockUntil (if non-nil) blocks the response until it's
-// closed/sent on, simulating a slow LLM.
-func stubOpenAIServer(t *testing.T, chunks []string, blockUntil <-chan struct{}) *httptest.Server {
-	t.Helper()
-	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.WriteHeader(http.StatusOK)
-		flusher, _ := w.(http.Flusher)
-
-		writeChunk := func(content string) {
-			payload := fmt.Sprintf(`{"choices":[{"delta":{"content":%q}}]}`, content)
-			fmt.Fprintf(w, "data: %s\n\n", payload)
-			if flusher != nil {
-				flusher.Flush()
-			}
-		}
-
-		for i, c := range chunks {
-			if i == 1 && blockUntil != nil {
-				select {
-				case <-blockUntil:
-				case <-r.Context().Done():
-					return
-				}
-			}
-			writeChunk(c)
-			select {
-			case <-r.Context().Done():
-				return
-			default:
-			}
-		}
-		io.WriteString(w, "data: [DONE]\n\n")
-		if flusher != nil {
-			flusher.Flush()
-		}
-	}))
-	return s
-}
-
-// withLLMEndpoint sets llmEndpoint for the duration of the test.
-func withLLMEndpoint(t *testing.T, url string) {
-	t.Helper()
-	old := llmEndpoint
-	llmEndpoint = url
-	t.Cleanup(func() { llmEndpoint = old })
-}
-
 // TestLLM_StreamsTextFramesDownstream verifies a complete LLM run
 // produces LLMResponseStart → TextFrames → LLMResponseEnd downstream.
 func TestLLM_StreamsTextFramesDownstream(t *testing.T) {
-	server := stubOpenAIServer(t, []string{"hello ", "world"}, nil)
-	defer server.Close()
-	withLLMEndpoint(t, server.URL)
-
 	fix := newTestFixture(t)
-	p := NewLLMProcessor(fix.TaskCtx)
+	p := NewLLMProcessorWithClient(fix.TaskCtx, &stubLLMClient{
+		tokens: []string{"hello ", "world"},
+		model:  "test-model",
+	})
 
 	down, _ := runProcessorTest(t, fix, runConfig{
 		processor: p,
 		framesToSend: []Frame{
-			LLMMessagesFrame{Messages: []map[string]string{
-				{"role": "user", "content": "hi"},
+			LLMMessagesFrame{Messages: []Message{
+				{Role: "user", Content: "hi"},
 			}},
 		},
 		settleDelay:  200 * time.Millisecond,
@@ -105,22 +51,25 @@ func TestLLM_StreamsTextFramesDownstream(t *testing.T) {
 	}
 }
 
-// TestLLM_InterruptCancelsHTTP verifies an InterruptFrame cancels the
-// in-flight HTTP request and stops further TextFrames from being
+// TestLLM_InterruptCancelsClientStream verifies an InterruptFrame cancels the
+// in-flight LLM client stream and stops further TextFrames from being
 // emitted.
-func TestLLM_InterruptCancelsHTTP(t *testing.T) {
-	// Server emits one chunk, then waits for blockUntil before emitting
-	// the second. The test interrupts in between.
+func TestLLM_InterruptCancelsClientStream(t *testing.T) {
+	// Client emits one chunk, then waits before emitting the second. The
+	// test interrupts in between.
 	blockUntil := make(chan struct{})
 	var serverClosed sync.Once
 	defer serverClosed.Do(func() { close(blockUntil) })
 
-	server := stubOpenAIServer(t, []string{"first ", "second"}, blockUntil)
-	defer server.Close()
-	withLLMEndpoint(t, server.URL)
-
 	fix := newTestFixture(t)
-	p := NewLLMProcessor(fix.TaskCtx)
+	p := NewLLMProcessorWithClient(fix.TaskCtx, &stubLLMClient{
+		model: "test-model",
+		responses: []stubLLMResponse{{
+			tokens:                []string{"first ", "second"},
+			blockBeforeTokenIndex: 1,
+			blockUntil:            blockUntil,
+		}},
+	})
 
 	source := newQueueProcessor(fix.TaskCtx, "source", Upstream)
 	sink := newQueueProcessor(fix.TaskCtx, "sink", Downstream)
@@ -130,7 +79,7 @@ func TestLLM_InterruptCancelsHTTP(t *testing.T) {
 	p.Start(fix.RootCtx)
 	sink.Start(fix.RootCtx)
 
-	source.QueueFrame(LLMMessagesFrame{Messages: []map[string]string{{"role": "user", "content": "hi"}}}, Downstream)
+	source.QueueFrame(LLMMessagesFrame{Messages: []Message{{Role: "user", Content: "hi"}}}, Downstream)
 
 	// Wait for the first chunk to arrive.
 	deadline := time.Now().Add(2 * time.Second)
@@ -152,8 +101,8 @@ func TestLLM_InterruptCancelsHTTP(t *testing.T) {
 	source.QueueFrame(InterruptFrame{}, Downstream)
 	time.Sleep(100 * time.Millisecond)
 
-	// Now unblock the server. Any second chunk it emits should NOT reach
-	// the sink because the HTTP request context was cancelled.
+	// Now unblock the client. Any second chunk it emits should NOT reach
+	// the sink because the stream context was cancelled.
 	serverClosed.Do(func() { close(blockUntil) })
 	time.Sleep(100 * time.Millisecond)
 
@@ -177,13 +126,17 @@ func TestLLM_InterruptCancelsHTTP(t *testing.T) {
 // in-flight LLM request via the stored cancel func.
 func TestLLM_EndFrameCancelsInFlight(t *testing.T) {
 	blockUntil := make(chan struct{})
-	server := stubOpenAIServer(t, []string{"first ", "second"}, blockUntil)
-	defer server.Close()
 	defer close(blockUntil)
-	withLLMEndpoint(t, server.URL)
 
 	fix := newTestFixture(t)
-	p := NewLLMProcessor(fix.TaskCtx)
+	p := NewLLMProcessorWithClient(fix.TaskCtx, &stubLLMClient{
+		model: "test-model",
+		responses: []stubLLMResponse{{
+			tokens:                []string{"first ", "second"},
+			blockBeforeTokenIndex: 1,
+			blockUntil:            blockUntil,
+		}},
+	})
 
 	source := newQueueProcessor(fix.TaskCtx, "source", Upstream)
 	sink := newQueueProcessor(fix.TaskCtx, "sink", Downstream)
@@ -193,7 +146,7 @@ func TestLLM_EndFrameCancelsInFlight(t *testing.T) {
 	p.Start(fix.RootCtx)
 	sink.Start(fix.RootCtx)
 
-	source.QueueFrame(LLMMessagesFrame{Messages: []map[string]string{{"role": "user", "content": "hi"}}}, Downstream)
+	source.QueueFrame(LLMMessagesFrame{Messages: []Message{{Role: "user", Content: "hi"}}}, Downstream)
 
 	// Wait for the first chunk.
 	deadline := time.Now().Add(2 * time.Second)
@@ -229,10 +182,8 @@ func TestLLM_EndFrameCancelsInFlight(t *testing.T) {
 // behaviour for frames LLM doesn't specifically handle (e.g., upstream
 // frames going back to ContextAggregator).
 func TestLLM_PassesThroughOtherFrames(t *testing.T) {
-	withLLMEndpoint(t, "http://127.0.0.1:0/never-called")
-
 	fix := newTestFixture(t)
-	p := NewLLMProcessor(fix.TaskCtx)
+	p := NewLLMProcessorWithClient(fix.TaskCtx, &stubLLMClient{model: "test-model"})
 
 	// Push an upstream frame; should reach the source.
 	source := newQueueProcessor(fix.TaskCtx, "source", Upstream)
@@ -263,23 +214,19 @@ type stubLogger struct{}
 
 func (stubLogger) Write(p []byte) (int, error) { return len(p), nil }
 
-// TestLLM_HandlesServerError verifies LLM handles a failing HTTP
-// response gracefully (no panic, just no downstream tokens).
-func TestLLM_HandlesServerError(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-		io.WriteString(w, "{\"error\":\"boom\"}")
-	}))
-	defer server.Close()
-	withLLMEndpoint(t, server.URL)
-
+// TestLLM_HandlesClientError verifies LLM handles a client stream error
+// gracefully (no panic, just no downstream tokens).
+func TestLLM_HandlesClientError(t *testing.T) {
 	fix := newTestFixture(t)
-	p := NewLLMProcessor(fix.TaskCtx)
+	p := NewLLMProcessorWithClient(fix.TaskCtx, &stubLLMClient{
+		model: "test-model",
+		err:   errors.New("boom"),
+	})
 
 	down, _ := runProcessorTest(t, fix, runConfig{
 		processor: p,
 		framesToSend: []Frame{
-			LLMMessagesFrame{Messages: []map[string]string{{"role": "user", "content": "hi"}}},
+			LLMMessagesFrame{Messages: []Message{{Role: "user", Content: "hi"}}},
 		},
 		settleDelay:  200 * time.Millisecond,
 		sendEndFrame: true,
@@ -293,8 +240,7 @@ func TestLLM_HandlesServerError(t *testing.T) {
 		t.Errorf("expected no TextFrames on error response, got %d", c)
 	}
 
-	// Verify TextFrame logic doesn't leak: response shouldn't contain
-	// parsed content from the error body.
+	// Verify TextFrame logic doesn't leak the error message.
 	for _, f := range down {
 		if tf, ok := f.(TextFrame); ok {
 			if strings.Contains(tf.Text, "boom") {

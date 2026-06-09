@@ -15,6 +15,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	vpc "github.com/jaideep329/talk-go/voicepipelinecore"
 )
 
 // fakeRedis is an in-memory RedisStore for tests.
@@ -89,6 +91,12 @@ func (f *fakeRedis) setHealth(configKey string, blacklisted bool, latencies ...f
 }
 
 func ctx() context.Context { return context.Background() }
+
+func testLLMRequest() vpc.LLMRequest {
+	return vpc.LLMRequest{
+		Messages: []vpc.Message{{Role: "user", Content: "hi"}},
+	}
+}
 
 // --- selection ---
 
@@ -232,7 +240,7 @@ func TestBuildRequestGrok(t *testing.T) {
 	t.Setenv("GROK_4_1_FNR_EASTUS_ENDPOINT", "https://eastus.example.com/openai/v1")
 
 	r := &Router{cfg: Config{Group: groupGrokSales}, httpClient: &http.Client{}}
-	req, err := r.buildRequest(ctx(), endpointConfigs["grok_4_1_fnr_eastus"], []map[string]string{{"role": "user", "content": "hi"}})
+	req, err := r.buildRequest(ctx(), endpointConfigs["grok_4_1_fnr_eastus"], testLLMRequest())
 	if err != nil {
 		t.Fatalf("buildRequest: %v", err)
 	}
@@ -289,7 +297,7 @@ func TestBuildRequestAzureUsesApiKeyHeaderAndDeploymentPath(t *testing.T) {
 	t.Setenv("AZURE_OPENAI_US_EAST_ENDPOINT", "https://x.openai.azure.com")
 
 	r := &Router{cfg: Config{Group: groupGPT41}, httpClient: &http.Client{}}
-	req, err := r.buildRequest(ctx(), endpointConfigs["azure_gpt_4_1_us_east"], []map[string]string{{"role": "user", "content": "hi"}})
+	req, err := r.buildRequest(ctx(), endpointConfigs["azure_gpt_4_1_us_east"], testLLMRequest())
 	if err != nil {
 		t.Fatalf("buildRequest: %v", err)
 	}
@@ -306,6 +314,44 @@ func TestBuildRequestAzureUsesApiKeyHeaderAndDeploymentPath(t *testing.T) {
 	body := readBody(t, req)
 	if _, hasReasoning := body["reasoning"]; hasReasoning {
 		t.Error("gpt-4.1 must not carry the grok reasoning field")
+	}
+}
+
+func TestBuildRequestIncludesTools(t *testing.T) {
+	t.Setenv("GROK_4_1_FNR_EASTUS_API_KEY", "grok-key")
+	t.Setenv("GROK_4_1_FNR_EASTUS_ENDPOINT", "https://eastus.example.com/openai/v1")
+
+	r := &Router{cfg: Config{Group: groupGrokSales}, httpClient: &http.Client{}}
+	req, err := r.buildRequest(ctx(), endpointConfigs["grok_4_1_fnr_eastus"], vpc.LLMRequest{
+		Messages: []vpc.Message{{Role: "user", Content: "hi"}},
+		Tools: []vpc.ToolDefinition{{
+			Type: "function",
+			Function: vpc.ToolFunction{
+				Name:        "get_guidance",
+				Description: "Fetch guidance for the next turn.",
+				Parameters:  map[string]any{"type": "object"},
+			},
+		}},
+		ToolChoice: "auto",
+	})
+	if err != nil {
+		t.Fatalf("buildRequest: %v", err)
+	}
+	body := readBody(t, req)
+	if body["tool_choice"] != "auto" {
+		t.Fatalf("tool_choice = %v, want auto", body["tool_choice"])
+	}
+	tools, ok := body["tools"].([]any)
+	if !ok || len(tools) != 1 {
+		t.Fatalf("tools = %#v, want one tool definition", body["tools"])
+	}
+	tool, ok := tools[0].(map[string]any)
+	if !ok || tool["type"] != "function" {
+		t.Fatalf("tool = %#v, want function tool", tools[0])
+	}
+	fn, ok := tool["function"].(map[string]any)
+	if !ok || fn["name"] != "get_guidance" {
+		t.Fatalf("function = %#v, want get_guidance", tool["function"])
 	}
 }
 
@@ -354,6 +400,47 @@ func sseServer(t *testing.T, contents []string) *httptest.Server {
 	}))
 }
 
+func TestParseSSEChunkToolCallFragments(t *testing.T) {
+	acc := vpc.NewToolCallAccumulator()
+	lines := []string{
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"get_","arguments":"{\"situation\""}}]}}]}`,
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"guidance","arguments":":\"pain\"}"}}]},"finish_reason":"tool_calls"}]}`,
+	}
+
+	var finishReason string
+	for _, line := range lines {
+		content, deltas, fr, _, _, _, ok := parseSSEChunk(line)
+		if !ok {
+			t.Fatalf("parseSSEChunk(%s) returned ok=false", line)
+		}
+		if content != "" {
+			t.Fatalf("content = %q, want no text delta", content)
+		}
+		if fr != "" {
+			finishReason = fr
+		}
+		for _, delta := range deltas {
+			acc.Add(delta.index, delta.call)
+		}
+	}
+	calls := acc.List()
+	if len(calls) != 1 {
+		t.Fatalf("tool calls = %+v, want one call", calls)
+	}
+	if calls[0].ID != "call_1" || calls[0].Type != "function" {
+		t.Fatalf("call metadata = %+v, want id call_1 function", calls[0])
+	}
+	if calls[0].Function.Name != "get_guidance" {
+		t.Fatalf("function name = %q, want get_guidance", calls[0].Function.Name)
+	}
+	if calls[0].Function.Arguments != `{"situation":"pain"}` {
+		t.Fatalf("arguments = %q, want situation pain JSON", calls[0].Function.Arguments)
+	}
+	if finishReason != "tool_calls" {
+		t.Fatalf("finish reason = %q, want tool_calls", finishReason)
+	}
+}
+
 func TestStreamSuccessAndLog(t *testing.T) {
 	server := sseServer(t, []string{"foo ", "bar"})
 	defer server.Close()
@@ -370,7 +457,7 @@ func TestStreamSuccessAndLog(t *testing.T) {
 	}
 
 	var tokens []string
-	res, err := r.Stream(ctx(), []map[string]string{{"role": "user", "content": "hi"}}, func(tok string) {
+	res, err := r.Stream(ctx(), testLLMRequest(), func(tok string) {
 		tokens = append(tokens, tok)
 	})
 	if err != nil {
@@ -424,7 +511,7 @@ func TestStreamErrorBlacklistsAndTriggersPoll(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	_, streamErr := r.Stream(ctx(), []map[string]string{{"role": "user", "content": "hi"}}, func(string) {})
+	_, streamErr := r.Stream(ctx(), testLLMRequest(), func(string) {})
 	if streamErr == nil {
 		t.Fatal("expected a stream error on 500")
 	}

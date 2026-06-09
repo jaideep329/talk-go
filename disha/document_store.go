@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/jaideep329/talk-go/internal/sentryutil"
 )
 
 const (
@@ -35,9 +37,10 @@ type DocumentVersion struct {
 // The store keeps a per-process in-memory cache to avoid touching
 // Redis once a prompt has been resolved. TTL matches Python (20 min).
 type DocumentStore struct {
-	redis  RedisClient
-	logger *log.Logger
-	env    string
+	redis    RedisClient
+	logger   *log.Logger
+	env      string
+	renderer TemplateRenderer
 
 	mu    sync.Mutex
 	cache map[string]documentCacheEntry
@@ -53,14 +56,19 @@ type documentCacheEntry struct {
 //   - ENVIRONMENT in {"staging", "dev"} → key suffix "latest"
 //   - anything else                     → key suffix "production"
 func NewDocumentStore(redis RedisClient, logger *log.Logger) *DocumentStore {
+	return newDocumentStore(redis, logger, NewPythonJinjaRenderer(logger))
+}
+
+func newDocumentStore(redis RedisClient, logger *log.Logger, renderer TemplateRenderer) *DocumentStore {
 	if redis == nil {
 		return nil
 	}
 	return &DocumentStore{
-		redis:  redis,
-		logger: logger,
-		env:    resolveDocumentEnvironment(),
-		cache:  make(map[string]documentCacheEntry),
+		redis:    redis,
+		logger:   logger,
+		env:      resolveDocumentEnvironment(),
+		renderer: renderer,
+		cache:    make(map[string]documentCacheEntry),
 	}
 }
 
@@ -77,25 +85,66 @@ func resolveDocumentEnvironment() string {
 // when version != 0) and renders it with the provided variables.
 // Returns the rendered text and the resolved version (useful for
 // pinning system_message_prompt_key on chunks).
-func (s *DocumentStore) GetDocument(ctx context.Context, name string, version int, variables map[string]string) (string, int, error) {
+func (s *DocumentStore) GetDocument(ctx context.Context, name string, version int, variables DocumentVariables) (string, int, error) {
 	if s == nil {
 		return "", 0, errors.New("disha: document store is nil")
+	}
+	if s.renderer == nil {
+		return "", 0, errors.New("disha: document renderer is nil")
 	}
 	doc, err := s.resolve(ctx, name, version)
 	if err != nil {
 		return "", 0, err
 	}
-	rendered := renderTemplate(doc.PromptText, variables)
-	// renderTemplate only understands bare `{{ var }}` references. If the
-	// prompt carries Jinja2 logic (`{% if %}`, filters) or a variable we
-	// didn't supply, those tokens survive untouched and would ship into
-	// the LLM system prompt silently. Surface that instead of hiding it.
+	rendered, err := s.renderer.Render(ctx, TemplateRenderRequest{
+		DocumentName:    name,
+		DocumentVersion: doc.Version,
+		Text:            doc.PromptText,
+		Variables:       variables,
+	})
+	if err != nil {
+		return "", 0, err
+	}
 	if s.logger != nil {
-		if leftover := unresolvedTemplateTokens(rendered); leftover != "" {
-			s.logger.Printf("disha: document %q (version=%d) has unresolved template tokens after render: %s\n", name, doc.Version, leftover)
+		if rendered.UndefinedError != "" {
+			s.logger.Printf("disha: document %q (version=%d) has undefined jinja variables after strict validation: %s missing=%v\n", name, doc.Version, rendered.UndefinedError, rendered.CompileTimeMissingVars)
+		} else if len(rendered.CompileTimeMissingVars) > 0 {
+			s.logger.Printf("disha: document %q (version=%d) has compile-time missing jinja variables: %v\n", name, doc.Version, rendered.CompileTimeMissingVars)
+		}
+		if rendered.StrictValidationError != "" {
+			s.logger.Printf("disha: document %q (version=%d) strict jinja validation warning: %s\n", name, doc.Version, rendered.StrictValidationError)
 		}
 	}
-	return rendered, doc.Version, nil
+	reportMissingJinjaVariables(name, doc.Version, rendered, variables)
+	return rendered.Output, doc.Version, nil
+}
+
+func reportMissingJinjaVariables(name string, version int, rendered TemplateRenderResult, variables DocumentVariables) {
+	if rendered.UndefinedError == "" && len(rendered.CompileTimeMissingVars) == 0 {
+		return
+	}
+	supplied := make([]string, 0, len(variables))
+	for key := range variables {
+		supplied = append(supplied, key)
+	}
+	sort.Strings(supplied)
+	sentryutil.Capture(sentryutil.Event{
+		Message: fmt.Sprintf("Undefined Jinja variables in document %q v%d", name, version),
+		Tags: map[string]string{
+			"component":        "disha_document_store",
+			"operation":        "render_jinja",
+			"document_name":    name,
+			"document_version": fmt.Sprintf("%d", version),
+		},
+		Details: map[string]any{
+			"document_name":                  name,
+			"document_version":               version,
+			"runtime_missing_variable":       rendered.UndefinedError,
+			"compile_time_missing_variables": rendered.CompileTimeMissingVars,
+			"strict_validation_error":        rendered.StrictValidationError,
+			"supplied_variables":             supplied,
+		},
+	})
 }
 
 func (s *DocumentStore) resolve(ctx context.Context, name string, version int) (DocumentVersion, error) {
@@ -169,39 +218,9 @@ func PromptKey(name string, version int) string {
 	return fmt.Sprintf("%s_v%d", name, version)
 }
 
-// renderTemplate does a minimal `{{ var }}` substitution. Disha's
-// prompts go through full Jinja2 in Python, but the sales-call surface
-// only uses bare variable references (`{{ patient_info }}`,
-// `{{ current_datetime }}`). If a prompt later starts using
-// conditionals or filters we'll need to either swap to a richer engine
-// or pre-render server-side and store the rendered prompt in Redis.
-var templateVarRe = regexp.MustCompile(`\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}`)
-
-// templateLeftoverRe matches anything that still looks like a Jinja2
-// tag after substitution: an unfilled `{{ ... }}` variable or a `{% %}`
-// control block we don't render.
-var templateLeftoverRe = regexp.MustCompile(`\{\{[^}]*\}\}|\{%[^%]*%\}`)
-
-// unresolvedTemplateTokens returns a short, comma-joined sample of any
-// surviving template tokens (capped so a pathological prompt can't
-// flood the log), or "" when the render is clean.
-func unresolvedTemplateTokens(text string) string {
-	matches := templateLeftoverRe.FindAllString(text, 5)
-	if len(matches) == 0 {
-		return ""
+func (s *DocumentStore) Close() error {
+	if s == nil || s.renderer == nil {
+		return nil
 	}
-	return strings.Join(matches, ", ")
-}
-
-func renderTemplate(text string, variables map[string]string) string {
-	if text == "" || len(variables) == 0 {
-		return text
-	}
-	return templateVarRe.ReplaceAllStringFunc(text, func(match string) string {
-		name := templateVarRe.FindStringSubmatch(match)[1]
-		if val, ok := variables[name]; ok {
-			return val
-		}
-		return match
-	})
+	return s.renderer.Close()
 }

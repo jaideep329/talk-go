@@ -49,6 +49,9 @@ type Config struct {
 	// router invokes it on a detached goroutine (best-effort), so the
 	// sink must not block the call. Used to enqueue Disha's LLM logging.
 	LogSink func(CallLog)
+	// PromptMetadata is static per bot prompt/context and is forwarded
+	// to the log sink without putting prompt concerns into voicepipelinecore.
+	PromptMetadata map[string]any
 }
 
 // Router implements voicepipelinecore.LLMClient with health-based
@@ -135,6 +138,7 @@ func (r *Router) Stream(ctx context.Context, llmReq vpc.LLMRequest, onToken func
 			Request:          llmReq,
 			ResponseContent:  responseContent.String(),
 			ToolCalls:        res.ToolCalls,
+			PromptMetadata:   r.cfg.PromptMetadata,
 			PromptTokens:     usage.PromptTokens,
 			CompletionTokens: usage.CompletionTokens,
 			TTFBMs:           msFromDuration(res.TTFB),

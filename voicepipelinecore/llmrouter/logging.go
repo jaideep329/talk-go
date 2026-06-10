@@ -18,6 +18,7 @@ type CallLog struct {
 	Request          vpc.LLMRequest
 	ResponseContent  string
 	ToolCalls        []vpc.ToolCall
+	PromptMetadata   map[string]any
 	PromptTokens     int
 	CompletionTokens int
 	TTFBMs           float64

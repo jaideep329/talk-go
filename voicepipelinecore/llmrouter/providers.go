@@ -48,6 +48,9 @@ func (r *Router) buildRequest(ctx context.Context, cfg endpointConfig, llmReq vp
 	for k, v := range extraBodyFor(cfg) {
 		body[k] = v
 	}
+	for k, v := range cfg.ExtraBody {
+		body[k] = v
+	}
 
 	payload, err := json.Marshal(body)
 	if err != nil {
@@ -106,7 +109,7 @@ func (r *Router) baseURL(cfg endpointConfig) (string, error) {
 		return v, nil
 	case providerOpenAI:
 		return "https://api.openai.com/v1", nil
-	case providerOpenRouter, providerGoogleAIStudio:
+	case providerOpenRouter, providerGoogleAIStudio, providerCerebras:
 		if cfg.BaseURL == "" {
 			return "", fmt.Errorf("llmrouter: missing base URL for %s", cfg.Key)
 		}
@@ -120,9 +123,9 @@ func (r *Router) baseURL(cfg endpointConfig) (string, error) {
 
 func (r *Router) apiKeyFor(ctx context.Context, cfg endpointConfig) (string, error) {
 	if cfg.Provider == providerVertex {
-		// Process-wide token source; lazily loads the service-account key
-		// from S3 (VERTEX_DISHAAI_CREDS_FILE) on first use.
-		return sharedVertexTokenSource().Token(ctx)
+		// Process-wide per-credential token source; lazily loads the
+		// service-account key from S3 on first use.
+		return vertexTokenSourceForEnv(vertexCredsEnvForConfig(cfg)).Token(ctx)
 	}
 	key := os.Getenv(cfg.APIKeyEnv)
 	if key == "" {

@@ -188,7 +188,7 @@ spec:
         SELECT COUNT(*) FROM gkeworkermachines
         WHERE deployment_name = '$GKE_DEPLOYMENT_NAME'
         AND status IN ('active', 'reserved', 'provisioning')
-      )"
+      ))"
       targetQueryValue: "0.95"  # Divides result by 10 to get actual replica count
       activationQueryValue: "0"  # Always active
       connectionFromEnv: POSTGRESQL_CONNECTION_STRING

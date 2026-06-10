@@ -2,6 +2,7 @@ package disha
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -74,10 +75,10 @@ func collectCallStartup(ctx context.Context, conversationID, expectedBotType str
 	}, nil
 }
 
-// messageFromChunkTuple mirrors the chunk-replay filter in
-// sales_call.py: a chunk becomes an LLM message iff it is not a debug
-// log and carries no additional_data (function-call payloads). Role and
-// text are taken verbatim — Python applies no further filtering.
+// messageFromChunkTuple mirrors Python's chunk replay behavior for normal
+// transcript chunks: unknown additional_data is skipped. Tool context chunks
+// use the same additional_data shape as Disha's Python onboarding pipeline:
+// assistant chunks carry `tool_calls`; tool chunks carry `tool_call_id`.
 func messageFromChunkTuple(tuple []any) (voicepipelinecore.Message, bool) {
 	if len(tuple) < 4 {
 		return voicepipelinecore.Message{}, false
@@ -88,12 +89,38 @@ func messageFromChunkTuple(tuple []any) (voicepipelinecore.Message, bool) {
 	if isDebug {
 		return voicepipelinecore.Message{}, false
 	}
-	// Python's `if additional_data: continue` — skip only when the value
-	// is truthy, so an absent/null/empty payload still replays the turn.
+	// Python's `if additional_data: continue` — skip unknown truthy metadata,
+	// but replay the explicit OpenAI-format tool context chunks that Go writes
+	// for cross-call resume.
 	if len(tuple) >= 5 && isTruthyJSON(tuple[4]) {
+		if msg, ok := messageFromToolContextChunk(role, text, tuple[4]); ok {
+			return msg, true
+		}
 		return voicepipelinecore.Message{}, false
 	}
 	return voicepipelinecore.Message{Role: role, Content: text}, true
+}
+
+func messageFromToolContextChunk(role, text string, additionalData any) (voicepipelinecore.Message, bool) {
+	data, ok := additionalData.(map[string]any)
+	if !ok {
+		return voicepipelinecore.Message{}, false
+	}
+	if toolCallsData, ok := data["tool_calls"]; ok {
+		raw, err := json.Marshal(toolCallsData)
+		if err != nil {
+			return voicepipelinecore.Message{}, false
+		}
+		var toolCalls []voicepipelinecore.ToolCall
+		if err := json.Unmarshal(raw, &toolCalls); err != nil || len(toolCalls) == 0 {
+			return voicepipelinecore.Message{}, false
+		}
+		return voicepipelinecore.Message{Role: role, ToolCalls: toolCalls}, true
+	}
+	if toolCallID, ok := data["tool_call_id"].(string); ok && toolCallID != "" {
+		return voicepipelinecore.Message{Role: role, Content: text, ToolCallID: toolCallID}, true
+	}
+	return voicepipelinecore.Message{}, false
 }
 
 // isTruthyJSON reports whether a JSON-decoded value is "truthy" in the
@@ -136,6 +163,7 @@ func buildInitialMessages(systemPrompt string, chunks [][]any, resumeMessage str
 			msgs = append(msgs, msg)
 		}
 	}
+	msgs = reorderToolResultMessages(msgs)
 	hasPriorTurns := len(msgs) > 1
 	if hasPriorTurns && resumeMessage != "" {
 		msgs = append(msgs, voicepipelinecore.Message{Role: "system", Content: resumeMessage})
@@ -144,6 +172,51 @@ func buildInitialMessages(systemPrompt string, chunks [][]any, resumeMessage str
 		msgs = append(msgs, voicepipelinecore.Message{Role: "user", Content: "hello?"})
 	}
 	return msgs
+}
+
+// reorderToolResultMessages mirrors onboarding_call/conversation_context_manager.py:
+// tool responses are replayed immediately after the assistant message that
+// requested them, even if storage returns those chunks in a different order.
+func reorderToolResultMessages(msgs []voicepipelinecore.Message) []voicepipelinecore.Message {
+	if len(msgs) == 0 {
+		return nil
+	}
+	nonToolMessages := make([]voicepipelinecore.Message, 0, len(msgs))
+	toolMessagesByID := make(map[string][]voicepipelinecore.Message)
+	toolIDOrder := make([]string, 0)
+	for _, msg := range msgs {
+		if msg.Role != "tool" || msg.ToolCallID == "" {
+			nonToolMessages = append(nonToolMessages, msg)
+			continue
+		}
+		if _, exists := toolMessagesByID[msg.ToolCallID]; !exists {
+			toolIDOrder = append(toolIDOrder, msg.ToolCallID)
+		}
+		toolMessagesByID[msg.ToolCallID] = append(toolMessagesByID[msg.ToolCallID], msg)
+	}
+	if len(toolMessagesByID) == 0 {
+		return msgs
+	}
+
+	ordered := make([]voicepipelinecore.Message, 0, len(msgs))
+	for _, msg := range nonToolMessages {
+		ordered = append(ordered, msg)
+		for _, toolCall := range msg.ToolCalls {
+			if toolCall.ID == "" {
+				continue
+			}
+			if toolMessages, ok := toolMessagesByID[toolCall.ID]; ok {
+				ordered = append(ordered, toolMessages...)
+				delete(toolMessagesByID, toolCall.ID)
+			}
+		}
+	}
+	for _, toolCallID := range toolIDOrder {
+		if toolMessages, ok := toolMessagesByID[toolCallID]; ok {
+			ordered = append(ordered, toolMessages...)
+		}
+	}
+	return ordered
 }
 
 // buildResumeSystemMessage reproduces fetch_conversation.py's

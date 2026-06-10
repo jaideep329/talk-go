@@ -180,39 +180,45 @@ func (a *ContextAggregator) addUserMessage(text string) {
 	}
 }
 
-func (a *ContextAggregator) addFunctionCallInProgress(f FunctionCallInProgressFrame) {
-	rawArgs := f.RawArguments
+func toolCallFromFunctionFrame(functionName, toolCallID string, arguments map[string]any, rawArguments string) ToolCall {
+	rawArgs := rawArguments
 	if rawArgs == "" {
 		rawArgs = "{}"
-		if len(f.Arguments) > 0 {
-			if encoded, err := json.Marshal(f.Arguments); err == nil {
+		if len(arguments) > 0 {
+			if encoded, err := json.Marshal(arguments); err == nil {
 				rawArgs = string(encoded)
 			}
 		}
 	}
-	toolCall := ToolCall{
-		ID:   f.ToolCallID,
+	return ToolCall{
+		ID:   toolCallID,
 		Type: "function",
 		Function: ToolCallFunction{
-			Name:      f.FunctionName,
+			Name:      functionName,
 			Arguments: rawArgs,
 		},
 	}
+}
+
+func assistantToolCallMessageFromFrame(functionName, toolCallID string, arguments map[string]any, rawArguments string) Message {
+	toolCall := toolCallFromFunctionFrame(functionName, toolCallID, arguments, rawArguments)
+	return Message{
+		Role:      "assistant",
+		ToolCalls: []ToolCall{toolCall},
+	}
+}
+
+func (a *ContextAggregator) addFunctionCallInProgress(f FunctionCallInProgressFrame) {
+	assistantToolCall := assistantToolCallMessageFromFrame(f.FunctionName, f.ToolCallID, f.Arguments, f.RawArguments)
 	toolMessage := Message{
 		Role:       "tool",
 		Content:    "IN_PROGRESS",
 		ToolCallID: f.ToolCallID,
 	}
-	a.messages = append(a.messages,
-		Message{
-			Role:      "assistant",
-			ToolCalls: []ToolCall{toolCall},
-		},
-		toolMessage,
-	)
+	a.messages = append(a.messages, assistantToolCall, toolMessage)
 }
 
-func (a *ContextAggregator) applyFunctionCallResult(f FunctionCallResultFrame) {
+func (a *ContextAggregator) applyFunctionCallResult(f FunctionCallResultFrame) (Message, Message) {
 	result := strings.TrimSpace(f.Result)
 	if result == "" {
 		err := errors.New("empty tool result")
@@ -230,18 +236,21 @@ func (a *ContextAggregator) applyFunctionCallResult(f FunctionCallResultFrame) {
 		})
 		result = toolErrorResultString(err.Error())
 	}
+	assistantToolCall := assistantToolCallMessageFromFrame(f.FunctionName, f.ToolCallID, f.Arguments, f.RawArguments)
+	toolResult := Message{
+		Role:       "tool",
+		Content:    result,
+		ToolCallID: f.ToolCallID,
+	}
 	for i := len(a.messages) - 1; i >= 0; i-- {
 		msg := &a.messages[i]
 		if msg.Role == "tool" && msg.ToolCallID == f.ToolCallID {
 			msg.Content = result
-			return
+			return assistantToolCall, toolResult
 		}
 	}
-	a.messages = append(a.messages, Message{
-		Role:       "tool",
-		Content:    result,
-		ToolCallID: f.ToolCallID,
-	})
+	a.messages = append(a.messages, toolResult)
+	return assistantToolCall, toolResult
 }
 
 func (a *ContextAggregator) submitUserMessage(text string) {
@@ -291,7 +300,10 @@ func (a *ContextAggregator) ProcessFrame(ctx context.Context, frame Frame, dir D
 		a.PushFrame(f, Upstream)
 	case FunctionCallResultFrame:
 		a.taskCtx.Logger.Printf("Function call result: %s tool_call_id=%s run_llm=%v\n", f.FunctionName, f.ToolCallID, f.RunLLM)
-		a.applyFunctionCallResult(f)
+		assistantToolCall, toolResult := a.applyFunctionCallResult(f)
+		if a.taskCtx.callEvents != nil {
+			a.taskCtx.callEvents.fireToolResultCommitted(assistantToolCall, toolResult, time.Now())
+		}
 		a.PushFrame(f, Upstream)
 		if f.RunLLM {
 			a.PushFrame(NewLLMMessagesFrame(cloneMessages(a.messages)), Downstream)

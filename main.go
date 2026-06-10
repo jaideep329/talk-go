@@ -185,6 +185,7 @@ func newDishaDeps() disha.Deps {
 		API:          disha.NewAPIClient(firstNonEmpty(os.Getenv("DISHA_API_URL"), os.Getenv("API_BASE_URL")), 10*time.Second, logger),
 		Documents:    disha.NewDocumentStore(redis, logger),
 		PhoneticDict: phonetic,
+		S3:           disha.NewS3GetClientFromEnv(logger, "AWS_BUCKET_NAME"),
 		GKEPatcher:   disha.NewGKEPodPatcher(logger),
 	}
 }

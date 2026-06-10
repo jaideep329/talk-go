@@ -12,7 +12,7 @@
 //
 // This is the Go port of Disha's bots/onboarding_call/custom_llm_service.py
 // + bots/llm_switching_service.py + services/openai_config_manager.py,
-// scoped to the model groups the sales call needs.
+// scoped to the model groups the Disha call bots need.
 package llmrouter
 
 // provider identifies how to build the HTTP request and auth header for
@@ -28,6 +28,7 @@ const (
 	providerVertex         provider = "vertex"
 	providerOpenRouter     provider = "openrouter"
 	providerGoogleAIStudio provider = "google_ai_studio"
+	providerCerebras       provider = "cerebras"
 )
 
 // endpointConfig is one selectable LLM endpoint. The Key must match the
@@ -52,26 +53,38 @@ type endpointConfig struct {
 	// account (see vertex_token.go).
 	VertexProject  string
 	VertexLocation string
+	VertexCredsEnv string
 
 	// Temperature/MaxTokens override the router default when non-nil.
 	Temperature *float64
 	MaxTokens   *int
+
+	// ExtraBody holds provider/model-specific top-level request fields
+	// that Python passes via the OpenAI SDK's extra_body argument.
+	ExtraBody map[string]any
 }
 
 // modelGroup is an ordered set of interchangeable endpoints plus a
 // last-resort fallback config key.
 type modelGroup struct {
-	Configs  []string
-	Fallback string
+	Configs       []string
+	Fallback      string
+	FallbackGroup string
 }
 
 const (
-	groupGrokSales = "grok-4.1-fast-sales"
-	groupGPT41     = "gpt-4.1" // the cross-group fallback target (FALLBACK_MODEL_GROUP)
+	groupGrokSales       = "grok-4.1-fast-sales"
+	groupGPT41           = "gpt-4.1" // the sales cross-group fallback target.
+	groupGemini31        = "gemini-flash-3.1-lite"
+	groupFollowUpDynamic = "followup-dynamic-gemma"
+	groupGPTOSS120Fast   = "gpt-oss120-fast"
 
 	grokModel  = "grok-4-1-fast-non-reasoning"
 	gpt41Model = "gpt-4.1"
 )
+
+func floatPtr(v float64) *float64 { return &v }
+func intPtr(v int) *int           { return &v }
 
 // endpointConfigs is the Go port of OPEN_AI_MODEL_CONFIG, scoped to the
 // configs reachable from the sales model group and its gpt-4.1 fallback.
@@ -142,12 +155,59 @@ var endpointConfigs = map[string]endpointConfig{
 		Key: "openai_gpt_4_1_priority", Provider: providerOpenAI, Model: gpt41Model, Region: "us",
 		APIKeyEnv: "OPENAI_PRIORITY_API_KEY",
 	},
+
+	// --- gemini-flash-3.1-lite follow-up group ---
+	"vertex_gemini_flash_3_1_lite": {
+		Key: "vertex_gemini_flash_3_1_lite", Provider: providerVertex,
+		Model: "google/gemini-3.1-flash-lite", Region: "us",
+		VertexProject: "disha-ai2", VertexLocation: "global", VertexCredsEnv: "VERTEX_DISHA_AI2_CREDS_FILE",
+	},
+	"google_ai_studio_gemini_flash_3_1_lite": {
+		Key: "google_ai_studio_gemini_flash_3_1_lite", Provider: providerGoogleAIStudio,
+		Model: "gemini-3.1-flash-lite", Region: "us",
+		APIKeyEnv: "GEMINI_API_KEY_DISHAAI2", BaseURL: "https://generativelanguage.googleapis.com/v1beta/openai/",
+	},
+	"openrouter_gemini_flash_3_1_lite": {
+		Key: "openrouter_gemini_flash_3_1_lite", Provider: providerOpenRouter,
+		Model: "google/gemini-3.1-flash-lite", Region: "us",
+		APIKeyEnv: "OPENROUTER_API_KEY", BaseURL: "https://openrouter.ai/api/v1",
+	},
+
+	// --- follow-up dynamic treatment main model (no health switching in Python) ---
+	"openrouter_gemma_4_26b_a4b_it_nitro": {
+		Key: "openrouter_gemma_4_26b_a4b_it_nitro", Provider: providerOpenRouter,
+		Model: "google/gemma-4-26b-a4b-it:nitro", Region: "us",
+		APIKeyEnv: "OPENROUTER_API_KEY", BaseURL: "https://openrouter.ai/api/v1",
+		Temperature: floatPtr(0.5),
+		ExtraBody: map[string]any{
+			"provider": map[string]any{
+				"order":           []string{"deepinfra/fp8", "cloudflare", "parasail/bf16"},
+				"only":            []string{"deepinfra/fp8", "cloudflare", "parasail/bf16"},
+				"ignore":          []string{"google-ai-studio", "google-vertex", "novita"},
+				"allow_fallbacks": true,
+			},
+		},
+	},
+
+	// --- follow-up get_guidance tool failover endpoints ---
+	"cerebras_gpt_oss_120b": {
+		Key: "cerebras_gpt_oss_120b", Provider: providerCerebras,
+		Model: "gpt-oss-120b", Region: "us",
+		APIKeyEnv: "CEREBRAS_ENTERPRISE_API_KEY", BaseURL: "https://api.cerebras.ai/v1",
+		MaxTokens: intPtr(500),
+	},
+	"openrouter_gpt_oss_120b": {
+		Key: "openrouter_gpt_oss_120b", Provider: providerOpenRouter,
+		Model: "openai/gpt-oss-120b", Region: "us",
+		APIKeyEnv: "OPENROUTER_API_KEY", BaseURL: "https://openrouter.ai/api/v1",
+		MaxTokens: intPtr(500),
+	},
 }
 
-// modelGroups is the Go port of MODEL_GROUPS, scoped to what the sales
-// call needs. The Vertex grok config is a first-class member of the
-// sales group, so it participates in normal health-based selection
-// (mirrors Python, where it is the most stable endpoint).
+// modelGroups is the Go port of MODEL_GROUPS for the Disha call bots.
+// The Vertex grok config is a first-class member of the sales group, so
+// it participates in normal health-based selection (mirrors Python,
+// where it is the most stable endpoint).
 var modelGroups = map[string]modelGroup{
 	groupGrokSales: {
 		Configs: []string{
@@ -158,7 +218,8 @@ var modelGroups = map[string]modelGroup{
 			"grok_4_1_fnr_westcentralus",
 			"vertex_dishaai_grok_4_1_fast_non_reasoning",
 		},
-		Fallback: "vertex_dishaai_grok_4_1_fast_non_reasoning",
+		Fallback:      "vertex_dishaai_grok_4_1_fast_non_reasoning",
+		FallbackGroup: groupGPT41,
 	},
 	groupGPT41: {
 		Configs: []string{
@@ -174,11 +235,26 @@ var modelGroups = map[string]modelGroup{
 		},
 		Fallback: "openai_gpt_4_1_priority",
 	},
+	groupGemini31: {
+		Configs: []string{
+			"vertex_gemini_flash_3_1_lite",
+			"google_ai_studio_gemini_flash_3_1_lite",
+			"openrouter_gemini_flash_3_1_lite",
+		},
+		Fallback: "openrouter_gemini_flash_3_1_lite",
+	},
+	groupFollowUpDynamic: {
+		Configs:  []string{"openrouter_gemma_4_26b_a4b_it_nitro"},
+		Fallback: "openrouter_gemma_4_26b_a4b_it_nitro",
+	},
+	groupGPTOSS120Fast: {
+		Configs: []string{
+			"cerebras_gpt_oss_120b",
+			"openrouter_gpt_oss_120b",
+		},
+		Fallback: "openrouter_gpt_oss_120b",
+	},
 }
-
-// fallbackModelGroup is FALLBACK_MODEL_GROUP from Python: when a group
-// has no available endpoints, selection falls back to this group.
-const fallbackModelGroup = groupGPT41
 
 // groupConfigsForRegion returns the configs in a group filtered by
 // region, mirroring LLMSwitchingService.get_model_configs_for_group.

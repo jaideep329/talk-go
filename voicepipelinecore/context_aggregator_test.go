@@ -336,6 +336,52 @@ func TestContextAggregator_EmptyFunctionResultPushesError(t *testing.T) {
 	}
 }
 
+func TestContextAggregator_EmitsToolResultCallEvent(t *testing.T) {
+	fix := newTestFixture(t)
+	var assistantToolCalls []Message
+	var toolResults []Message
+	fix.TaskCtx.callEvents = newCallEventDispatcher(fix.Logger, CallEvents{
+		OnToolResultCommitted: func(assistantToolCall Message, toolResult Message, at time.Time) {
+			assistantToolCalls = append(assistantToolCalls, assistantToolCall)
+			toolResults = append(toolResults, toolResult)
+		},
+	})
+	a := NewContextAggregator(fix.TaskCtx, []Message{{Role: "system", Content: "prompt"}}, "")
+
+	source := newQueueProcessor(fix.TaskCtx, "test-source", Upstream)
+	sink := newQueueProcessor(fix.TaskCtx, "test-sink", Downstream)
+	source.Link(a)
+	a.Link(sink)
+	source.Start(fix.RootCtx)
+	a.Start(fix.RootCtx)
+	sink.Start(fix.RootCtx)
+
+	sink.QueueFrame(NewFunctionCallInProgressFrame("get_guidance", "call_1", nil, `{"situation":"pain"}`, false), Upstream)
+	time.Sleep(20 * time.Millisecond)
+	sink.QueueFrame(NewFunctionCallResultFrame("get_guidance", "call_1", nil, `{"situation":"pain"}`, "guidance text", false), Upstream)
+	time.Sleep(30 * time.Millisecond)
+
+	source.QueueFrame(EndFrame{}, Downstream)
+	if err := waitForWG(fix.WG, 3*time.Second); err != nil {
+		t.Fatalf("waitForWG: %v", err)
+	}
+	fix.TaskCtx.callEvents.stopAndDrain()
+
+	if len(assistantToolCalls) != 1 || len(toolResults) != 1 {
+		t.Fatalf("tool events = assistant:%+v tool:%+v", assistantToolCalls, toolResults)
+	}
+	if assistantToolCalls[0].Role != "assistant" ||
+		len(assistantToolCalls[0].ToolCalls) != 1 ||
+		assistantToolCalls[0].ToolCalls[0].ID != "call_1" ||
+		assistantToolCalls[0].ToolCalls[0].Function.Name != "get_guidance" ||
+		assistantToolCalls[0].ToolCalls[0].Function.Arguments != `{"situation":"pain"}` {
+		t.Fatalf("assistant tool event = %+v", assistantToolCalls[0])
+	}
+	if toolResults[0].Role != "tool" || toolResults[0].ToolCallID != "call_1" || toolResults[0].Content != "guidance text" {
+		t.Fatalf("tool result event = %+v", toolResults[0])
+	}
+}
+
 func TestContextAggregator_ExplicitEmptyInitialMessagesSkipsDefaultPrompt(t *testing.T) {
 	fix := newTestFixture(t)
 	a := NewContextAggregator(fix.TaskCtx, []Message{}, "")

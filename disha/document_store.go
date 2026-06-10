@@ -86,15 +86,24 @@ func resolveDocumentEnvironment() string {
 // Returns the rendered text and the resolved version (useful for
 // pinning system_message_prompt_key on chunks).
 func (s *DocumentStore) GetDocument(ctx context.Context, name string, version int, variables DocumentVariables) (string, int, error) {
+	text, resolvedVersion, _, err := s.GetDocumentWithConfig(ctx, name, version, variables)
+	return text, resolvedVersion, err
+}
+
+// GetDocumentWithConfig is the Go equivalent of Disha's
+// get_document_with_config/get_document_and_version combination: it renders
+// the prompt and also returns the Langfuse document config JSON. Dynamic
+// follow-up uses the config's `tools` block to build OpenAI tool schemas.
+func (s *DocumentStore) GetDocumentWithConfig(ctx context.Context, name string, version int, variables DocumentVariables) (string, int, map[string]any, error) {
 	if s == nil {
-		return "", 0, errors.New("disha: document store is nil")
+		return "", 0, nil, errors.New("disha: document store is nil")
 	}
 	if s.renderer == nil {
-		return "", 0, errors.New("disha: document renderer is nil")
+		return "", 0, nil, errors.New("disha: document renderer is nil")
 	}
 	doc, err := s.resolve(ctx, name, version)
 	if err != nil {
-		return "", 0, err
+		return "", 0, nil, err
 	}
 	rendered, err := s.renderer.Render(ctx, TemplateRenderRequest{
 		DocumentName:    name,
@@ -103,7 +112,7 @@ func (s *DocumentStore) GetDocument(ctx context.Context, name string, version in
 		Variables:       variables,
 	})
 	if err != nil {
-		return "", 0, err
+		return "", 0, nil, err
 	}
 	if s.logger != nil {
 		if rendered.UndefinedError != "" {
@@ -116,7 +125,18 @@ func (s *DocumentStore) GetDocument(ctx context.Context, name string, version in
 		}
 	}
 	reportMissingJinjaVariables(name, doc.Version, rendered, variables)
-	return rendered.Output, doc.Version, nil
+	return rendered.Output, doc.Version, cloneDocumentConfig(doc.ConfigJSON), nil
+}
+
+func cloneDocumentConfig(in map[string]any) map[string]any {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }
 
 func reportMissingJinjaVariables(name string, version int, rendered TemplateRenderResult, variables DocumentVariables) {

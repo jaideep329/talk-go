@@ -1,6 +1,10 @@
 package disha
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/jaideep329/talk-go/voicepipelinecore"
+)
 
 // TestMessageFromChunkTuple pins the filter to sales_call.py: replay a
 // chunk iff it is not a debug log and has no (truthy) additional_data;
@@ -48,5 +52,117 @@ func TestIsTruthyJSON(t *testing.T) {
 		if isTruthyJSON(v) {
 			t.Errorf("isTruthyJSON(%#v) = true, want false", v)
 		}
+	}
+}
+
+func TestMessageFromChunkTupleReplaysToolContextAdditionalData(t *testing.T) {
+	assistantMsg := voicepipelinecore.Message{
+		Role: "assistant",
+		ToolCalls: []voicepipelinecore.ToolCall{{
+			ID:   "call_1",
+			Type: "function",
+			Function: voicepipelinecore.ToolCallFunction{
+				Name:      "get_guidance",
+				Arguments: `{"situation":"pain"}`,
+			},
+		}},
+	}
+	msg, ok := messageFromChunkTuple([]any{
+		"tool-call-chunk",
+		"assistant",
+		"",
+		false,
+		toolContextAdditionalData(assistantMsg),
+	})
+	if !ok {
+		t.Fatal("assistant tool-call chunk was not replayed")
+	}
+	if msg.Role != "assistant" || len(msg.ToolCalls) != 1 {
+		t.Fatalf("assistant tool message = %+v", msg)
+	}
+	if msg.ToolCalls[0].ID != "call_1" ||
+		msg.ToolCalls[0].Function.Name != "get_guidance" ||
+		msg.ToolCalls[0].Function.Arguments != `{"situation":"pain"}` {
+		t.Fatalf("tool call = %+v", msg.ToolCalls[0])
+	}
+
+	toolMsg := voicepipelinecore.Message{Role: "tool", Content: "guidance text", ToolCallID: "call_1"}
+	msg, ok = messageFromChunkTuple([]any{
+		"tool-result-chunk",
+		"tool",
+		"guidance text",
+		false,
+		toolContextAdditionalData(toolMsg),
+	})
+	if !ok {
+		t.Fatal("tool result chunk was not replayed")
+	}
+	if msg.Role != "tool" || msg.ToolCallID != "call_1" || msg.Content != "guidance text" {
+		t.Fatalf("tool result message = %+v", msg)
+	}
+}
+
+func TestBuildInitialMessagesReordersToolResultAfterAssistantToolCall(t *testing.T) {
+	assistantToolCall := voicepipelinecore.Message{
+		Role: "assistant",
+		ToolCalls: []voicepipelinecore.ToolCall{{
+			ID:   "call_1",
+			Type: "function",
+			Function: voicepipelinecore.ToolCallFunction{
+				Name:      "get_guidance",
+				Arguments: `{"situation":"pain"}`,
+			},
+		}},
+	}
+	toolResult := voicepipelinecore.Message{
+		Role:       "tool",
+		Content:    "guidance text",
+		ToolCallID: "call_1",
+	}
+
+	msgs := buildInitialMessages("system prompt", [][]any{
+		{"user-1", "user", "hello", false, nil},
+		{"tool-result", "tool", toolResult.Content, false, toolContextAdditionalData(toolResult)},
+		{"tool-call", "assistant", "", false, toolContextAdditionalData(assistantToolCall)},
+		{"assistant-1", "assistant", "ok", false, nil},
+	}, "")
+
+	if len(msgs) != 5 {
+		t.Fatalf("len(msgs) = %d, want 5: %+v", len(msgs), msgs)
+	}
+	if msgs[0].Role != "system" || msgs[1].Role != "user" {
+		t.Fatalf("unexpected prefix: %+v", msgs[:2])
+	}
+	if msgs[2].Role != "assistant" || len(msgs[2].ToolCalls) != 1 || msgs[2].ToolCalls[0].ID != "call_1" {
+		t.Fatalf("assistant tool-call message = %+v", msgs[2])
+	}
+	if msgs[3].Role != "tool" || msgs[3].ToolCallID != "call_1" || msgs[3].Content != toolResult.Content {
+		t.Fatalf("tool result message = %+v", msgs[3])
+	}
+	if msgs[4].Role != "assistant" || msgs[4].Content != "ok" {
+		t.Fatalf("trailing assistant message = %+v", msgs[4])
+	}
+}
+
+func TestBuildInitialMessagesAppendsUnmatchedToolResultsAtEnd(t *testing.T) {
+	toolResult := voicepipelinecore.Message{
+		Role:       "tool",
+		Content:    "orphan tool result",
+		ToolCallID: "missing_call",
+	}
+
+	msgs := buildInitialMessages("system prompt", [][]any{
+		{"tool-result", "tool", toolResult.Content, false, toolContextAdditionalData(toolResult)},
+		{"user-1", "user", "hello", false, nil},
+	}, "")
+
+	if len(msgs) != 3 {
+		t.Fatalf("len(msgs) = %d, want 3: %+v", len(msgs), msgs)
+	}
+	if msgs[1].Role != "user" || msgs[1].Content != "hello" {
+		t.Fatalf("non-tool message order changed: %+v", msgs)
+	}
+	if msgs[2].Role != "tool" || msgs[2].ToolCallID != "missing_call" {
+		t.Fatalf("unmatched tool result = %+v", msgs[2])
 	}
 }

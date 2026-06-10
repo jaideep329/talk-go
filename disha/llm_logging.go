@@ -86,6 +86,9 @@ func newLLMLogSink(api *APIClient, logger *log.Logger, usecaseType, userID, conv
 			"llm_call_completed": c.Completed,
 			"status_code":        statusCodeOrNil(c.StatusCode),
 		}
+		if len(c.PromptMetadata) > 0 {
+			kwargs["prompt_metadata"] = c.PromptMetadata
+		}
 
 		raw, err := json.Marshal(kwargs)
 		if err != nil || len(raw) > maxLLMLogPayloadBytes {

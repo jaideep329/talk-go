@@ -163,6 +163,38 @@ func TestSelectionFallbackKeyWhenNoHealth(t *testing.T) {
 	}
 }
 
+func TestSelectionOneEndpointGroupUsesOwnFallback(t *testing.T) {
+	fr := newFakeRedis()
+	fr.setHealth("openai_gpt_4_1", false, 1)
+
+	sel, ok := getFastestForGroup(ctx(), fr, groupFollowUpDynamic, "us")
+	if !ok {
+		t.Fatal("expected a selection")
+	}
+	if sel.ConfigKey != "openrouter_gemma_4_26b_a4b_it_nitro" {
+		t.Fatalf("selected %q, want dynamic follow-up endpoint", sel.ConfigKey)
+	}
+	if sel.UsingFallback || sel.SelectedGroup != groupFollowUpDynamic {
+		t.Fatalf("selection = %+v, want own-group fallback without cross-group fallback", sel)
+	}
+}
+
+func TestSelectionGuidanceGroupUsesOwnFallback(t *testing.T) {
+	fr := newFakeRedis()
+	fr.setHealth("openai_gpt_4_1", false, 1)
+
+	sel, ok := getFastestForGroup(ctx(), fr, groupGPTOSS120Fast, "us")
+	if !ok {
+		t.Fatal("expected a selection")
+	}
+	if sel.ConfigKey != "openrouter_gpt_oss_120b" {
+		t.Fatalf("selected %q, want guidance fallback endpoint", sel.ConfigKey)
+	}
+	if sel.UsingFallback || sel.SelectedGroup != groupGPTOSS120Fast {
+		t.Fatalf("selection = %+v, want guidance own-group fallback", sel)
+	}
+}
+
 func TestSelectionRegionFilter(t *testing.T) {
 	// south_india azure config must never be selected for region us even
 	// if it has the best latency.
@@ -352,6 +384,67 @@ func TestBuildRequestIncludesTools(t *testing.T) {
 	fn, ok := tool["function"].(map[string]any)
 	if !ok || fn["name"] != "get_guidance" {
 		t.Fatalf("function = %#v, want get_guidance", tool["function"])
+	}
+}
+
+func TestBuildRequestOpenRouterGemmaProviderPreferences(t *testing.T) {
+	t.Setenv("OPENROUTER_API_KEY", "or-key")
+
+	r := &Router{cfg: Config{}, httpClient: &http.Client{}}
+	req, err := r.buildRequest(ctx(), endpointConfigs["openrouter_gemma_4_26b_a4b_it_nitro"], testLLMRequest())
+	if err != nil {
+		t.Fatalf("buildRequest: %v", err)
+	}
+	if req.URL.String() != "https://openrouter.ai/api/v1/chat/completions" {
+		t.Errorf("url = %s", req.URL.String())
+	}
+	if got := req.Header.Get("Authorization"); got != "Bearer or-key" {
+		t.Errorf("auth = %q", got)
+	}
+	body := readBody(t, req)
+	if body["model"] != "google/gemma-4-26b-a4b-it:nitro" {
+		t.Errorf("model = %v", body["model"])
+	}
+	if body["temperature"] != 0.5 {
+		t.Errorf("temperature = %v, want 0.5", body["temperature"])
+	}
+	provider, ok := body["provider"].(map[string]any)
+	if !ok {
+		t.Fatalf("provider = %#v, want object", body["provider"])
+	}
+	order, ok := provider["order"].([]any)
+	if !ok || len(order) != 3 || order[0] != "deepinfra/fp8" || order[1] != "cloudflare" || order[2] != "parasail/bf16" {
+		t.Fatalf("provider.order = %#v", provider["order"])
+	}
+	ignored, ok := provider["ignore"].([]any)
+	if !ok || len(ignored) != 3 || ignored[0] != "google-ai-studio" {
+		t.Fatalf("provider.ignore = %#v", provider["ignore"])
+	}
+	if provider["allow_fallbacks"] != true {
+		t.Fatalf("provider.allow_fallbacks = %#v, want true", provider["allow_fallbacks"])
+	}
+}
+
+func TestBuildRequestCerebrasGPTOSSMaxTokens(t *testing.T) {
+	t.Setenv("CEREBRAS_ENTERPRISE_API_KEY", "cb-key")
+
+	r := &Router{cfg: Config{}, httpClient: &http.Client{}}
+	req, err := r.buildRequest(ctx(), endpointConfigs["cerebras_gpt_oss_120b"], testLLMRequest())
+	if err != nil {
+		t.Fatalf("buildRequest: %v", err)
+	}
+	if req.URL.String() != "https://api.cerebras.ai/v1/chat/completions" {
+		t.Errorf("url = %s", req.URL.String())
+	}
+	if got := req.Header.Get("Authorization"); got != "Bearer cb-key" {
+		t.Errorf("auth = %q", got)
+	}
+	body := readBody(t, req)
+	if body["model"] != "gpt-oss-120b" {
+		t.Errorf("model = %v", body["model"])
+	}
+	if body["max_tokens"] != float64(500) {
+		t.Errorf("max_tokens = %v, want 500", body["max_tokens"])
 	}
 }
 

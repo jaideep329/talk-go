@@ -196,6 +196,17 @@ func TestNewBotReturnsSalesCallBot(t *testing.T) {
 	if _, ok := bot.(SalesCallBot); !ok {
 		t.Fatalf("bot type = %T, want SalesCallBot", bot)
 	}
+
+	followUpBot, err := NewBot(FollowUpBotType)
+	if err != nil {
+		t.Fatalf("NewBot follow-up: %v", err)
+	}
+	if followUpBot.BotType() != FollowUpBotType {
+		t.Fatalf("FollowUp BotType = %q, want %q", followUpBot.BotType(), FollowUpBotType)
+	}
+	if _, ok := followUpBot.(FollowUpBot); !ok {
+		t.Fatalf("follow-up bot type = %T, want FollowUpBot", followUpBot)
+	}
 }
 
 func TestSalesCallBotPlanAssemblesDishaCall(t *testing.T) {

@@ -77,9 +77,9 @@ type CallStats struct {
 	DebugLogs             []RTVIDebugLogEntry
 }
 
-// CallEvents are integration callbacks for call lifecycle and committed
-// conversation turns. The first five are one-shot timeline events;
-// committed-turn events can fire many times.
+// CallEvents are integration callbacks for call lifecycle and committed LLM
+// context updates. The first five are one-shot timeline events; committed-turn
+// and tool-result events can fire many times.
 type CallEvents struct {
 	OnBotJoined              func(time.Time)
 	OnUserJoined             func(time.Time)
@@ -88,6 +88,7 @@ type CallEvents struct {
 	OnFirstUserAudio         func(time.Time)
 	OnUserTurnCommitted      func(text string, at time.Time, promptKey string)
 	OnAssistantTurnCommitted func(text string, at time.Time, metrics TurnMetrics, promptKey string)
+	OnToolResultCommitted    func(assistantToolCall Message, toolResult Message, at time.Time)
 	OnCallEnded              func(reason EndReason, stats CallStats)
 }
 

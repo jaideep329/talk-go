@@ -111,8 +111,28 @@ func TestFollowUpBotPlanSelectsAgendaPrompt(t *testing.T) {
 	if vars["patient_memory"] != "Sleeps late\n\nRecent chat note" {
 		t.Fatalf("patient_memory = %#v", vars["patient_memory"])
 	}
-	if !reflect.DeepEqual(vars["patient_schedule"], schedule) {
-		t.Fatalf("patient_schedule = %#v, want original nested schedule", vars["patient_schedule"])
+	// Python extracts checkin_slots: `_slots.get("checkin_slots") or _slots`.
+	if !reflect.DeepEqual(vars["patient_schedule"], schedule["checkin_slots"]) {
+		t.Fatalf("patient_schedule = %#v, want inner checkin_slots", vars["patient_schedule"])
+	}
+}
+
+func TestPatientScheduleFromSlots(t *testing.T) {
+	checkin := map[string]any{"morning": "8 AM"}
+	cases := []struct {
+		name  string
+		slots map[string]any
+		want  any
+	}{
+		{"nil slots", nil, map[string]any{}},
+		{"checkin_slots extracted", map[string]any{"checkin_slots": checkin, "daily_routine": "x"}, checkin},
+		{"empty checkin_slots falls back to whole map", map[string]any{"checkin_slots": map[string]any{}, "evening": "7 PM"}, map[string]any{"checkin_slots": map[string]any{}, "evening": "7 PM"}},
+		{"no checkin_slots key", map[string]any{"evening": "7 PM"}, map[string]any{"evening": "7 PM"}},
+	}
+	for _, tc := range cases {
+		if got := patientScheduleFromSlots(tc.slots); !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("%s: patientScheduleFromSlots = %#v, want %#v", tc.name, got, tc.want)
+		}
 	}
 }
 

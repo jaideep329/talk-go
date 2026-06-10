@@ -157,20 +157,25 @@ var endpointConfigs = map[string]endpointConfig{
 	},
 
 	// --- gemini-flash-3.1-lite follow-up group ---
+	// Python's follow-up call runs this group at temperature 0.5
+	// (bots/followup_call/followup_call.py InputParams(temperature=0.5)).
 	"vertex_gemini_flash_3_1_lite": {
 		Key: "vertex_gemini_flash_3_1_lite", Provider: providerVertex,
 		Model: "google/gemini-3.1-flash-lite", Region: "us",
 		VertexProject: "disha-ai2", VertexLocation: "global", VertexCredsEnv: "VERTEX_DISHA_AI2_CREDS_FILE",
+		Temperature: floatPtr(0.5),
 	},
 	"google_ai_studio_gemini_flash_3_1_lite": {
 		Key: "google_ai_studio_gemini_flash_3_1_lite", Provider: providerGoogleAIStudio,
 		Model: "gemini-3.1-flash-lite", Region: "us",
 		APIKeyEnv: "GEMINI_API_KEY_DISHAAI2", BaseURL: "https://generativelanguage.googleapis.com/v1beta/openai/",
+		Temperature: floatPtr(0.5),
 	},
 	"openrouter_gemini_flash_3_1_lite": {
 		Key: "openrouter_gemini_flash_3_1_lite", Provider: providerOpenRouter,
 		Model: "google/gemini-3.1-flash-lite", Region: "us",
 		APIKeyEnv: "OPENROUTER_API_KEY", BaseURL: "https://openrouter.ai/api/v1",
+		Temperature: floatPtr(0.5),
 	},
 
 	// --- follow-up dynamic treatment main model (no health switching in Python) ---
@@ -242,6 +247,9 @@ var modelGroups = map[string]modelGroup{
 			"openrouter_gemini_flash_3_1_lite",
 		},
 		Fallback: "openrouter_gemini_flash_3_1_lite",
+		// Python's LLMSwitchingService falls back to FALLBACK_MODEL_GROUP
+		// (gpt-4.1) for any group with no available endpoints.
+		FallbackGroup: groupGPT41,
 	},
 	groupFollowUpDynamic: {
 		Configs:  []string{"openrouter_gemma_4_26b_a4b_it_nitro"},

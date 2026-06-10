@@ -163,6 +163,35 @@ func TestSelectionFallbackKeyWhenNoHealth(t *testing.T) {
 	}
 }
 
+func TestSelectionGeminiGroupPicksHealthyEndpoint(t *testing.T) {
+	fr := newFakeRedis()
+	fr.setHealth("vertex_gemini_flash_3_1_lite", false, 300)
+	fr.setHealth("openrouter_gemini_flash_3_1_lite", false, 200)
+
+	sel, ok := getFastestForGroup(ctx(), fr, groupGemini31, "us")
+	if !ok {
+		t.Fatal("expected a selection")
+	}
+	if sel.ConfigKey != "openrouter_gemini_flash_3_1_lite" || sel.UsingFallback {
+		t.Fatalf("selection = %+v, want fastest gemini endpoint", sel)
+	}
+}
+
+func TestSelectionGeminiGroupFallsBackToGPT41Group(t *testing.T) {
+	fr := newFakeRedis()
+	// No gemini health at all; gpt-4.1 group has one healthy endpoint.
+	// Mirrors Python's LLMSwitchingService FALLBACK_MODEL_GROUP behavior.
+	fr.setHealth("azure_gpt_4_1_us_west", false, 250)
+
+	sel, ok := getFastestForGroup(ctx(), fr, groupGemini31, "us")
+	if !ok {
+		t.Fatal("expected a selection")
+	}
+	if !sel.UsingFallback || sel.SelectedGroup != groupGPT41 || sel.ConfigKey != "azure_gpt_4_1_us_west" {
+		t.Fatalf("selection = %+v, want gpt-4.1 group fallback", sel)
+	}
+}
+
 func TestSelectionOneEndpointGroupUsesOwnFallback(t *testing.T) {
 	fr := newFakeRedis()
 	fr.setHealth("openai_gpt_4_1", false, 1)
@@ -422,6 +451,21 @@ func TestBuildRequestOpenRouterGemmaProviderPreferences(t *testing.T) {
 	}
 	if provider["allow_fallbacks"] != true {
 		t.Fatalf("provider.allow_fallbacks = %#v, want true", provider["allow_fallbacks"])
+	}
+}
+
+func TestBuildRequestGeminiFlashLiteTemperature(t *testing.T) {
+	t.Setenv("OPENROUTER_API_KEY", "or-key")
+
+	r := &Router{cfg: Config{}, httpClient: &http.Client{}}
+	req, err := r.buildRequest(ctx(), endpointConfigs["openrouter_gemini_flash_3_1_lite"], testLLMRequest())
+	if err != nil {
+		t.Fatalf("buildRequest: %v", err)
+	}
+	body := readBody(t, req)
+	// Python follow-up runs gemini-flash-3.1-lite at temperature 0.5.
+	if body["temperature"] != 0.5 {
+		t.Errorf("temperature = %v, want 0.5", body["temperature"])
 	}
 }
 

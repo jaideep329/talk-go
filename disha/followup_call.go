@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jaideep329/talk-go/internal/sentryutil"
 	"github.com/jaideep329/talk-go/voicepipelinecore"
 	"github.com/jaideep329/talk-go/voicepipelinecore/llmrouter"
 )
@@ -242,12 +243,24 @@ func followUpPromptVariables(data *ConversationData, callFlow string) DocumentVa
 		"diet_chart_xml":            user.LastDietChartXML,
 		"patient_executive_profile": shortTermMemory,
 		"patient_name":              name,
-		"patient_schedule":          user.IdealCallTimeSlots,
+		"patient_schedule":          patientScheduleFromSlots(user.IdealCallTimeSlots),
 		"he_she":                    subjectPronoun(gender),
 		"him_her":                   objectPronoun(gender),
 		"his_her":                   possessivePronoun(gender),
 		"call_flow":                 callFlowValue,
 	}
+}
+
+// patientScheduleFromSlots mirrors fetch_conversation.py:
+// `_slots = ideal_call_time_slots or {}; _slots.get("checkin_slots") or _slots`.
+func patientScheduleFromSlots(slots map[string]any) any {
+	if v, ok := slots["checkin_slots"]; ok && isTruthyJSON(v) {
+		return v
+	}
+	if slots == nil {
+		return map[string]any{}
+	}
+	return slots
 }
 
 func subjectPronoun(gender string) string {
@@ -458,10 +471,35 @@ func getFollowUpGuidance(ctx context.Context, deps Deps, pl *followUpPlan, situa
 	var b strings.Builder
 	_, err = client.Stream(ctx, req, func(token string) { b.WriteString(token) })
 	if err != nil {
+		reportGuidanceLLMFailure(pl, err)
 		return "", err
 	}
 	if strings.TrimSpace(b.String()) == "" {
-		return "", errors.New("disha: get_guidance returned empty response")
+		err = errors.New("disha: get_guidance returned empty response")
+		reportGuidanceLLMFailure(pl, err)
+		return "", err
 	}
 	return b.String(), nil
+}
+
+// reportGuidanceLLMFailure sends get_guidance LLM failures to Sentry. The
+// guidance router has no in-call failover (unlike Python's
+// generate_llm_response_with_failover), so a failed call must be visible.
+// Context cancellation just means the call ended mid-tool — not an error.
+func reportGuidanceLLMFailure(pl *followUpPlan, err error) {
+	if errors.Is(err, context.Canceled) {
+		return
+	}
+	sentryutil.Capture(sentryutil.Event{
+		Err: err,
+		Tags: map[string]string{
+			"component": "disha_followup",
+			"operation": "get_guidance_llm",
+		},
+		Details: map[string]any{
+			"conversation_id": pl.Startup.ConversationID,
+			"user_id":         pl.Startup.UserID,
+			"model_group":     followUpGuidanceModelGroup,
+		},
+	})
 }

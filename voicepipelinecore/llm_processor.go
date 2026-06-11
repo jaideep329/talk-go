@@ -1,22 +1,16 @@
 package voicepipelinecore
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
-	"net/http"
-	"os"
+	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/jaideep329/talk-go/internal/sentryutil"
 )
-
-// llmEndpoint is the OpenAI Chat Completions URL. Exposed as a package
-// variable so tests can override it to point at an httptest server.
-var llmEndpoint = "https://api.openai.com/v1/chat/completions"
-
-const llmModel = "gpt-4.1"
 
 // LLMResult summarizes a single streaming completion. Implementations
 // fill Model with the model that actually served the request (which may
@@ -28,6 +22,7 @@ type LLMResult struct {
 	TTFB        time.Duration
 	Total       time.Duration
 	Interrupted bool
+	ToolCalls   []ToolCall
 }
 
 // LLMClient performs one streaming chat completion. It must invoke
@@ -42,7 +37,32 @@ type LLMResult struct {
 // dependency runs one way — the core never imports the implementer — so
 // the pipeline package stays free of any business/transport dependency.
 type LLMClient interface {
-	Stream(ctx context.Context, messages []map[string]string, onToken func(string)) (LLMResult, error)
+	Stream(ctx context.Context, req LLMRequest, onToken func(string)) (LLMResult, error)
+}
+
+type ToolCallRequest struct {
+	FunctionName string
+	ToolCallID   string
+	Arguments    map[string]any
+	RawArguments string
+}
+
+type ToolCallResponse struct {
+	Result any
+	RunLLM bool
+}
+
+type ToolHandler func(ctx context.Context, req ToolCallRequest) (ToolCallResponse, error)
+
+type ToolOptions struct {
+	CancelOnInterruption bool
+	Timeout              time.Duration
+}
+
+type registeredTool struct {
+	definition ToolDefinition
+	handler    ToolHandler
+	options    ToolOptions
 }
 
 type LLMProcessor struct {
@@ -52,27 +72,52 @@ type LLMProcessor struct {
 	metrics   *ProcessorMetrics
 	cancelMu  sync.Mutex
 	cancelLLM context.CancelFunc
+
+	tools      []ToolDefinition
+	toolChoice any
+	toolMap    map[string]registeredTool
 }
 
-// NewLLMProcessor builds an LLM processor backed by the default OpenAI
-// gpt-4.1 client. Used by the local /connect demo path.
-func NewLLMProcessor(taskCtx *TaskContext) *LLMProcessor {
-	return NewLLMProcessorWithClient(taskCtx, &openAILLMClient{})
-}
-
-// NewLLMProcessorWithClient builds an LLM processor backed by a custom
+// NewLLMProcessorWithClient builds an LLM processor backed by the injected
 // client (e.g. the health-based llmrouter for sales calls).
 func NewLLMProcessorWithClient(taskCtx *TaskContext, client LLMClient) *LLMProcessor {
 	if client == nil {
-		client = &openAILLMClient{}
+		panic("voicepipelinecore: LLMClient is required")
 	}
 	p := &LLMProcessor{
 		taskCtx: taskCtx,
 		client:  client,
 		metrics: NewProcessorMetrics("llm"),
+		toolMap: make(map[string]registeredTool),
 	}
 	p.BaseProcessor = NewBaseProcessor("LLM", p, taskCtx)
 	return p
+}
+
+func (p *LLMProcessor) RegisterTool(def ToolDefinition, handler ToolHandler, opts ToolOptions) {
+	if def.Type == "" {
+		def.Type = "function"
+	}
+	name := strings.TrimSpace(def.Function.Name)
+	if name == "" {
+		return
+	}
+	p.tools = appendOrReplaceToolDefinition(p.tools, def)
+	p.toolMap[name] = registeredTool{definition: def, handler: handler, options: opts}
+}
+
+func (p *LLMProcessor) SetToolChoice(toolChoice any) {
+	p.toolChoice = toolChoice
+}
+
+func appendOrReplaceToolDefinition(tools []ToolDefinition, def ToolDefinition) []ToolDefinition {
+	for i, existing := range tools {
+		if existing.Function.Name == def.Function.Name {
+			tools[i] = def
+			return tools
+		}
+	}
+	return append(tools, def)
 }
 
 func (p *LLMProcessor) ProcessFrame(ctx context.Context, frame Frame, dir Direction) {
@@ -112,7 +157,7 @@ func (p *LLMProcessor) cancelInFlight() {
 	}
 }
 
-func (p *LLMProcessor) runLLM(ctx context.Context, messages []map[string]string) {
+func (p *LLMProcessor) runLLM(ctx context.Context, messages []Message) {
 	p.metrics.Start(MetricTTFB)
 	p.metrics.Start(MetricProcessing)
 	p.PushFrame(NewLLMResponseStartFrame(time.Now()), Downstream)
@@ -133,7 +178,16 @@ func (p *LLMProcessor) runLLM(ctx context.Context, messages []map[string]string)
 		p.PushFrame(NewTextFrame(content), Downstream)
 	}
 
-	result, err := p.client.Stream(ctx, messages, onToken)
+	req := LLMRequest{
+		Messages:   cloneMessages(messages),
+		Tools:      append([]ToolDefinition(nil), p.tools...),
+		ToolChoice: p.toolChoice,
+	}
+	result, err := p.client.Stream(ctx, req, onToken)
+	if firstToken && result.TTFB > 0 {
+		ttfbMs = float64(result.TTFB.Microseconds()) / 1000.0
+		_ = p.metrics.Stop(MetricTTFB)
+	}
 
 	// Cancellation (barge-in / EndFrame) takes precedence: the interrupt/
 	// end path already reset TTS + playback, so we must NOT emit terminal
@@ -164,6 +218,156 @@ func (p *LLMProcessor) runLLM(ctx context.Context, messages []map[string]string)
 	}
 	p.PushFrame(NewLLMResponseEndFrame(), Downstream)
 	p.emitLLMCallResult(result.Model, ttfbMs, totalMs, "completed")
+	if len(result.ToolCalls) > 0 {
+		p.Go(func() { p.executeToolCalls(ctx, result.ToolCalls) })
+	}
+}
+
+type toolExecutionResult struct {
+	frame  FunctionCallResultFrame
+	runLLM bool
+}
+
+func (p *LLMProcessor) executeToolCalls(turnCtx context.Context, toolCalls []ToolCall) {
+	results := make(chan toolExecutionResult, len(toolCalls))
+	runNextLLM := false
+	started := 0
+	for _, call := range toolCalls {
+		name := call.Function.Name
+		tool, ok := p.toolMap[name]
+		if !ok || tool.handler == nil {
+			args, parseErr := parseToolArguments(call.Function.Arguments)
+			if parseErr != nil {
+				p.PushError(fmt.Sprintf("parse tool arguments for %q: %v", name, parseErr), false)
+			}
+			p.PushError(fmt.Sprintf("unregistered tool call %q", name), false)
+			p.PushFrame(NewFunctionCallInProgressFrame(name, call.ID, args, call.Function.Arguments, true), Upstream)
+			results <- toolExecutionResult{
+				frame:  NewFunctionCallResultFrame(name, call.ID, args, call.Function.Arguments, toolErrorResultString(fmt.Sprintf("unregistered tool call %q", name)), false),
+				runLLM: true,
+			}
+			started++
+			continue
+		}
+		args, parseErr := parseToolArguments(call.Function.Arguments)
+		if parseErr != nil {
+			p.PushError(fmt.Sprintf("parse tool arguments for %q: %v", name, parseErr), false)
+		}
+		p.PushFrame(NewFunctionCallInProgressFrame(name, call.ID, args, call.Function.Arguments, tool.options.CancelOnInterruption), Upstream)
+		started++
+		go func(call ToolCall, tool registeredTool, args map[string]any) {
+			results <- p.executeOneToolCall(turnCtx, call, tool, args)
+		}(call, tool, args)
+	}
+
+	for remaining := started; remaining > 0; remaining-- {
+		result := <-results
+		if result.runLLM {
+			runNextLLM = true
+		}
+		if remaining == 1 && runNextLLM {
+			result.frame.RunLLM = true
+		}
+		p.PushFrame(result.frame, Upstream)
+	}
+}
+
+func (p *LLMProcessor) executeOneToolCall(turnCtx context.Context, call ToolCall, tool registeredTool, args map[string]any) toolExecutionResult {
+	name := call.Function.Name
+	parent := turnCtx
+	if !tool.options.CancelOnInterruption && p.taskCtx != nil && p.taskCtx.Ctx != nil {
+		parent = p.taskCtx.Ctx
+	}
+	toolCtx := parent
+	cancel := func() {}
+	if tool.options.Timeout > 0 {
+		toolCtx, cancel = context.WithTimeout(parent, tool.options.Timeout)
+	}
+	resp, err := tool.handler(toolCtx, ToolCallRequest{
+		FunctionName: name,
+		ToolCallID:   call.ID,
+		Arguments:    args,
+		RawArguments: call.Function.Arguments,
+	})
+	cancel()
+	if err != nil {
+		p.PushError(fmt.Sprintf("execute tool %q: %v", name, err), false)
+		return toolExecutionResult{
+			frame: NewFunctionCallResultFrame(name, call.ID, args, call.Function.Arguments, toolErrorResultString(err.Error()), false),
+		}
+	}
+	result, resultErr := toolResultString(resp.Result)
+	if resultErr != nil {
+		p.reportToolResultError(name, call.ID, resultErr)
+		result = toolErrorResultString(resultErr.Error())
+		resp.RunLLM = false
+	}
+	return toolExecutionResult{
+		frame:  NewFunctionCallResultFrame(name, call.ID, args, call.Function.Arguments, result, false),
+		runLLM: resp.RunLLM,
+	}
+}
+
+func parseToolArguments(raw string) (map[string]any, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return map[string]any{}, nil
+	}
+	var args map[string]any
+	if err := json.Unmarshal([]byte(raw), &args); err != nil {
+		return map[string]any{}, err
+	}
+	if args == nil {
+		args = map[string]any{}
+	}
+	return args, nil
+}
+
+func toolResultString(result any) (string, error) {
+	switch v := result.(type) {
+	case nil:
+		return "", errors.New("empty tool result")
+	case string:
+		if strings.TrimSpace(v) == "" {
+			return "", errors.New("empty tool result")
+		}
+		return v, nil
+	default:
+		raw, err := json.Marshal(v)
+		if err != nil {
+			return fmt.Sprintf("%v", v), nil
+		}
+		if len(raw) == 0 || string(raw) == "null" {
+			return "", errors.New("empty tool result")
+		}
+		return string(raw), nil
+	}
+}
+
+func toolErrorResultString(message string) string {
+	raw, err := json.Marshal(map[string]any{"error": message})
+	if err != nil {
+		return fmt.Sprintf(`{"error":%q}`, message)
+	}
+	return string(raw)
+}
+
+func (p *LLMProcessor) reportToolResultError(functionName, toolCallID string, err error) {
+	if err == nil {
+		return
+	}
+	p.PushError(fmt.Sprintf("tool %q returned empty result", functionName), false)
+	sentryutil.Capture(sentryutil.Event{
+		Err: err,
+		Tags: map[string]string{
+			"component": "llm",
+			"operation": "tool_call",
+		},
+		Details: map[string]any{
+			"function_name": functionName,
+			"tool_call_id":  toolCallID,
+		},
+	})
 }
 
 // emitLLMCallResult publishes the Python-compatible RTVI server-message
@@ -185,82 +389,4 @@ func (p *LLMProcessor) emitLLMCallResult(model string, ttfbMs, totalMs float64, 
 		data["total_ms"] = totalMs
 	}
 	p.taskCtx.UIEvents.ServerMessage(data, time.Now())
-}
-
-// openAILLMClient is the default LLMClient: a single OpenAI gpt-4.1
-// streaming call using OPENAI_API_KEY. It preserves the original
-// pre-router behavior for the local /connect demo.
-type openAILLMClient struct{}
-
-func (c *openAILLMClient) Stream(ctx context.Context, messages []map[string]string, onToken func(string)) (LLMResult, error) {
-	res := LLMResult{Model: llmModel}
-	body := map[string]interface{}{
-		"model":    llmModel,
-		"stream":   true,
-		"messages": messages,
-	}
-	jsonBody, err := json.Marshal(body)
-	if err != nil {
-		return res, err
-	}
-
-	req, err := http.NewRequestWithContext(ctx, "POST", llmEndpoint, bytes.NewReader(jsonBody))
-	if err != nil {
-		return res, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+os.Getenv("OPENAI_API_KEY"))
-
-	start := time.Now()
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		res.Total = time.Since(start)
-		res.Interrupted = ctx.Err() != nil
-		return res, err
-	}
-	defer resp.Body.Close()
-
-	firstToken := true
-	scanner := bufio.NewScanner(resp.Body)
-	for scanner.Scan() {
-		if ctx.Err() != nil {
-			res.Total = time.Since(start)
-			res.Interrupted = true
-			return res, ctx.Err()
-		}
-		line := scanner.Text()
-		if !strings.HasPrefix(line, "data: ") {
-			continue
-		}
-		data := strings.TrimPrefix(line, "data: ")
-		if data == "[DONE]" {
-			break
-		}
-
-		var chunk struct {
-			Choices []struct {
-				Delta struct {
-					Content string `json:"content"`
-				} `json:"delta"`
-			} `json:"choices"`
-		}
-		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
-			continue
-		}
-		if len(chunk.Choices) == 0 {
-			continue
-		}
-		content := chunk.Choices[0].Delta.Content
-		if content == "" {
-			continue
-		}
-		if firstToken {
-			firstToken = false
-			res.TTFB = time.Since(start)
-		}
-		onToken(content)
-	}
-	res.Total = time.Since(start)
-	res.Interrupted = ctx.Err() != nil
-	return res, nil
 }

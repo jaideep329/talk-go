@@ -100,7 +100,7 @@ func testDeps(redis RedisClient, api *APIClient) Deps {
 		Logger:    logger,
 		Redis:     redis,
 		API:       api,
-		Documents: NewDocumentStore(redis, logger),
+		Documents: newDocumentStore(redis, logger, simpleTemplateRenderer{}),
 	}
 }
 
@@ -196,6 +196,17 @@ func TestNewBotReturnsSalesCallBot(t *testing.T) {
 	if _, ok := bot.(SalesCallBot); !ok {
 		t.Fatalf("bot type = %T, want SalesCallBot", bot)
 	}
+
+	followUpBot, err := NewBot(FollowUpBotType)
+	if err != nil {
+		t.Fatalf("NewBot follow-up: %v", err)
+	}
+	if followUpBot.BotType() != FollowUpBotType {
+		t.Fatalf("FollowUp BotType = %q, want %q", followUpBot.BotType(), FollowUpBotType)
+	}
+	if _, ok := followUpBot.(FollowUpBot); !ok {
+		t.Fatalf("follow-up bot type = %T, want FollowUpBot", followUpBot)
+	}
 }
 
 func TestSalesCallBotPlanAssemblesDishaCall(t *testing.T) {
@@ -240,9 +251,12 @@ func TestSalesCallBotPlanAssemblesDishaCall(t *testing.T) {
 	if len(pl.InitialMessages) != 4 ||
 		pl.InitialMessages[0].Role != "system" ||
 		!containsAll(pl.InitialMessages[0].Content, "TEST_SYSTEM_PROMPT", "patient=Riya, age 32") ||
-		pl.InitialMessages[1] != (voicepipelinecore.Message{Role: "user", Content: "hello"}) ||
-		pl.InitialMessages[2] != (voicepipelinecore.Message{Role: "assistant", Content: "hi"}) ||
-		pl.InitialMessages[3] != (voicepipelinecore.Message{Role: "tool", Content: "tool turn"}) {
+		pl.InitialMessages[1].Role != "user" ||
+		pl.InitialMessages[1].Content != "hello" ||
+		pl.InitialMessages[2].Role != "assistant" ||
+		pl.InitialMessages[2].Content != "hi" ||
+		pl.InitialMessages[3].Role != "tool" ||
+		pl.InitialMessages[3].Content != "tool turn" {
 		t.Fatalf("InitialMessages mismatch: %+v", pl.InitialMessages)
 	}
 	events := pl.Callbacks.Events()
@@ -358,7 +372,8 @@ func TestSalesCallBotPlanSeedsHelloWhenNoPriorChunks(t *testing.T) {
 	}
 	if len(pl.InitialMessages) != 2 ||
 		pl.InitialMessages[0].Role != "system" ||
-		pl.InitialMessages[1] != (voicepipelinecore.Message{Role: "user", Content: "hello?"}) {
+		pl.InitialMessages[1].Role != "user" ||
+		pl.InitialMessages[1].Content != "hello?" {
 		t.Fatalf("InitialMessages = %+v, want system + hello seed", pl.InitialMessages)
 	}
 	if pl.MaxTalkTime != lifetimeTalkTimeSeconds*time.Second {
@@ -393,6 +408,9 @@ func TestSalesCallBotPlanAppendsResumeMessage(t *testing.T) {
 	apiServer, _ := newCallAPIServer(t)
 	seedDocument(t, redisServer, salesPromptDefault, "production", 1, "SYS")
 	resumedID := "chunk-prev"
+	// The backend cache always serializes resume_gracefully (model default
+	// True); only explicit-chunkId rebuilds set it False.
+	gracefully := true
 	recent := time.Now().Add(-2 * time.Minute).Format(time.RFC3339Nano)
 	seedConversationData(t, redisServer, "conv-resume", ConversationData{
 		Conversation: ConversationRow{
@@ -400,6 +418,7 @@ func TestSalesCallBotPlanAppendsResumeMessage(t *testing.T) {
 			UserID:             "user-1",
 			BotType:            SalesCallBotType,
 			ResumedFromChunkID: &resumedID,
+			ResumeGracefully:   &gracefully,
 		},
 		Chunks: [][]any{
 			{"chunk-1", "user", "I was saying", false, nil},

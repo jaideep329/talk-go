@@ -13,22 +13,33 @@ type ConversationData struct {
 }
 
 type ConversationRow struct {
-	ID                 string  `json:"id"`
-	UserID             string  `json:"user_id"`
-	BotType            string  `json:"bot_type"`
-	PatientInfo        string  `json:"patient_info"`
-	ResumedFromChunkID *string `json:"resumed_from_chunk_id"`
-	ResumeGracefully   *bool   `json:"resume_gracefully"`
-	StartChunkID       *string `json:"start_chunk_id"`
-	EndChunkID         *string `json:"end_chunk_id"`
+	ID                    string         `json:"id"`
+	UserID                string         `json:"user_id"`
+	BotType               string         `json:"bot_type"`
+	PatientInfo           string         `json:"patient_info"`
+	Direction             string         `json:"direction"`
+	Agenda                string         `json:"agenda"`
+	DynamicVariables      map[string]any `json:"dynamic_variables"`
+	CallFlowKey           string         `json:"call_flow_key"`
+	CompiledCallFlowS3Key string         `json:"compiled_call_flow_s3_key"`
+	ResumedFromChunkID    *string        `json:"resumed_from_chunk_id"`
+	ResumeGracefully      *bool          `json:"resume_gracefully"`
+	StartChunkID          *string        `json:"start_chunk_id"`
+	EndChunkID            *string        `json:"end_chunk_id"`
 }
 
 type UserProfileData struct {
-	UserID                            string   `json:"user_id"`
-	Phone                             string   `json:"phone"`
-	RemainingSalesCallTalktimeSeconds *float64 `json:"remaining_sales_call_talktime_seconds"`
-	CampaignPricingExperimentFlag     *string  `json:"campaign_pricing_experiment_flag"`
-	ShortTermMemory                   *string  `json:"short_term_memory"`
+	UserID                            string         `json:"user_id"`
+	Phone                             string         `json:"phone"`
+	RemainingSalesCallTalktimeSeconds *float64       `json:"remaining_sales_call_talktime_seconds"`
+	CampaignPricingExperimentFlag     *string        `json:"campaign_pricing_experiment_flag"`
+	ShortTermMemory                   *string        `json:"short_term_memory"`
+	LastDietChartXML                  string         `json:"last_diet_chart_xml"`
+	IdealCallTimeSlots                map[string]any `json:"ideal_call_time_slots"`
+	DevanagariName                    string         `json:"devanagari_name"`
+	FirstName                         string         `json:"first_name"`
+	Name                              string         `json:"name"`
+	Gender                            string         `json:"gender"`
 }
 
 // ConversationChunk mirrors the dict Disha's chunk manager stores in

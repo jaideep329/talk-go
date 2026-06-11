@@ -15,6 +15,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	vpc "github.com/jaideep329/talk-go/voicepipelinecore"
 )
 
 // fakeRedis is an in-memory RedisStore for tests.
@@ -90,6 +92,12 @@ func (f *fakeRedis) setHealth(configKey string, blacklisted bool, latencies ...f
 
 func ctx() context.Context { return context.Background() }
 
+func testLLMRequest() vpc.LLMRequest {
+	return vpc.LLMRequest{
+		Messages: []vpc.Message{{Role: "user", Content: "hi"}},
+	}
+}
+
 // --- selection ---
 
 func TestSelectionPicksFastest(t *testing.T) {
@@ -152,6 +160,67 @@ func TestSelectionFallbackKeyWhenNoHealth(t *testing.T) {
 	}
 	if !sel.UsingFallback {
 		t.Error("expected using_fallback for last-resort")
+	}
+}
+
+func TestSelectionGeminiGroupPicksHealthyEndpoint(t *testing.T) {
+	fr := newFakeRedis()
+	fr.setHealth("vertex_gemini_flash_3_1_lite", false, 300)
+	fr.setHealth("openrouter_gemini_flash_3_1_lite", false, 200)
+
+	sel, ok := getFastestForGroup(ctx(), fr, groupGemini31, "us")
+	if !ok {
+		t.Fatal("expected a selection")
+	}
+	if sel.ConfigKey != "openrouter_gemini_flash_3_1_lite" || sel.UsingFallback {
+		t.Fatalf("selection = %+v, want fastest gemini endpoint", sel)
+	}
+}
+
+func TestSelectionGeminiGroupFallsBackToGPT41Group(t *testing.T) {
+	fr := newFakeRedis()
+	// No gemini health at all; gpt-4.1 group has one healthy endpoint.
+	// Mirrors Python's LLMSwitchingService FALLBACK_MODEL_GROUP behavior.
+	fr.setHealth("azure_gpt_4_1_us_west", false, 250)
+
+	sel, ok := getFastestForGroup(ctx(), fr, groupGemini31, "us")
+	if !ok {
+		t.Fatal("expected a selection")
+	}
+	if !sel.UsingFallback || sel.SelectedGroup != groupGPT41 || sel.ConfigKey != "azure_gpt_4_1_us_west" {
+		t.Fatalf("selection = %+v, want gpt-4.1 group fallback", sel)
+	}
+}
+
+func TestSelectionOneEndpointGroupUsesOwnFallback(t *testing.T) {
+	fr := newFakeRedis()
+	fr.setHealth("openai_gpt_4_1", false, 1)
+
+	sel, ok := getFastestForGroup(ctx(), fr, groupFollowUpDynamic, "us")
+	if !ok {
+		t.Fatal("expected a selection")
+	}
+	if sel.ConfigKey != "openrouter_gemma_4_26b_a4b_it_nitro" {
+		t.Fatalf("selected %q, want dynamic follow-up endpoint", sel.ConfigKey)
+	}
+	if sel.UsingFallback || sel.SelectedGroup != groupFollowUpDynamic {
+		t.Fatalf("selection = %+v, want own-group fallback without cross-group fallback", sel)
+	}
+}
+
+func TestSelectionGuidanceGroupUsesOwnFallback(t *testing.T) {
+	fr := newFakeRedis()
+	fr.setHealth("openai_gpt_4_1", false, 1)
+
+	sel, ok := getFastestForGroup(ctx(), fr, groupGPTOSS120Fast, "us")
+	if !ok {
+		t.Fatal("expected a selection")
+	}
+	if sel.ConfigKey != "openrouter_gpt_oss_120b" {
+		t.Fatalf("selected %q, want guidance fallback endpoint", sel.ConfigKey)
+	}
+	if sel.UsingFallback || sel.SelectedGroup != groupGPTOSS120Fast {
+		t.Fatalf("selection = %+v, want guidance own-group fallback", sel)
 	}
 }
 
@@ -232,7 +301,7 @@ func TestBuildRequestGrok(t *testing.T) {
 	t.Setenv("GROK_4_1_FNR_EASTUS_ENDPOINT", "https://eastus.example.com/openai/v1")
 
 	r := &Router{cfg: Config{Group: groupGrokSales}, httpClient: &http.Client{}}
-	req, err := r.buildRequest(ctx(), endpointConfigs["grok_4_1_fnr_eastus"], []map[string]string{{"role": "user", "content": "hi"}})
+	req, err := r.buildRequest(ctx(), endpointConfigs["grok_4_1_fnr_eastus"], testLLMRequest())
 	if err != nil {
 		t.Fatalf("buildRequest: %v", err)
 	}
@@ -289,7 +358,7 @@ func TestBuildRequestAzureUsesApiKeyHeaderAndDeploymentPath(t *testing.T) {
 	t.Setenv("AZURE_OPENAI_US_EAST_ENDPOINT", "https://x.openai.azure.com")
 
 	r := &Router{cfg: Config{Group: groupGPT41}, httpClient: &http.Client{}}
-	req, err := r.buildRequest(ctx(), endpointConfigs["azure_gpt_4_1_us_east"], []map[string]string{{"role": "user", "content": "hi"}})
+	req, err := r.buildRequest(ctx(), endpointConfigs["azure_gpt_4_1_us_east"], testLLMRequest())
 	if err != nil {
 		t.Fatalf("buildRequest: %v", err)
 	}
@@ -306,6 +375,120 @@ func TestBuildRequestAzureUsesApiKeyHeaderAndDeploymentPath(t *testing.T) {
 	body := readBody(t, req)
 	if _, hasReasoning := body["reasoning"]; hasReasoning {
 		t.Error("gpt-4.1 must not carry the grok reasoning field")
+	}
+}
+
+func TestBuildRequestIncludesTools(t *testing.T) {
+	t.Setenv("GROK_4_1_FNR_EASTUS_API_KEY", "grok-key")
+	t.Setenv("GROK_4_1_FNR_EASTUS_ENDPOINT", "https://eastus.example.com/openai/v1")
+
+	r := &Router{cfg: Config{Group: groupGrokSales}, httpClient: &http.Client{}}
+	req, err := r.buildRequest(ctx(), endpointConfigs["grok_4_1_fnr_eastus"], vpc.LLMRequest{
+		Messages: []vpc.Message{{Role: "user", Content: "hi"}},
+		Tools: []vpc.ToolDefinition{{
+			Type: "function",
+			Function: vpc.ToolFunction{
+				Name:        "get_guidance",
+				Description: "Fetch guidance for the next turn.",
+				Parameters:  map[string]any{"type": "object"},
+			},
+		}},
+		ToolChoice: "auto",
+	})
+	if err != nil {
+		t.Fatalf("buildRequest: %v", err)
+	}
+	body := readBody(t, req)
+	if body["tool_choice"] != "auto" {
+		t.Fatalf("tool_choice = %v, want auto", body["tool_choice"])
+	}
+	tools, ok := body["tools"].([]any)
+	if !ok || len(tools) != 1 {
+		t.Fatalf("tools = %#v, want one tool definition", body["tools"])
+	}
+	tool, ok := tools[0].(map[string]any)
+	if !ok || tool["type"] != "function" {
+		t.Fatalf("tool = %#v, want function tool", tools[0])
+	}
+	fn, ok := tool["function"].(map[string]any)
+	if !ok || fn["name"] != "get_guidance" {
+		t.Fatalf("function = %#v, want get_guidance", tool["function"])
+	}
+}
+
+func TestBuildRequestOpenRouterGemmaProviderPreferences(t *testing.T) {
+	t.Setenv("OPENROUTER_API_KEY", "or-key")
+
+	r := &Router{cfg: Config{}, httpClient: &http.Client{}}
+	req, err := r.buildRequest(ctx(), endpointConfigs["openrouter_gemma_4_26b_a4b_it_nitro"], testLLMRequest())
+	if err != nil {
+		t.Fatalf("buildRequest: %v", err)
+	}
+	if req.URL.String() != "https://openrouter.ai/api/v1/chat/completions" {
+		t.Errorf("url = %s", req.URL.String())
+	}
+	if got := req.Header.Get("Authorization"); got != "Bearer or-key" {
+		t.Errorf("auth = %q", got)
+	}
+	body := readBody(t, req)
+	if body["model"] != "google/gemma-4-26b-a4b-it:nitro" {
+		t.Errorf("model = %v", body["model"])
+	}
+	if body["temperature"] != 0.5 {
+		t.Errorf("temperature = %v, want 0.5", body["temperature"])
+	}
+	provider, ok := body["provider"].(map[string]any)
+	if !ok {
+		t.Fatalf("provider = %#v, want object", body["provider"])
+	}
+	order, ok := provider["order"].([]any)
+	if !ok || len(order) != 3 || order[0] != "deepinfra/fp8" || order[1] != "cloudflare" || order[2] != "parasail/bf16" {
+		t.Fatalf("provider.order = %#v", provider["order"])
+	}
+	ignored, ok := provider["ignore"].([]any)
+	if !ok || len(ignored) != 3 || ignored[0] != "google-ai-studio" {
+		t.Fatalf("provider.ignore = %#v", provider["ignore"])
+	}
+	if provider["allow_fallbacks"] != true {
+		t.Fatalf("provider.allow_fallbacks = %#v, want true", provider["allow_fallbacks"])
+	}
+}
+
+func TestBuildRequestGeminiFlashLiteTemperature(t *testing.T) {
+	t.Setenv("OPENROUTER_API_KEY", "or-key")
+
+	r := &Router{cfg: Config{}, httpClient: &http.Client{}}
+	req, err := r.buildRequest(ctx(), endpointConfigs["openrouter_gemini_flash_3_1_lite"], testLLMRequest())
+	if err != nil {
+		t.Fatalf("buildRequest: %v", err)
+	}
+	body := readBody(t, req)
+	// Python follow-up runs gemini-flash-3.1-lite at temperature 0.5.
+	if body["temperature"] != 0.5 {
+		t.Errorf("temperature = %v, want 0.5", body["temperature"])
+	}
+}
+
+func TestBuildRequestCerebrasGPTOSSMaxTokens(t *testing.T) {
+	t.Setenv("CEREBRAS_ENTERPRISE_API_KEY", "cb-key")
+
+	r := &Router{cfg: Config{}, httpClient: &http.Client{}}
+	req, err := r.buildRequest(ctx(), endpointConfigs["cerebras_gpt_oss_120b"], testLLMRequest())
+	if err != nil {
+		t.Fatalf("buildRequest: %v", err)
+	}
+	if req.URL.String() != "https://api.cerebras.ai/v1/chat/completions" {
+		t.Errorf("url = %s", req.URL.String())
+	}
+	if got := req.Header.Get("Authorization"); got != "Bearer cb-key" {
+		t.Errorf("auth = %q", got)
+	}
+	body := readBody(t, req)
+	if body["model"] != "gpt-oss-120b" {
+		t.Errorf("model = %v", body["model"])
+	}
+	if body["max_tokens"] != float64(500) {
+		t.Errorf("max_tokens = %v, want 500", body["max_tokens"])
 	}
 }
 
@@ -354,6 +537,47 @@ func sseServer(t *testing.T, contents []string) *httptest.Server {
 	}))
 }
 
+func TestParseSSEChunkToolCallFragments(t *testing.T) {
+	acc := vpc.NewToolCallAccumulator()
+	lines := []string{
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"get_","arguments":"{\"situation\""}}]}}]}`,
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"guidance","arguments":":\"pain\"}"}}]},"finish_reason":"tool_calls"}]}`,
+	}
+
+	var finishReason string
+	for _, line := range lines {
+		content, deltas, fr, _, _, _, ok := parseSSEChunk(line)
+		if !ok {
+			t.Fatalf("parseSSEChunk(%s) returned ok=false", line)
+		}
+		if content != "" {
+			t.Fatalf("content = %q, want no text delta", content)
+		}
+		if fr != "" {
+			finishReason = fr
+		}
+		for _, delta := range deltas {
+			acc.Add(delta.index, delta.call)
+		}
+	}
+	calls := acc.List()
+	if len(calls) != 1 {
+		t.Fatalf("tool calls = %+v, want one call", calls)
+	}
+	if calls[0].ID != "call_1" || calls[0].Type != "function" {
+		t.Fatalf("call metadata = %+v, want id call_1 function", calls[0])
+	}
+	if calls[0].Function.Name != "get_guidance" {
+		t.Fatalf("function name = %q, want get_guidance", calls[0].Function.Name)
+	}
+	if calls[0].Function.Arguments != `{"situation":"pain"}` {
+		t.Fatalf("arguments = %q, want situation pain JSON", calls[0].Function.Arguments)
+	}
+	if finishReason != "tool_calls" {
+		t.Fatalf("finish reason = %q, want tool_calls", finishReason)
+	}
+}
+
 func TestStreamSuccessAndLog(t *testing.T) {
 	server := sseServer(t, []string{"foo ", "bar"})
 	defer server.Close()
@@ -370,7 +594,7 @@ func TestStreamSuccessAndLog(t *testing.T) {
 	}
 
 	var tokens []string
-	res, err := r.Stream(ctx(), []map[string]string{{"role": "user", "content": "hi"}}, func(tok string) {
+	res, err := r.Stream(ctx(), testLLMRequest(), func(tok string) {
 		tokens = append(tokens, tok)
 	})
 	if err != nil {
@@ -424,7 +648,7 @@ func TestStreamErrorBlacklistsAndTriggersPoll(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	_, streamErr := r.Stream(ctx(), []map[string]string{{"role": "user", "content": "hi"}}, func(string) {})
+	_, streamErr := r.Stream(ctx(), testLLMRequest(), func(string) {})
 	if streamErr == nil {
 		t.Fatal("expected a stream error on 500")
 	}

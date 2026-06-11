@@ -65,25 +65,49 @@ func newVertexTokenSource(loadCreds func(context.Context) ([]byte, error), httpC
 }
 
 var (
-	sharedVertexOnce sync.Once
-	sharedVertex     *vertexTokenSource
+	sharedVertexSourcesMu sync.Mutex
+	sharedVertexSources   = map[string]*vertexTokenSource{}
 )
 
-// sharedVertexTokenSource returns the process-wide Vertex token source,
-// configured to lazily fetch VERTEX_DISHAAI_CREDS_FILE from S3 (like
-// Python loads it once at settings import). The creds are static, so a
-// single source is shared across all calls/routers.
+// sharedVertexTokenSource returns the default process-wide Vertex token
+// source used by the original sales Grok endpoint.
 func sharedVertexTokenSource() *vertexTokenSource {
-	sharedVertexOnce.Do(func() {
-		sharedVertex = newVertexTokenSource(func(ctx context.Context) ([]byte, error) {
-			s3Key := strings.TrimSpace(os.Getenv(vertexCredsEnv))
-			if s3Key == "" {
-				return nil, fmt.Errorf("llmrouter: %s not set; Vertex endpoint disabled", vertexCredsEnv)
-			}
-			return s3GetObjectFromEnv(ctx, s3Key)
-		}, nil)
-	})
-	return sharedVertex
+	return vertexTokenSourceForEnv(vertexCredsEnv)
+}
+
+func vertexTokenSourceForEnv(envKey string) *vertexTokenSource {
+	envKey = strings.TrimSpace(envKey)
+	if envKey == "" {
+		envKey = vertexCredsEnv
+	}
+	sharedVertexSourcesMu.Lock()
+	defer sharedVertexSourcesMu.Unlock()
+	if src := sharedVertexSources[envKey]; src != nil {
+		return src
+	}
+	src := newVertexTokenSource(func(ctx context.Context) ([]byte, error) {
+		s3Key := strings.TrimSpace(os.Getenv(envKey))
+		if s3Key == "" {
+			return nil, fmt.Errorf("llmrouter: %s not set; Vertex endpoint disabled", envKey)
+		}
+		return s3GetObjectFromEnv(ctx, s3Key)
+	}, nil)
+	sharedVertexSources[envKey] = src
+	return src
+}
+
+func vertexCredsEnvForConfig(cfg endpointConfig) string {
+	if cfg.VertexCredsEnv != "" {
+		return cfg.VertexCredsEnv
+	}
+	switch cfg.VertexProject {
+	case "gen-lang-client-0439239631":
+		return "VERTEX_DISHAAI_CREDS_FILE"
+	case "disha-ai2":
+		return "VERTEX_DISHA_AI2_CREDS_FILE"
+	default:
+		return "VERTEX_AI_CREDS_FILE"
+	}
 }
 
 // ensureCreds loads + parses the service-account key once. Caller holds s.mu.

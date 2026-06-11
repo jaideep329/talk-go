@@ -14,6 +14,7 @@ type Deps struct {
 	API          *APIClient
 	Documents    *DocumentStore
 	PhoneticDict *PhoneticDict
+	S3           S3GetClient
 	GKEPatcher   *GKEPodPatcher
 }
 
@@ -38,6 +39,8 @@ func NewBot(botType string) (Bot, error) {
 	switch botType {
 	case SalesCallBotType:
 		return SalesCallBot{}, nil
+	case FollowUpBotType:
+		return FollowUpBot{}, nil
 	default:
 		return nil, fmt.Errorf("disha: unsupported bot_type %q", botType)
 	}

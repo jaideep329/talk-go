@@ -9,6 +9,8 @@ import (
 	"net/url"
 	"os"
 	"strings"
+
+	vpc "github.com/jaideep329/talk-go/voicepipelinecore"
 )
 
 // buildRequest assembles an OpenAI Chat-Completions streaming request
@@ -16,7 +18,7 @@ import (
 // only the base URL and auth header differ (Azure uses an api-key
 // header, everyone else uses Bearer). Grok models get the
 // reasoning-disabled extra field, matching custom_llm_service.py.
-func (r *Router) buildRequest(ctx context.Context, cfg endpointConfig, messages []map[string]string) (*http.Request, error) {
+func (r *Router) buildRequest(ctx context.Context, cfg endpointConfig, llmReq vpc.LLMRequest) (*http.Request, error) {
 	endpoint, err := r.completionsURL(cfg)
 	if err != nil {
 		return nil, err
@@ -26,8 +28,14 @@ func (r *Router) buildRequest(ctx context.Context, cfg endpointConfig, messages 
 		"model":          cfg.Model,
 		"stream":         true,
 		"stream_options": map[string]any{"include_usage": true},
-		"messages":       messages,
+		"messages":       llmReq.Messages,
 		"temperature":    r.temperatureFor(cfg),
+	}
+	if len(llmReq.Tools) > 0 {
+		body["tools"] = llmReq.Tools
+	}
+	if llmReq.ToolChoice != nil {
+		body["tool_choice"] = llmReq.ToolChoice
 	}
 	if cfg.MaxTokens != nil {
 		body["max_tokens"] = *cfg.MaxTokens
@@ -38,6 +46,9 @@ func (r *Router) buildRequest(ctx context.Context, cfg endpointConfig, messages 
 	// Gemini providers carry these — the Azure-hosted Grok endpoints reject
 	// a top-level "reasoning" argument with a 400.
 	for k, v := range extraBodyFor(cfg) {
+		body[k] = v
+	}
+	for k, v := range cfg.ExtraBody {
 		body[k] = v
 	}
 
@@ -98,7 +109,7 @@ func (r *Router) baseURL(cfg endpointConfig) (string, error) {
 		return v, nil
 	case providerOpenAI:
 		return "https://api.openai.com/v1", nil
-	case providerOpenRouter, providerGoogleAIStudio:
+	case providerOpenRouter, providerGoogleAIStudio, providerCerebras:
 		if cfg.BaseURL == "" {
 			return "", fmt.Errorf("llmrouter: missing base URL for %s", cfg.Key)
 		}
@@ -112,9 +123,9 @@ func (r *Router) baseURL(cfg endpointConfig) (string, error) {
 
 func (r *Router) apiKeyFor(ctx context.Context, cfg endpointConfig) (string, error) {
 	if cfg.Provider == providerVertex {
-		// Process-wide token source; lazily loads the service-account key
-		// from S3 (VERTEX_DISHAAI_CREDS_FILE) on first use.
-		return sharedVertexTokenSource().Token(ctx)
+		// Process-wide per-credential token source; lazily loads the
+		// service-account key from S3 on first use.
+		return vertexTokenSourceForEnv(vertexCredsEnvForConfig(cfg)).Token(ctx)
 	}
 	key := os.Getenv(cfg.APIKeyEnv)
 	if key == "" {

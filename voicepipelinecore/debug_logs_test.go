@@ -18,7 +18,7 @@ func TestUIEventSenderStoresRTVIStreamForDebugLogs(t *testing.T) {
 	events.ServerMessage(map[string]any{
 		"type":     "llm_call_result",
 		"status":   "completed",
-		"model":    llmModel,
+		"model":    "test-model",
 		"ttfb_ms":  123.4,
 		"total_ms": 567.8,
 	}, at.Add(2*time.Second))

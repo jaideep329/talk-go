@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"log"
@@ -60,7 +59,6 @@ func main() {
 	defer closeDishaDeps(dishaDeps)
 	registerCleanupHandlers()
 	registerWorkerPodIfConfigured()
-	http.HandleFunc("/connect", handleConnect)
 	http.HandleFunc("/bot/create_worker_room", requireMethod(http.MethodPost, handleCreateWorkerRoom))
 	http.HandleFunc("/bot/has_active_session", requireMethod(http.MethodGet, handleHasActiveSession))
 	http.HandleFunc("/bot/health_check", requireMethod(http.MethodGet, handleHealthCheck))
@@ -95,7 +93,7 @@ func main() {
 	markGracefulShutdownCompleted()
 }
 
-type connectRequest struct {
+type botTaskLaunchRequest struct {
 	ConversationID string `json:"conversation_id"`
 	BotType        string `json:"bot_type"`
 	RoomURL        string `json:"room_url"`
@@ -104,80 +102,7 @@ type connectRequest struct {
 	BotToken       string `json:"bot_token"`
 }
 
-func handleConnect(w http.ResponseWriter, r *http.Request) {
-	req := readConnectRequest(r)
-	// A call outlives the HTTP request that created it. If the task is
-	// derived from r.Context(), the pipeline is cancelled as soon as
-	// /connect returns to Disha's Create Room request.
-	task, err := prepareTask(context.Background(), req, nil)
-	if err != nil {
-		log.Printf("failed to create task: %v", err)
-		status := http.StatusInternalServerError
-		if req.ConversationID != "" {
-			status = http.StatusBadGateway
-		}
-		http.Error(w, "failed to create task", status)
-		return
-	}
-
-	task.Start()
-
-	roomName := ""
-	if task.TaskCtx != nil && task.TaskCtx.Room != nil {
-		roomName = task.TaskCtx.Room.RoomName()
-	}
-	transportType := ""
-	if task.TaskCtx != nil && task.TaskCtx.UIEvents != nil {
-		transportType, _, _, _ = task.TaskCtx.UIEvents.TransportSession()
-	}
-	if strings.TrimSpace(transportType) == "" {
-		transportType = "daily"
-	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{
-		"room_url":       req.RoomURL,
-		"token":          req.Token,
-		"room_name":      roomName,
-		"transport_type": transportType,
-	})
-}
-
-func readConnectRequest(r *http.Request) connectRequest {
-	req := connectRequest{
-		ConversationID: strings.TrimSpace(r.URL.Query().Get("conversation_id")),
-		BotType:        strings.TrimSpace(r.URL.Query().Get("bot_type")),
-		RoomURL:        strings.TrimSpace(r.URL.Query().Get("room_url")),
-		RoomName:       strings.TrimSpace(r.URL.Query().Get("room_name")),
-		Token:          strings.TrimSpace(r.URL.Query().Get("token")),
-		BotToken:       strings.TrimSpace(r.URL.Query().Get("bot_token")),
-	}
-	if r.Body != nil {
-		var body connectRequest
-		if err := json.NewDecoder(r.Body).Decode(&body); err == nil {
-			if body.ConversationID != "" {
-				req.ConversationID = strings.TrimSpace(body.ConversationID)
-			}
-			if body.BotType != "" {
-				req.BotType = strings.TrimSpace(body.BotType)
-			}
-			if body.RoomURL != "" {
-				req.RoomURL = strings.TrimSpace(body.RoomURL)
-			}
-			if body.RoomName != "" {
-				req.RoomName = strings.TrimSpace(body.RoomName)
-			}
-			if body.Token != "" {
-				req.Token = strings.TrimSpace(body.Token)
-			}
-			if body.BotToken != "" {
-				req.BotToken = strings.TrimSpace(body.BotToken)
-			}
-		}
-	}
-	return req
-}
-
-func buildConnectTask(ctx context.Context, req connectRequest) (*voicepipelinecore.PipelineTask, error) {
+func buildBotTask(ctx context.Context, req botTaskLaunchRequest) (*voicepipelinecore.PipelineTask, error) {
 	if req.RoomURL == "" {
 		return nil, errors.New("room_url is required")
 	}
@@ -204,8 +129,8 @@ func buildConnectTask(ctx context.Context, req connectRequest) (*voicepipelineco
 	}, dishaDeps)
 }
 
-func prepareTask(ctx context.Context, req connectRequest, onCleanup func(*voicepipelinecore.PipelineTask)) (*voicepipelinecore.PipelineTask, error) {
-	task, err := buildConnectTask(ctx, req)
+func prepareTask(ctx context.Context, req botTaskLaunchRequest, onCleanup func(*voicepipelinecore.PipelineTask)) (*voicepipelinecore.PipelineTask, error) {
+	task, err := buildBotTask(ctx, req)
 	if err != nil {
 		return nil, err
 	}
@@ -260,11 +185,17 @@ func newDishaDeps() disha.Deps {
 		API:          disha.NewAPIClient(firstNonEmpty(os.Getenv("DISHA_API_URL"), os.Getenv("API_BASE_URL")), 10*time.Second, logger),
 		Documents:    disha.NewDocumentStore(redis, logger),
 		PhoneticDict: phonetic,
+		S3:           disha.NewS3GetClientFromEnv(logger, "AWS_BUCKET_NAME"),
 		GKEPatcher:   disha.NewGKEPodPatcher(logger),
 	}
 }
 
 func closeDishaDeps(deps disha.Deps) {
+	if deps.Documents != nil {
+		if err := deps.Documents.Close(); err != nil {
+			log.Printf("failed to close Disha document store: %v", err)
+		}
+	}
 	if deps.Redis != nil {
 		if err := deps.Redis.Close(); err != nil {
 			log.Printf("failed to close Disha Redis client: %v", err)

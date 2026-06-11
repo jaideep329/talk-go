@@ -50,6 +50,7 @@ func (c *CallEventCallbacks) Events() voicepipelinecore.CallEvents {
 		OnFirstUserAudio:         c.OnFirstUserAudio,
 		OnUserTurnCommitted:      c.OnUserTurnCommitted,
 		OnAssistantTurnCommitted: c.OnAssistantTurnCommitted,
+		OnToolResultCommitted:    c.OnToolResultCommitted,
 		OnCallEnded:              c.OnCallEnded,
 	}
 }
@@ -80,6 +81,25 @@ func (c *CallEventCallbacks) OnAssistantTurnCommitted(text string, at time.Time,
 	c.appendConversationChunk(text, "assistant", at, metrics, promptKey)
 }
 
+func (c *CallEventCallbacks) OnToolResultCommitted(assistantToolCall voicepipelinecore.Message, toolResult voicepipelinecore.Message, at time.Time) {
+	c.appendConversationChunkWithAdditionalData(
+		assistantToolCall.Content,
+		assistantToolCall.Role,
+		at,
+		voicepipelinecore.TurnMetrics{},
+		"",
+		toolContextAdditionalData(assistantToolCall),
+	)
+	c.appendConversationChunkWithAdditionalData(
+		toolResult.Content,
+		toolResult.Role,
+		at.Add(time.Nanosecond),
+		voicepipelinecore.TurnMetrics{},
+		"",
+		toolContextAdditionalData(toolResult),
+	)
+}
+
 func (c *CallEventCallbacks) OnCallEnded(reason voicepipelinecore.EndReason, stats voicepipelinecore.CallStats) {
 	logDataS3Key := uploadDebugLogs(c.logger, c.debugLogUploader, stats.DebugLogs)
 	c.runPostCallOperations(reason, stats, logDataS3Key)
@@ -99,6 +119,10 @@ func (c *CallEventCallbacks) updateConversation(req UpdateConversationRequest) {
 }
 
 func (c *CallEventCallbacks) appendConversationChunk(text, role string, at time.Time, metrics voicepipelinecore.TurnMetrics, promptKey string) {
+	c.appendConversationChunkWithAdditionalData(text, role, at, metrics, promptKey, nil)
+}
+
+func (c *CallEventCallbacks) appendConversationChunkWithAdditionalData(text, role string, at time.Time, metrics voicepipelinecore.TurnMetrics, promptKey string, additionalData any) {
 	if c == nil || c.redis == nil {
 		return
 	}
@@ -119,6 +143,7 @@ func (c *CallEventCallbacks) appendConversationChunk(text, role string, at time.
 		TextAggregationMs:                assistantMetricSeconds(role, metrics.TTSTextAggregationMs),
 		Created:                          at.Format(time.RFC3339Nano),
 		IsDebugLog:                       false,
+		AdditionalData:                   additionalData,
 		MainAgentSystemPromptLangfuseKey: promptKeyPtr,
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), chunkWriteTimeout)

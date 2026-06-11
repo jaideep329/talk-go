@@ -143,7 +143,12 @@ func (b SalesCallBot) BuildTask(ctx context.Context, req BotTaskRequest, deps De
 	userIdle := voicepipelinecore.NewUserIdleProcessor(taskCtx)
 	contextAggregator := voicepipelinecore.NewContextAggregator(taskCtx, pl.InitialMessages, pl.PromptKey)
 	talkTime := voicepipelinecore.NewTalkTimeMonitoringProcessorWithMaxTalkTime(taskCtx, pl.MaxTalkTime)
-	llm := voicepipelinecore.NewLLMProcessorWithClient(taskCtx, newSalesLLMClient(deps, pl.Startup))
+	llmClient, err := newSalesLLMClient(deps, pl.Startup)
+	if err != nil {
+		task.Abort()
+		return nil, err
+	}
+	llm := voicepipelinecore.NewLLMProcessorWithClient(taskCtx, llmClient)
 	tts := voicepipelinecore.NewTTSProcessor(taskCtx, pl.PhoneticDict)
 	playback := voicepipelinecore.NewPlaybackSinkProcessor(taskCtx)
 	sink := voicepipelinecore.NewPipelineSinkProcessor(taskCtx, task.CompleteEnd)
@@ -189,7 +194,7 @@ func loadSalesPrompt(ctx context.Context, store *DocumentStore, startup CallStar
 		return "", "", 0, fmt.Errorf("disha: document store is required to load %q", name)
 	}
 
-	vars := map[string]string{
+	vars := DocumentVariables{
 		"patient_info":     startup.Data.Conversation.PatientInfo,
 		"current_datetime": time.Now().In(istLocation()).Format("2 Jan 2006 15:04:05"),
 		// short_term_memory mirrors Python's fetch_conversation: the
@@ -213,11 +218,8 @@ func loadSalesPrompt(ctx context.Context, store *DocumentStore, startup CallStar
 }
 
 // newSalesLLMClient builds the health-based LLM router for the sales
-// call (model group grok-4.1-fast-sales, region us, temperature 0). On
-// any construction error it returns nil, which NewLLMProcessorWithClient
-// treats as a fallback to the default OpenAI gpt-4.1 client so a call
-// can still proceed.
-func newSalesLLMClient(deps Deps, startup CallStartup) voicepipelinecore.LLMClient {
+// call (model group grok-4.1-fast-sales, region us, temperature 0).
+func newSalesLLMClient(deps Deps, startup CallStartup) (voicepipelinecore.LLMClient, error) {
 	logger := startup.Logger
 	router, err := llmrouter.New(llmrouter.Config{
 		Group:   salesModelGroup,
@@ -228,11 +230,11 @@ func newSalesLLMClient(deps Deps, startup CallStartup) voicepipelinecore.LLMClie
 	})
 	if err != nil {
 		if logger != nil {
-			logger.Printf("disha: LLM router init failed, using default OpenAI client: %v\n", err)
+			logger.Printf("disha: LLM router init failed: %v\n", err)
 		}
-		return nil
+		return nil, fmt.Errorf("disha: create sales LLM router: %w", err)
 	}
-	return router
+	return router, nil
 }
 
 func salesTalkTimeLimit(remainingSeconds *float64) time.Duration {

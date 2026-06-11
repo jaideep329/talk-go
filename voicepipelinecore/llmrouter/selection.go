@@ -18,33 +18,34 @@ type selection struct {
 //     latency (mean of last 5 adjusted poll latencies), skipping
 //     blacklisted endpoints and those with no latency data;
 //   - pick the fastest;
-//   - if none is available and the group is not already the fallback
-//     group, repeat against the gpt-4.1 fallback group (using_fallback);
-//   - as a last resort return the fallback group's hardcoded fallback
-//     config so a turn can always proceed.
+//   - if none is available and the group declares a fallback group, repeat
+//     against that group (using_fallback);
+//   - as a last resort return the selected group's hardcoded fallback config
+//     so one-endpoint groups can still proceed without health data.
 func getFastestForGroup(ctx context.Context, store RedisStore, group, region string) (selection, bool) {
 	configs, ok := groupConfigsForRegion(group, region)
 	if !ok || len(configs) == 0 {
 		return selection{}, false
 	}
+	groupConfig := modelGroups[group]
 
 	if key, ok := fastestAvailable(ctx, store, configs); ok {
 		return selection{ConfigKey: key, UsingFallback: false, SelectedGroup: group}, true
 	}
 
-	if group != fallbackModelGroup {
-		fbConfigs, fbOK := groupConfigsForRegion(fallbackModelGroup, region)
+	if groupConfig.FallbackGroup != "" {
+		fbConfigs, fbOK := groupConfigsForRegion(groupConfig.FallbackGroup, region)
 		if fbOK && len(fbConfigs) > 0 {
 			if key, ok := fastestAvailable(ctx, store, fbConfigs); ok {
-				return selection{ConfigKey: key, UsingFallback: true, SelectedGroup: fallbackModelGroup}, true
+				return selection{ConfigKey: key, UsingFallback: true, SelectedGroup: groupConfig.FallbackGroup}, true
 			}
-			if fb := modelGroups[fallbackModelGroup].Fallback; fb != "" {
-				return selection{ConfigKey: fb, UsingFallback: true, SelectedGroup: fallbackModelGroup}, true
+			if fb := modelGroups[groupConfig.FallbackGroup].Fallback; fb != "" {
+				return selection{ConfigKey: fb, UsingFallback: true, SelectedGroup: groupConfig.FallbackGroup}, true
 			}
 		}
 	}
 
-	if fb := modelGroups[group].Fallback; fb != "" {
+	if fb := groupConfig.Fallback; fb != "" {
 		return selection{ConfigKey: fb, UsingFallback: false, SelectedGroup: group}, true
 	}
 	return selection{}, false

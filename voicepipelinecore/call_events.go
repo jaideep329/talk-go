@@ -29,6 +29,7 @@ type callEventDispatcher struct {
 	onFirstUserAudio         func(time.Time)
 	onUserTurnCommitted      func(text string, at time.Time, promptKey string)
 	onAssistantTurnCommitted func(text string, at time.Time, metrics TurnMetrics, promptKey string)
+	onToolResultCommitted    func(assistantToolCall Message, toolResult Message, at time.Time)
 
 	botJoinedOnce       sync.Once
 	userJoinedOnce      sync.Once
@@ -49,6 +50,7 @@ func newCallEventDispatcher(logger *log.Logger, events CallEvents) *callEventDis
 		onFirstUserAudio:         events.OnFirstUserAudio,
 		onUserTurnCommitted:      events.OnUserTurnCommitted,
 		onAssistantTurnCommitted: events.OnAssistantTurnCommitted,
+		onToolResultCommitted:    events.OnToolResultCommitted,
 	}
 	go d.run()
 	return d
@@ -118,6 +120,13 @@ func (l *callEventDispatcher) fireAssistantTurnCommitted(text string, at time.Ti
 		return
 	}
 	l.dispatch("OnAssistantTurnCommitted", func() { l.onAssistantTurnCommitted(text, at, metrics, promptKey) })
+}
+
+func (l *callEventDispatcher) fireToolResultCommitted(assistantToolCall Message, toolResult Message, at time.Time) {
+	if l == nil || l.onToolResultCommitted == nil {
+		return
+	}
+	l.dispatch("OnToolResultCommitted", func() { l.onToolResultCommitted(assistantToolCall, toolResult, at) })
 }
 
 func (l *callEventDispatcher) dispatch(name string, fn func()) {

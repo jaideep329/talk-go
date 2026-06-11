@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jaideep329/talk-go/voicepipelinecore"
 	"github.com/jaideep329/talk-go/voicepipelinecore/llmrouter"
 )
 
@@ -17,10 +18,18 @@ func TestNewLLMLogSinkQueuesModuleLevelWrapper(t *testing.T) {
 	}
 
 	sink(llmrouter.CallLog{
-		Model:            "grok-4-1-fast-non-reasoning",
-		Deployment:       "GROK_4_1_FNR_EASTUS",
-		Messages:         []map[string]string{{"role": "user", "content": "hello"}},
-		ResponseContent:  "hi",
+		Model:           "grok-4-1-fast-non-reasoning",
+		Deployment:      "GROK_4_1_FNR_EASTUS",
+		Request:         voicepipelinecore.LLMRequest{Messages: []voicepipelinecore.Message{{Role: "user", Content: "hello"}}},
+		ResponseContent: "hi",
+		ToolCalls: []voicepipelinecore.ToolCall{{
+			ID:   "call_1",
+			Type: "function",
+			Function: voicepipelinecore.ToolCallFunction{
+				Name:      "get_guidance",
+				Arguments: `{"situation":"pain"}`,
+			},
+		}},
 		TTFBMs:           12.5,
 		TotalMs:          48.25,
 		PromptTokens:     11,
@@ -58,5 +67,28 @@ func TestNewLLMLogSinkQueuesModuleLevelWrapper(t *testing.T) {
 		kwargs["prompt_tokens"] != float64(11) ||
 		kwargs["completion_tokens"] != float64(7) {
 		t.Fatalf("kwargs mismatch: %+v", kwargs)
+	}
+	responsePayload, ok := kwargs["response_payload"].(map[string]any)
+	if !ok {
+		t.Fatalf("response_payload = %#v, want object", kwargs["response_payload"])
+	}
+	if _, hasToolCalls := responsePayload["tool_calls"]; hasToolCalls {
+		t.Fatalf("response_payload should match live Disha shape without raw tool_calls: %+v", responsePayload)
+	}
+	functions, ok := responsePayload["functions_list"].([]any)
+	if !ok || len(functions) != 1 || functions[0] != "get_guidance" {
+		t.Fatalf("functions_list = %#v, want [get_guidance]", responsePayload["functions_list"])
+	}
+	arguments, ok := responsePayload["arguments_list"].([]any)
+	if !ok || len(arguments) != 1 || arguments[0] != `{"situation":"pain"}` {
+		t.Fatalf("arguments_list = %#v, want situation JSON", responsePayload["arguments_list"])
+	}
+	toolIDs, ok := responsePayload["tool_id_list"].([]any)
+	if !ok || len(toolIDs) != 1 || toolIDs[0] != "call_1" {
+		t.Fatalf("tool_id_list = %#v, want [call_1]", responsePayload["tool_id_list"])
+	}
+	usage, ok := responsePayload["usage"].(map[string]any)
+	if !ok || usage["prompt_tokens"] != float64(11) || usage["completion_tokens"] != float64(7) || usage["total_tokens"] != float64(18) {
+		t.Fatalf("usage = %#v, want 11/7/18", responsePayload["usage"])
 	}
 }

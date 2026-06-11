@@ -241,12 +241,12 @@ func buildResumeSystemMessage(data *ConversationData, now time.Time) string {
 		// fails.
 		return ""
 	}
-	gracefully := true
-	if data.Conversation.ResumeGracefully != nil {
-		gracefully = *data.Conversation.ResumeGracefully
-	}
-	if !gracefully {
-		return resumeMessageAfterWindow
+	// Python gates on `if conversation.resume_gracefully:` — False and
+	// missing both mean the thread was deliberately rebuilt from an
+	// explicit chunkId (bot_session_manager sets resume_gracefully =
+	// not resumed_from_specific_chunk), so no resume nudge is emitted.
+	if data.Conversation.ResumeGracefully == nil || !*data.Conversation.ResumeGracefully {
+		return ""
 	}
 	if now.Sub(chunkCreated) < resumeWindowGraceful {
 		return resumeMessageGracefulWithinWindow

@@ -408,6 +408,9 @@ func TestSalesCallBotPlanAppendsResumeMessage(t *testing.T) {
 	apiServer, _ := newCallAPIServer(t)
 	seedDocument(t, redisServer, salesPromptDefault, "production", 1, "SYS")
 	resumedID := "chunk-prev"
+	// The backend cache always serializes resume_gracefully (model default
+	// True); only explicit-chunkId rebuilds set it False.
+	gracefully := true
 	recent := time.Now().Add(-2 * time.Minute).Format(time.RFC3339Nano)
 	seedConversationData(t, redisServer, "conv-resume", ConversationData{
 		Conversation: ConversationRow{
@@ -415,6 +418,7 @@ func TestSalesCallBotPlanAppendsResumeMessage(t *testing.T) {
 			UserID:             "user-1",
 			BotType:            SalesCallBotType,
 			ResumedFromChunkID: &resumedID,
+			ResumeGracefully:   &gracefully,
 		},
 		Chunks: [][]any{
 			{"chunk-1", "user", "I was saying", false, nil},

@@ -2,9 +2,60 @@ package disha
 
 import (
 	"testing"
+	"time"
 
 	"github.com/jaideep329/talk-go/voicepipelinecore"
 )
+
+// TestBuildResumeSystemMessage pins fetch_conversation.py: a resume nudge
+// is emitted only when resume_gracefully is explicitly true (False/None
+// mean an explicit-chunkId rebuild — continue silently), picking the
+// within-window or after-window text by the resumed chunk's age.
+func TestBuildResumeSystemMessage(t *testing.T) {
+	now := time.Date(2026, 6, 10, 12, 0, 0, 0, time.UTC)
+	chunkID := "chunk-1"
+	boolPtr := func(v bool) *bool { return &v }
+	resumedChunk := func(age time.Duration) map[string]any {
+		return map[string]any{"created": now.Add(-age).Format(time.RFC3339Nano)}
+	}
+	cases := []struct {
+		name string
+		data *ConversationData
+		want string
+	}{
+		{"nil data", nil, ""},
+		{"no resumed chunk id", &ConversationData{
+			ResumedChunk: resumedChunk(time.Minute),
+		}, ""},
+		{"gracefully nil emits nothing", &ConversationData{
+			Conversation: ConversationRow{ResumedFromChunkID: &chunkID},
+			ResumedChunk: resumedChunk(time.Minute),
+		}, ""},
+		{"gracefully false emits nothing", &ConversationData{
+			Conversation: ConversationRow{ResumedFromChunkID: &chunkID, ResumeGracefully: boolPtr(false)},
+			ResumedChunk: resumedChunk(time.Minute),
+		}, ""},
+		{"gracefully true within window", &ConversationData{
+			Conversation: ConversationRow{ResumedFromChunkID: &chunkID, ResumeGracefully: boolPtr(true)},
+			ResumedChunk: resumedChunk(time.Minute),
+		}, resumeMessageGracefulWithinWindow},
+		{"gracefully true after window", &ConversationData{
+			Conversation: ConversationRow{ResumedFromChunkID: &chunkID, ResumeGracefully: boolPtr(true)},
+			ResumedChunk: resumedChunk(10 * time.Minute),
+		}, resumeMessageAfterWindow},
+		{"missing created timestamp emits nothing", &ConversationData{
+			Conversation: ConversationRow{ResumedFromChunkID: &chunkID, ResumeGracefully: boolPtr(true)},
+			ResumedChunk: map[string]any{},
+		}, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := buildResumeSystemMessage(tc.data, now); got != tc.want {
+				t.Fatalf("buildResumeSystemMessage = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
 
 // TestMessageFromChunkTuple pins the filter to sales_call.py: replay a
 // chunk iff it is not a debug log and has no (truthy) additional_data;

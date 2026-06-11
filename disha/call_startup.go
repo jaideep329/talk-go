@@ -303,6 +303,15 @@ func derefString(s *string) string {
 	return *s
 }
 
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
 func istLocation() *time.Location {
 	loc, err := time.LoadLocation("Asia/Kolkata")
 	if err != nil {

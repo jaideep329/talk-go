@@ -27,7 +27,7 @@ type PhoneticDict struct {
 }
 
 // NewPhoneticDictFromEnv constructs a PhoneticDict that reads the JSON
-// blob at s3://${PHONETIC_DICT_BUCKET or AWS_US_BUCKET_NAME}/${PHONETICS_DICT_KEY}.
+// blob at s3://${AWS_US_BUCKET_NAME}/${PHONETICS_DICT_KEY}.
 // Returns nil (with a log line) when env is incomplete so callers can
 // no-op gracefully.
 func NewPhoneticDictFromEnv(logger *log.Logger) *PhoneticDict {
@@ -38,9 +38,10 @@ func NewPhoneticDictFromEnv(logger *log.Logger) *PhoneticDict {
 		}
 		return nil
 	}
-	// The client resolves its own bucket from these env keys; GetObject
-	// is called with an empty bucket below so it uses that one.
-	client := NewS3GetClientFromEnv(logger, "PHONETIC_DICT_BUCKET", "AWS_US_BUCKET_NAME")
+	// The client resolves its own bucket from env; GetObject is called
+	// with an empty bucket below so it uses that one. The US bucket lives
+	// in AWS_US_REGION (us-east-1), not AWS_MAIN_REGION.
+	client := NewS3GetClientFromEnv(logger, "AWS_US_BUCKET_NAME", "AWS_US_REGION")
 	if client == nil {
 		return nil
 	}

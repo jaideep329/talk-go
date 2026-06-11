@@ -50,51 +50,57 @@ type S3Uploader struct {
 }
 
 func NewS3UploaderFromEnv(logger *log.Logger) JSONUploader {
-	uploader := newS3ClientFromEnv(logger, strings.TrimSpace(os.Getenv("AWS_BUCKET_NAME")), defaultS3UploadTimeout)
+	uploader := newS3ClientFromEnv(logger, os.Getenv("AWS_BUCKET_NAME"), os.Getenv("AWS_MAIN_REGION"), defaultS3UploadTimeout)
 	if uploader == nil {
-		if logger != nil {
-			logger.Println("disha: S3 debug log upload disabled; AWS env is incomplete")
-		}
+		reportS3EnvIncomplete(logger, "debug_log_upload_client", "AWS_BUCKET_NAME", "AWS_MAIN_REGION")
 		return nil
 	}
 	return uploader
 }
 
-// NewS3GetClientFromEnv returns a SigV4-signed GET client. The caller
-// passes the bucket they intend to read so we can share credentials
-// across reference buckets (e.g. AWS_US_BUCKET_NAME for phonetics).
-func NewS3GetClientFromEnv(logger *log.Logger, bucketEnvKeys ...string) S3GetClient {
-	bucket := strings.TrimSpace(firstNonEmptyString(envValues(bucketEnvKeys)...))
-	if bucket == "" {
-		if logger != nil {
-			logger.Println("disha: S3 GET client disabled; bucket env is empty")
-		}
-		return nil
-	}
-	client := newS3ClientFromEnv(logger, bucket, defaultS3DownloadTimeout)
+// NewS3GetClientFromEnv returns a SigV4-signed GET client for the
+// bucket/region env pair. The region env must hold the bucket's own
+// region — SigV4 and the virtual-host endpoint both encode it, and S3
+// answers 301 PermanentRedirect on a mismatch (e.g. AWS_US_BUCKET_NAME
+// lives in AWS_US_REGION, not AWS_MAIN_REGION).
+func NewS3GetClientFromEnv(logger *log.Logger, bucketEnvKey, regionEnvKey string) S3GetClient {
+	client := newS3ClientFromEnv(logger, os.Getenv(bucketEnvKey), os.Getenv(regionEnvKey), defaultS3DownloadTimeout)
 	if client == nil {
-		if logger != nil {
-			logger.Println("disha: S3 GET client disabled; AWS env is incomplete")
-		}
+		reportS3EnvIncomplete(logger, "get_client", bucketEnvKey, regionEnvKey)
 		return nil
 	}
 	return client
 }
 
-func envValues(keys []string) []string {
-	out := make([]string, 0, len(keys))
-	for _, k := range keys {
-		out = append(out, os.Getenv(k))
+// reportS3EnvIncomplete raises a Sentry event when an S3 client can't be
+// built from env — callers treat a nil client as "feature off" and would
+// otherwise silently skip S3 work the deployment was configured to do.
+func reportS3EnvIncomplete(logger *log.Logger, operation string, envKeys ...string) {
+	var missing []string
+	for _, key := range append(envKeys, "ACCESS_KEY_ID", "SECRET_KEY_ID") {
+		if strings.TrimSpace(os.Getenv(key)) == "" {
+			missing = append(missing, key)
+		}
 	}
-	return out
+	err := fmt.Errorf("disha: S3 %s disabled; missing env: %s", operation, strings.Join(missing, ", "))
+	sentryutil.Capture(sentryutil.Event{
+		Err:  err,
+		Tags: map[string]string{"component": "disha_s3", "operation": operation},
+		Details: map[string]any{
+			"missing_env": missing,
+		},
+	})
+	if logger != nil {
+		logger.Println(err.Error())
+	}
 }
 
-func newS3ClientFromEnv(logger *log.Logger, bucket string, timeout time.Duration) *S3Uploader {
+func newS3ClientFromEnv(logger *log.Logger, bucket, region string, timeout time.Duration) *S3Uploader {
 	client := &S3Uploader{
 		accessKey:  strings.TrimSpace(os.Getenv("ACCESS_KEY_ID")),
 		secretKey:  strings.TrimSpace(os.Getenv("SECRET_KEY_ID")),
-		region:     firstNonEmptyString(os.Getenv("AWS_MAIN_REGION"), os.Getenv("AWS_REGION")),
-		bucket:     bucket,
+		region:     strings.TrimSpace(region),
+		bucket:     strings.TrimSpace(bucket),
 		httpClient: &http.Client{Timeout: timeout},
 		logger:     logger,
 	}
@@ -407,13 +413,4 @@ func hmacSHA256(key, data []byte) []byte {
 	mac := hmac.New(sha256.New, key)
 	mac.Write(data)
 	return mac.Sum(nil)
-}
-
-func firstNonEmptyString(values ...string) string {
-	for _, value := range values {
-		if trimmed := strings.TrimSpace(value); trimmed != "" {
-			return trimmed
-		}
-	}
-	return ""
 }

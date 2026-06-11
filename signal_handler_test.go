@@ -118,8 +118,68 @@ func TestHandleShutdownSignalEnqueuesGracefulShutdownOnce(t *testing.T) {
 		kwargs["pod_name"] != "pod-1" {
 		t.Fatalf("enqueue body mismatch: %+v", requests[0])
 	}
+	if len(exitCodes) != 0 {
+		t.Fatalf("exit codes = %+v, want none; idle pod must stay alive until disha-backend deletes it", exitCodes)
+	}
+}
+
+func TestHandleShutdownSignalExitsWhenHostnameEmpty(t *testing.T) {
+	shutdownInitiated.Store(false)
+	gracefulShutdownCompleted.Store(false)
+	abruptShutdownReported.Store(false)
+	exitCodes := []int{}
+	previousExitProcess := exitProcess
+	exitProcess = func(code int) {
+		exitCodes = append(exitCodes, code)
+	}
+	t.Cleanup(func() {
+		shutdownInitiated.Store(false)
+		gracefulShutdownCompleted.Store(false)
+		abruptShutdownReported.Store(false)
+		exitProcess = previousExitProcess
+	})
+	t.Setenv("HOSTNAME", "")
+
+	handleShutdownSignal(syscall.SIGTERM)
+
 	if len(exitCodes) != 1 || exitCodes[0] != 0 {
 		t.Fatalf("exit codes = %+v, want [0]", exitCodes)
+	}
+}
+
+func TestHandleShutdownSignalExitsOnSigint(t *testing.T) {
+	shutdownInitiated.Store(false)
+	gracefulShutdownCompleted.Store(false)
+	abruptShutdownReported.Store(false)
+	exitCodes := []int{}
+	previousExitProcess := exitProcess
+	exitProcess = func(code int) {
+		exitCodes = append(exitCodes, code)
+	}
+	t.Cleanup(func() {
+		shutdownInitiated.Store(false)
+		gracefulShutdownCompleted.Store(false)
+		abruptShutdownReported.Store(false)
+		exitProcess = previousExitProcess
+	})
+
+	apiServer, apiRecorder := newSignalAPIServer(t)
+	previousDeps := dishaDeps
+	dishaDeps = disha.Deps{
+		API: disha.NewAPIClient(apiServer.URL, time.Second, nil),
+	}
+	t.Cleanup(func() {
+		dishaDeps = previousDeps
+	})
+	t.Setenv("HOSTNAME", "pod-1")
+
+	handleShutdownSignal(syscall.SIGINT)
+
+	if len(exitCodes) != 1 || exitCodes[0] != 0 {
+		t.Fatalf("exit codes = %+v, want [0]", exitCodes)
+	}
+	if len(apiRecorder.snapshot()) != 0 {
+		t.Fatalf("request count = %d, want 0 enqueues on SIGINT", len(apiRecorder.snapshot()))
 	}
 }
 

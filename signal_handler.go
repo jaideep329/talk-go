@@ -37,15 +37,22 @@ func handleShutdownSignal(sig os.Signal) {
 
 	markGracefulShutdownCompleted()
 	log.Printf("Received %s, checking worker status...\n", sig)
-	log.Println("Allowing graceful shutdown to proceed...")
+
+	if sig == syscall.SIGINT || sig == os.Interrupt {
+		sentry.Flush(2 * time.Second)
+		exitProcess(0)
+		return
+	}
 
 	podName := strings.TrimSpace(os.Getenv("HOSTNAME"))
 	if podName == "" {
 		log.Println("HOSTNAME is empty; skipping worker graceful shutdown enqueue")
-		exitForSignal(sig)
+		sentry.Flush(2 * time.Second)
+		exitProcess(0)
 		return
 	}
 
+	log.Println("Allowing graceful shutdown to proceed...")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := disha.EnqueueWorkerGracefulShutdown(ctx, dishaDeps, podName); err != nil {
@@ -59,22 +66,11 @@ func handleShutdownSignal(sig os.Signal) {
 		})
 		log.Printf("failed to enqueue graceful shutdown for pod=%s: %v\n", podName, err)
 	}
-	exitForSignal(sig)
-}
 
-func exitForSignal(sig os.Signal) {
-	if sig == syscall.SIGINT || sig == os.Interrupt {
-		sentry.Flush(2 * time.Second)
-		exitProcess(0)
-		return
-	}
-	if sig == syscall.SIGTERM {
-		active, reserved := worker.snapshot()
-		if active || reserved {
-			log.Println("worker is active or reserved; keeping process alive for graceful shutdown")
-			return
-		}
-		sentry.Flush(2 * time.Second)
-		exitProcess(0)
-	}
+	// Never exit on SIGTERM, even when idle (mirrors the Python worker's
+	// sigterm_handler): disha-backend clears this pod's gkeworkermachines row
+	// before deleting the pod. Exiting here inverts that order and leaves a
+	// dead pod reservable from the available pool until the shutdown job is
+	// consumed, which times out call forwarding.
+	log.Println("keeping process alive; disha-backend deletes the pod after clearing its machine record")
 }

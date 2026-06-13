@@ -51,8 +51,8 @@ func TestWorkerPodRegistrationFromEnvSkipsLocalWhenIncomplete(t *testing.T) {
 
 func TestHandleHasActiveSession(t *testing.T) {
 	resetWorkerForTest(t)
-	if !worker.tryStart() {
-		t.Fatal("tryStart returned false")
+	if outcome, _ := worker.claim("conv-active"); outcome != claimGranted {
+		t.Fatal("claim did not grant idle worker")
 	}
 
 	rec := httptest.NewRecorder()
@@ -110,8 +110,8 @@ func TestHandleCreateWorkerRoomRejectsMissingFields(t *testing.T) {
 
 func TestHandleCreateWorkerRoomReturnsConflictWhenActive(t *testing.T) {
 	resetWorkerForTest(t)
-	if !worker.tryStart() {
-		t.Fatal("tryStart returned false")
+	if outcome, _ := worker.claim("conv-existing"); outcome != claimGranted {
+		t.Fatal("claim did not grant idle worker")
 	}
 
 	body := `{"room_url":"https://room.daily.co/test","room_name":"test","token":"user-token","conversation_id":"conv-1","bot_worker_type":"sales_call"}`
@@ -124,5 +124,35 @@ func TestHandleCreateWorkerRoomReturnsConflictWhenActive(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "Worker machine already has an active session") {
 		t.Fatalf("body = %q, want conflict detail", rec.Body.String())
+	}
+	// The conflicting conversation must be reported so the forwarder can tell a
+	// genuine conflict apart from a retry of the in-flight conversation.
+	if !strings.Contains(rec.Body.String(), "conv-existing") {
+		t.Fatalf("body = %q, want active conversation id", rec.Body.String())
+	}
+}
+
+func TestHandleCreateWorkerRoomTreatsRetriedConversationAsSuccess(t *testing.T) {
+	resetWorkerForTest(t)
+	if outcome, _ := worker.claim("conv-1"); outcome != claimGranted {
+		t.Fatal("claim did not grant idle worker")
+	}
+
+	// A forwarder retry for the conversation already in flight must succeed
+	// rather than conflict, so the call is not dropped.
+	body := `{"room_url":"https://room.daily.co/test","room_name":"test","token":"user-token","conversation_id":"conv-1","bot_worker_type":"sales_call"}`
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/bot/create_worker_room", strings.NewReader(body))
+	handleCreateWorkerRoom(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	var resp map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("Unmarshal response: %v", err)
+	}
+	if resp["status"] != "success" {
+		t.Fatalf("status = %q, want success", resp["status"])
 	}
 }

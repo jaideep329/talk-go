@@ -187,7 +187,7 @@ func TestHandleShutdownSignalKeepsActiveWorkerAlive(t *testing.T) {
 	shutdownInitiated.Store(false)
 	gracefulShutdownCompleted.Store(false)
 	abruptShutdownReported.Store(false)
-	if !worker.tryStart() {
+	if outcome, _ := worker.claim("conv-shutdown"); outcome != claimGranted {
 		t.Fatal("worker should start from idle state")
 	}
 	exitCodes := []int{}

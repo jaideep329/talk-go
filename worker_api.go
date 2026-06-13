@@ -15,20 +15,43 @@ import (
 )
 
 type workerRuntime struct {
-	mu       sync.Mutex
-	active   bool
-	reserved bool
-	task     *voicepipelinecore.PipelineTask
+	mu                   sync.Mutex
+	active               bool
+	reserved             bool
+	task                 *voicepipelinecore.PipelineTask
+	activeConversationID string
 }
 
-func (w *workerRuntime) tryStart() bool {
+// claimOutcome reports the result of attempting to claim the worker for a
+// conversation. It distinguishes a fresh claim from a retried request for the
+// conversation already in flight (idempotent) and from a genuine conflict with
+// a different conversation.
+type claimOutcome int
+
+const (
+	claimGranted   claimOutcome = iota // worker was idle; the caller now owns it
+	claimDuplicate                     // already running this same conversation
+	claimConflict                      // busy with a different conversation
+)
+
+// claim atomically takes ownership of the worker for conversationID. It mirrors
+// the Python CreateWorkerRoom logic that claims the worker before the first
+// await and treats a retried request for the in-flight conversation as a
+// success rather than spawning a second bot. The returned id is the
+// conversation currently holding the worker (useful when the outcome is a
+// conflict).
+func (w *workerRuntime) claim(conversationID string) (claimOutcome, string) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.active {
-		return false
+		if w.activeConversationID == conversationID {
+			return claimDuplicate, w.activeConversationID
+		}
+		return claimConflict, w.activeConversationID
 	}
 	w.active = true
-	return true
+	w.activeConversationID = conversationID
+	return claimGranted, conversationID
 }
 
 func (w *workerRuntime) setTask(task *voicepipelinecore.PipelineTask) {
@@ -43,6 +66,7 @@ func (w *workerRuntime) finish() {
 	w.active = false
 	w.reserved = false
 	w.task = nil
+	w.activeConversationID = ""
 }
 
 func (w *workerRuntime) markReserved() {
@@ -71,11 +95,33 @@ func handleCreateWorkerRoom(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSONRequest(w, r, &req) {
 		return
 	}
-	if !worker.tryStart() {
-		http.Error(w, "Worker machine already has an active session", http.StatusConflict)
+
+	outcome, activeID := worker.claim(req.ConversationID)
+	switch outcome {
+	case claimDuplicate:
+		// Retried request for the conversation we are already handling — the
+		// forwarder re-sent it after a slow response. Treat as success instead
+		// of returning a conflict that would drop the call.
+		log.Printf("duplicate create_worker_room request for conversation=%s, treating as success\n", req.ConversationID)
+		writeJSON(w, http.StatusOK, map[string]string{
+			"status":   "success",
+			"room_url": req.RoomURL,
+		})
+		return
+	case claimConflict:
+		// Busy with a different conversation. Report the active conversation id
+		// so the forwarder can tell a genuine conflict apart from a retry. The
+		// {"detail": {...}} envelope matches the FastAPI worker's 409 body.
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"detail": map[string]any{
+				"message":                "Worker machine already has an active session",
+				"active_conversation_id": activeID,
+			},
+		})
 		return
 	}
 
+	// claimGranted: we now own the worker — launch the bot.
 	go runWorkerRoom(req)
 	writeJSON(w, http.StatusOK, map[string]string{
 		"status":   "success",
